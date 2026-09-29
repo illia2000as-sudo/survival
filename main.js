@@ -19,7 +19,8 @@ addEventListener('resize', () => {
   renderer.setSize(innerWidth, innerHeight);
 });
 
-scene.add(new THREE.HemisphereLight(0xffffff, 0x445544, 1.2));
+const hemi = new THREE.HemisphereLight(0xffffff, 0x445544, 1.2);
+scene.add(hemi);
 const sun = new THREE.DirectionalLight(0xffffff, 1.5);
 sun.position.set(20, 40, 10);
 scene.add(sun);
@@ -132,6 +133,19 @@ gun.add(barrel, grip);
 gun.position.set(0.3, -0.25, -0.6);
 camera.add(gun);
 
+// Фонарик (клавиша F)
+const flash = new THREE.SpotLight(0xfff2cc, 0, 45, Math.PI / 6, 0.4, 1);
+flash.position.set(0, 0, 0);
+flash.target.position.set(0, 0, -5);
+camera.add(flash, flash.target);
+let flashOn = false;
+
+// Время суток: сутки длятся 4 минуты реального времени
+let gameHour = 8;
+const dayColor = new THREE.Color(0x8a9a8a);
+const nightColor = new THREE.Color(0x04060a);
+let daylight = 1;
+
 // Патроны на земле
 const ammoBoxes = [];
 function spawnAmmoBox(x, z) {
@@ -188,6 +202,7 @@ addEventListener('keydown', e => {
   if (e.code === 'Digit1') useItem('food');
   if (e.code === 'Digit2') useItem('water');
   if (e.code === 'Digit3') useItem('medkit');
+  if (e.code === 'KeyF') { flashOn = !flashOn; flash.intensity = flashOn ? 25 : 0; }
 });
 addEventListener('keyup', e => keys[e.code] = false);
 renderer.domElement.addEventListener('click', () => {
@@ -231,6 +246,17 @@ function attack() {
 const clock = new THREE.Clock();
 function loop() {
   const dt = Math.min(clock.getDelta(), 0.1);
+
+  // День и ночь
+  gameHour = (gameHour + dt * 0.1) % 24;
+  const ang = (gameHour - 6) / 24 * Math.PI * 2;
+  daylight = Math.max(0, Math.min(1, (Math.sin(ang) + 0.2) / 0.6));
+  sun.position.set(Math.cos(ang) * 40, Math.max(5, Math.sin(ang) * 40), 10);
+  sun.intensity = 1.5 * daylight;
+  hemi.intensity = 0.12 + 1.08 * daylight;
+  scene.background.copy(nightColor).lerp(dayColor, daylight);
+  scene.fog.color.copy(scene.background);
+  scene.fog.far = 35 + 45 * daylight;
 
   if (health > 0) {
     const speed = (keys.ShiftLeft ? 8 : 4.5) * dt;
@@ -285,7 +311,7 @@ function loop() {
     const dist = to.length();
     if (dist < 35 && dist > 1.2) {
       to.normalize();
-      z.mesh.position.addScaledVector(to, 2 * dt);
+      z.mesh.position.addScaledVector(to, (2 + (1 - daylight) * 1.0) * dt); // ночью быстрее
       z.mesh.rotation.y = Math.atan2(to.x, to.z);
       resolveCollisions(z.mesh.position, 0.6);
     }
@@ -301,7 +327,9 @@ function loop() {
       `Здоровье: ${Math.ceil(health)}   Еда: ${Math.ceil(hunger)}   Вода: ${Math.ceil(thirst)}\n` +
       `Убито: ${kills}   Патроны: ${reloading ? 'перезарядка...' : ammo} / ${reserve}`;
   }
-  hotbar.textContent = `[1] Еда x${inv.food}    [2] Вода x${inv.water}    [3] Аптечка x${inv.medkit}`;
+  const hh = String(Math.floor(gameHour)).padStart(2, '0');
+  const mm = String(Math.floor((gameHour % 1) * 60)).padStart(2, '0');
+  hotbar.textContent = `[1] Еда x${inv.food}    [2] Вода x${inv.water}    [3] Аптечка x${inv.medkit}    [F] Фонарик ${flashOn ? 'вкл' : 'выкл'}    ${hh}:${mm}`;
 
   renderer.render(scene, camera);
   requestAnimationFrame(loop);
