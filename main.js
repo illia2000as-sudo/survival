@@ -357,8 +357,80 @@ function updateBuild(dt) {
   }
 }
 
+// --- Меню с вкладками: Инвентарь / Крафт / Стройка (клавиша Tab) ---
+let menuOpen = false, menuTab = 'inv';
+const menu = document.createElement('div');
+menu.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.65);display:none;align-items:center;justify-content:center;font:18px monospace;color:#fff;z-index:10';
+document.body.appendChild(menu);
+
+const btn = (label, act, on = true, active = false) =>
+  `<button ${on ? `data-act="${act}"` : 'disabled'} style="font:inherit;color:#fff;padding:8px 14px;margin:2px;border:2px solid ${active ? '#c8e07a' : '#5a6b45'};border-radius:6px;background:${active ? '#3d4a2a' : '#2a3324'};cursor:${on ? 'pointer' : 'not-allowed'};opacity:${on ? 1 : 0.4}">${label}</button>`;
+const row = (name, right) =>
+  `<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid #3a4530"><span>${name}</span><span>${right}</span></div>`;
+const bar = (label, v, color) =>
+  `<div style="margin:4px 0">${label}: ${Math.ceil(v)}<div style="height:10px;background:#111;border-radius:5px"><div style="height:10px;width:${Math.max(0, Math.min(100, v))}%;background:${color};border-radius:5px"></div></div></div>`;
+
+function renderMenu() {
+  const tabs = [['inv', 'Инвентарь'], ['craft', 'Крафт'], ['build', 'Стройка']];
+  let body = '';
+  if (menuTab === 'inv') {
+    body += bar('Здоровье', health, '#d64040') + bar('Еда', hunger, '#d19a3a') + bar('Вода', thirst, '#3a8fd6');
+    body += '<div style="margin-top:12px"></div>';
+    body += row('Еда', `x${inv.food} ` + btn('Съесть', 'use:food', inv.food > 0 && hunger < 100));
+    body += row('Вода', `x${inv.water} ` + btn('Выпить', 'use:water', inv.water > 0 && thirst < 100));
+    body += row('Аптечка', `x${inv.medkit} ` + btn('Лечиться', 'use:medkit', inv.medkit > 0 && health < 100));
+    body += row('Дерево', `x${inv.wood}`);
+    body += row('Лом', `x${inv.scrap}`);
+    body += row('Патроны', `${ammo} в обойме, ${reserve} в запасе`);
+  }
+  if (menuTab === 'craft') {
+    body += row('Патроны x6 <small>(2 лома)</small>', btn('Создать', 'craft:ammo', inv.scrap >= 2));
+    body += row('Аптечка <small>(4 лома)</small>', btn('Создать', 'craft:medkit', inv.scrap >= 4));
+    body += `<div style="margin-top:12px;opacity:.8">У тебя: лом x${inv.scrap}. Лом лежит на земле и в домах.</div>`;
+  }
+  if (menuTab === 'build') {
+    for (const k of pieceKeys) {
+      body += row(`${pieces[k].name} <small>(${pieces[k].cost} дерева)</small>`, btn('Строить', `build:${k}`, true));
+    }
+    body += `<div style="margin-top:12px;opacity:.8">У тебя: дерево x${inv.wood}. Дерево добывается рубкой деревьев (клавиша E).</div>`;
+  }
+  menu.innerHTML =
+    `<div style="width:min(680px,92vw);background:#1d231c;border:2px solid #5a6b45;border-radius:10px;padding:18px">` +
+    `<div style="margin-bottom:12px">${tabs.map(([id, n]) => btn(n, 'tab:' + id, true, menuTab === id)).join('')}</div>` +
+    body +
+    `<div style="margin-top:14px;opacity:.7;font-size:14px">[Tab] или [Esc] - закрыть меню. Игра на паузе.</div></div>`;
+}
+
+function toggleMenu(open) {
+  if (health <= 0) return;
+  menuOpen = open;
+  menu.style.display = open ? 'flex' : 'none';
+  if (open) {
+    document.exitPointerLock();
+    renderMenu();
+  } else {
+    try {
+      const p = renderer.domElement.requestPointerLock();
+      if (p && p.catch) p.catch(() => {});
+    } catch (err) { /* клик по игре захватит мышь */ }
+  }
+}
+
+menu.addEventListener('click', e => {
+  const t = e.target.closest('[data-act]');
+  if (!t) return;
+  const [act, arg] = t.dataset.act.split(':');
+  if (act === 'tab') menuTab = arg;
+  if (act === 'use') useItem(arg);
+  if (act === 'craft') craft(arg);
+  if (act === 'build') { selPiece = arg; buildMode = true; toggleMenu(false); return; }
+  renderMenu();
+});
+
 // Управление
 addEventListener('keydown', e => {
+  if (e.code === 'Tab') { e.preventDefault(); toggleMenu(!menuOpen); return; }
+  if (menuOpen) { if (e.code === 'Escape') toggleMenu(false); return; }
   keys[e.code] = true;
   if (e.code === 'KeyB') buildMode = !buildMode;
   if (buildMode) {
@@ -391,7 +463,7 @@ addEventListener('mousemove', e => {
 
 // Перезарядка на клавишу R
 addEventListener('keydown', e => {
-  if (e.code !== 'KeyR' || reloading || ammo >= 12 || reserve <= 0) return;
+  if (e.code !== 'KeyR' || menuOpen || reloading || ammo >= 12 || reserve <= 0) return;
   reloading = true;
   setTimeout(() => {
     const need = 12 - ammo, take = Math.min(need, reserve);
@@ -419,7 +491,8 @@ function attack() {
 // --- Цикл ---
 const clock = new THREE.Clock();
 function loop() {
-  const dt = Math.min(clock.getDelta(), 0.1);
+  const rawDt = clock.getDelta();
+  const dt = menuOpen ? 0 : Math.min(rawDt, 0.1); // в меню игра на паузе
 
   // День и ночь
   gameHour = (gameHour + dt * 0.1) % 24;
@@ -491,7 +564,7 @@ function loop() {
       resolveCollisions(z.mesh.position, 0.6);
     }
     z.cooldown -= dt;
-    if (dist <= 1.5 && z.cooldown <= 0 && health > 0) { health -= 10; z.cooldown = 1; }
+    if (dist <= 1.5 && z.cooldown <= 0 && health > 0 && !menuOpen) { health -= 10; z.cooldown = 1; }
   }
 
   if (health <= 0) {
@@ -506,8 +579,8 @@ function loop() {
   const mm = String(Math.floor((gameHour % 1) * 60)).padStart(2, '0');
   const line1 = buildMode
     ? 'СТРОЙКА: ' + pieceKeys.map((k, i) => `${selPiece === k ? '>' : ' '}[${i + 1}] ${pieces[k].name} (${pieces[k].cost} дер.)`).join('  ') + '\n[Q] поворот   [клик] поставить   [V] убрать   [B] выйти'
-    : `[1] Еда x${inv.food}    [2] Вода x${inv.water}    [3] Аптечка x${inv.medkit}    [F] Фонарик ${flashOn ? 'вкл' : 'выкл'}    ${hh}:${mm}`;
-  hotbar.textContent = line1 + `\nДерево: ${inv.wood}   Лом: ${inv.scrap}   [E] рубить   [B] строить   [Z] патроны (2 лома)   [X] аптечка (4 лома)`;
+    : `[1] Еда x${inv.food}    [2] Вода x${inv.water}    [3] Аптечка x${inv.medkit}    [F] Фонарик ${flashOn ? 'вкл' : 'выкл'}    [Tab] Меню    ${hh}:${mm}`;
+  hotbar.textContent = line1 + `\nДерево: ${inv.wood}   Лом: ${inv.scrap}   [E] рубить   [B] строить`;
 
   renderer.render(scene, camera);
   requestAnimationFrame(loop);
