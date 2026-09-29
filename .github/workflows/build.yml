@@ -1,16 +1,32 @@
-name: Build
-on: [push, workflow_dispatch]
+nname: Build
+
+on:
+  push:
+  workflow_dispatch:
+
+# Если запушить два раза подряд, старая сборка отменяется
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - run: npm install
-      - run: npx electron-builder --win portable --publish never
+
+      - name: Установка зависимостей
+        run: npm install
+
+      - name: Сборка exe
+        run: npx electron-builder --win portable --publish never
+
+      # Номер сборки в имени: game-7, game-8... чем больше число, тем новее
       - uses: actions/upload-artifact@v4
         with:
-          name: game
+          name: game-${{ github.run_number }}
           path: dist/*.exe
