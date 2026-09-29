@@ -32,26 +32,67 @@ const ground = new THREE.Mesh(
 ground.rotation.x = -Math.PI / 2;
 scene.add(ground);
 
-const box = (w, h, d, color, x, y, z) => {
+// Столкновения: colliders - плоские коробки (вид сверху), blockers - то, что останавливает пули
+const colliders = [];
+const blockers = [];
+
+const box = (w, h, d, color, x, y, z, solid = false) => {
   const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), new THREE.MeshStandardMaterial({ color }));
   m.position.set(x, y, z);
   scene.add(m);
+  if (solid) {
+    colliders.push({ minX: x - w / 2, maxX: x + w / 2, minZ: z - d / 2, maxZ: z + d / 2 });
+    blockers.push(m);
+  }
   return m;
 };
 
-// Деревья
+// Выталкивает позицию из всех препятствий (r - радиус тела)
+function resolveCollisions(pos, r) {
+  for (const c of colliders) {
+    const px = Math.max(c.minX, Math.min(pos.x, c.maxX));
+    const pz = Math.max(c.minZ, Math.min(pos.z, c.maxZ));
+    const dx = pos.x - px, dz = pos.z - pz;
+    const d2 = dx * dx + dz * dz;
+    if (d2 >= r * r) continue;
+    if (d2 > 0) {
+      const d = Math.sqrt(d2), k = (r - d) / d;
+      pos.x += dx * k;
+      pos.z += dz * k;
+    } else {
+      // центр внутри коробки: выталкиваем через ближайшую сторону
+      const left = pos.x - c.minX, right = c.maxX - pos.x, up = pos.z - c.minZ, down = c.maxZ - pos.z;
+      const m = Math.min(left, right, up, down);
+      if (m === left) pos.x = c.minX - r;
+      else if (m === right) pos.x = c.maxX + r;
+      else if (m === up) pos.z = c.minZ - r;
+      else pos.z = c.maxZ + r;
+    }
+  }
+}
+
+// Деревья (ствол твёрдый, крона нет)
 for (let i = 0; i < 150; i++) {
   const x = (Math.random() - 0.5) * 300, z = (Math.random() - 0.5) * 300;
   if (Math.abs(x) < 8 && Math.abs(z) < 8) continue;
-  box(0.6, 3, 0.6, 0x5b3a1e, x, 1.5, z);
+  box(0.6, 3, 0.6, 0x5b3a1e, x, 1.5, z, true);
   box(3, 2.5, 3, 0x2f5a2a, x, 4, z);
 }
-// Заброшенные дома
+
+// Дома: 4 стены, дверь с южной стороны (+Z), крыша
+const housePositions = [];
 for (let i = 0; i < 8; i++) {
   const x = (Math.random() - 0.5) * 200, z = (Math.random() - 0.5) * 200;
   if (Math.abs(x) < 15 && Math.abs(z) < 15) continue;
-  box(8, 4, 8, 0x8a8074, x, 2, z);
-  box(9, 0.6, 9, 0x4a3a35, x, 4.3, z);
+  const wall = 0x8a8074;
+  box(8, 4, 0.4, wall, x, 2, z - 3.8, true);          // северная стена
+  box(0.4, 4, 8, wall, x - 3.8, 2, z, true);          // западная стена
+  box(0.4, 4, 8, wall, x + 3.8, 2, z, true);          // восточная стена
+  box(3, 4, 0.4, wall, x - 2.5, 2, z + 3.8, true);    // южная стена, левая часть
+  box(3, 4, 0.4, wall, x + 2.5, 2, z + 3.8, true);    // южная стена, правая часть
+  box(9, 0.6, 9, 0x4a3a35, x, 4.3, z, false);         // крыша
+  blockers.push(scene.children[scene.children.length - 1]);
+  housePositions.push({ x, z });
 }
 
 // --- Зомби ---
@@ -67,6 +108,7 @@ function spawnZombie() {
   g.add(body, head, legs);
   const a = Math.random() * Math.PI * 2, r = 25 + Math.random() * 40;
   g.position.set(Math.cos(a) * r, 0, Math.sin(a) * r);
+  resolveCollisions(g.position, 0.6);
   scene.add(g);
   zombies.push({ mesh: g, hp: 3, cooldown: 0 });
 }
@@ -92,9 +134,9 @@ camera.add(gun);
 
 // Патроны на земле
 const ammoBoxes = [];
-function spawnAmmoBox() {
+function spawnAmmoBox(x, z) {
   const m = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.3, 0.35), new THREE.MeshStandardMaterial({ color: 0xd4a017 }));
-  m.position.set((Math.random() - 0.5) * 200, 0.15, (Math.random() - 0.5) * 200);
+  m.position.set(x ?? (Math.random() - 0.5) * 200, 0.15, z ?? (Math.random() - 0.5) * 200);
   scene.add(m);
   ammoBoxes.push(m);
 }
@@ -103,14 +145,22 @@ for (let i = 0; i < 15; i++) spawnAmmoBox();
 // Предметы на земле: еда (коричневая), вода (синяя), аптечка (белая)
 const itemColors = { food: 0xb5651d, water: 0x3a8fd6, medkit: 0xf2f2f2 };
 const items = [];
-function spawnItem(type) {
+function spawnItem(type, x, z) {
   const m = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.4, 0.4), new THREE.MeshStandardMaterial({ color: itemColors[type] }));
-  m.position.set((Math.random() - 0.5) * 200, 0.3, (Math.random() - 0.5) * 200);
+  m.position.set(x ?? (Math.random() - 0.5) * 200, 0.3, z ?? (Math.random() - 0.5) * 200);
   scene.add(m);
   items.push({ mesh: m, type });
 }
 for (let i = 0; i < 10; i++) { spawnItem('food'); spawnItem('water'); }
 for (let i = 0; i < 5; i++) spawnItem('medkit');
+
+// Лут внутри каждого дома
+for (const h of housePositions) {
+  spawnItem('medkit', h.x - 2, h.z - 2);
+  spawnItem('food', h.x + 2, h.z - 2);
+  spawnItem('water', h.x, h.z - 2.5);
+  spawnAmmoBox(h.x + 2, h.z + 1);
+}
 
 // HUD
 const hud = document.createElement('div');
@@ -160,7 +210,7 @@ addEventListener('keydown', e => {
   }, 1500);
 });
 
-// Стрельба
+// Стрельба (пули останавливаются о стены и деревья)
 const raycaster = new THREE.Raycaster();
 function attack() {
   if (health <= 0 || reloading || ammo <= 0) return;
@@ -168,11 +218,13 @@ function attack() {
   gun.position.z += 0.1; // отдача
 
   raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
-  const hits = raycaster.intersectObjects(zombies.map(z => z.mesh), true);
-  if (hits.length) {
-    const z = zombies.find(z => z.mesh === hits[0].object.parent);
-    if (z) z.hp -= hits[0].point.y > 1.8 ? 2 : 1; // в голову урон x2
-  }
+  const zHits = raycaster.intersectObjects(zombies.map(z => z.mesh), true);
+  if (!zHits.length) return;
+  const wallHits = raycaster.intersectObjects(blockers, false);
+  if (wallHits.length && wallHits[0].distance < zHits[0].distance) return; // пуля попала в стену
+
+  const z = zombies.find(z => z.mesh === zHits[0].object.parent);
+  if (z) z.hp -= zHits[0].point.y > 1.8 ? 2 : 1; // в голову урон x2
 }
 
 // --- Цикл ---
@@ -188,6 +240,7 @@ function loop() {
     if (keys.KeyS) camera.position.addScaledVector(fwd, -speed);
     if (keys.KeyD) camera.position.addScaledVector(right, speed);
     if (keys.KeyA) camera.position.addScaledVector(right, -speed);
+    resolveCollisions(camera.position, 0.4);
 
     // Голод и жажда
     hunger = Math.max(0, hunger - 0.4 * dt);
@@ -202,7 +255,8 @@ function loop() {
 
   // Подбор патронов
   for (let i = ammoBoxes.length - 1; i >= 0; i--) {
-    if (ammoBoxes[i].position.distanceTo(camera.position) < 2) {
+    const p = ammoBoxes[i].position;
+    if (Math.hypot(p.x - camera.position.x, p.z - camera.position.z) < 1.5) {
       reserve += 12;
       scene.remove(ammoBoxes[i]);
       ammoBoxes.splice(i, 1);
@@ -213,7 +267,8 @@ function loop() {
   // Подбор еды, воды, аптечек
   for (let i = items.length - 1; i >= 0; i--) {
     items[i].mesh.rotation.y += dt; // предметы медленно вращаются
-    if (items[i].mesh.position.distanceTo(camera.position) < 2) {
+    const p = items[i].mesh.position;
+    if (Math.hypot(p.x - camera.position.x, p.z - camera.position.z) < 1.5) {
       const type = items[i].type;
       inv[type]++;
       scene.remove(items[i].mesh);
@@ -232,6 +287,7 @@ function loop() {
       to.normalize();
       z.mesh.position.addScaledVector(to, 2 * dt);
       z.mesh.rotation.y = Math.atan2(to.x, to.z);
+      resolveCollisions(z.mesh.position, 0.6);
     }
     z.cooldown -= dt;
     if (dist <= 1.5 && z.cooldown <= 0 && health > 0) { health -= 10; z.cooldown = 1; }
