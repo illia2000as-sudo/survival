@@ -8,6 +8,7 @@ scene.fog = new THREE.Fog(0x8a9a8a, 10, 80);
 const camera = new THREE.PerspectiveCamera(75, innerWidth / innerHeight, 0.1, 200);
 camera.position.set(0, 1.7, 0);
 camera.rotation.order = 'YXZ';
+scene.add(camera); // нужно, чтобы оружие в руках было видно
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(innerWidth, innerHeight);
@@ -73,7 +74,29 @@ for (let i = 0; i < 12; i++) spawnZombie();
 
 // --- Игрок ---
 let health = 100, yaw = 0, pitch = 0, kills = 0;
+let ammo = 12, reserve = 24, reloading = false;
 const keys = {};
+
+// Пистолет в руках (прикреплён к камере)
+const gun = new THREE.Group();
+const barrel = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.1, 0.4), new THREE.MeshStandardMaterial({ color: 0x222222 }));
+const grip = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.18, 0.1), new THREE.MeshStandardMaterial({ color: 0x4a2f1a }));
+grip.position.set(0, -0.12, 0.12);
+gun.add(barrel, grip);
+gun.position.set(0.3, -0.25, -0.6);
+camera.add(gun);
+
+// Патроны на земле
+const ammoBoxes = [];
+function spawnAmmoBox() {
+  const m = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.3, 0.35), new THREE.MeshStandardMaterial({ color: 0xd4a017 }));
+  m.position.set((Math.random() - 0.5) * 200, 0.15, (Math.random() - 0.5) * 200);
+  scene.add(m);
+  ammoBoxes.push(m);
+}
+for (let i = 0; i < 15; i++) spawnAmmoBox();
+
+// HUD
 const hud = document.createElement('div');
 hud.style.cssText = 'position:fixed;top:10px;left:10px;color:#fff;font:20px monospace;text-shadow:1px 1px 3px #000';
 document.body.appendChild(hud);
@@ -82,6 +105,7 @@ cross.textContent = '+';
 cross.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);color:#fff;font:24px monospace';
 document.body.appendChild(cross);
 
+// Управление
 addEventListener('keydown', e => keys[e.code] = true);
 addEventListener('keyup', e => keys[e.code] = false);
 renderer.domElement.addEventListener('click', () => {
@@ -94,15 +118,28 @@ addEventListener('mousemove', e => {
   pitch = Math.max(-1.5, Math.min(1.5, pitch - e.movementY * 0.002));
 });
 
-// Удар: бьём зомби перед собой
+// Перезарядка на клавишу R
+addEventListener('keydown', e => {
+  if (e.code !== 'KeyR' || reloading || ammo >= 12 || reserve <= 0) return;
+  reloading = true;
+  setTimeout(() => {
+    const need = 12 - ammo, take = Math.min(need, reserve);
+    ammo += take; reserve -= take; reloading = false;
+  }, 1500);
+});
+
+// Стрельба
+const raycaster = new THREE.Raycaster();
 function attack() {
-  const fwd = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw));
-  for (const z of zombies) {
-    const to = z.mesh.position.clone().sub(camera.position).setY(0);
-    if (to.length() < 3 && to.normalize().dot(fwd) > 0.7) {
-      z.hp--;
-      z.mesh.position.addScaledVector(fwd, 1);
-    }
+  if (health <= 0 || reloading || ammo <= 0) return;
+  ammo--;
+  gun.position.z += 0.1; // отдача
+
+  raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
+  const hits = raycaster.intersectObjects(zombies.map(z => z.mesh), true);
+  if (hits.length) {
+    const z = zombies.find(z => z.mesh === hits[0].object.parent);
+    if (z) z.hp -= hits[0].point.y > 1.8 ? 2 : 1; // в голову урон x2
   }
 }
 
@@ -122,6 +159,20 @@ function loop() {
   }
   camera.rotation.set(pitch, yaw, 0);
 
+  // Оружие возвращается на место после отдачи
+  gun.position.z += (-0.6 - gun.position.z) * 12 * dt;
+
+  // Подбор патронов
+  for (let i = ammoBoxes.length - 1; i >= 0; i--) {
+    if (ammoBoxes[i].position.distanceTo(camera.position) < 2) {
+      reserve += 12;
+      scene.remove(ammoBoxes[i]);
+      ammoBoxes.splice(i, 1);
+      spawnAmmoBox();
+    }
+  }
+
+  // Зомби
   for (let i = zombies.length - 1; i >= 0; i--) {
     const z = zombies[i];
     if (z.hp <= 0) { scene.remove(z.mesh); zombies.splice(i, 1); kills++; spawnZombie(); continue; }
@@ -137,7 +188,7 @@ function loop() {
   }
 
   hud.textContent = health > 0
-    ? `Здоровье: ${health}   Убито: ${kills}`
+    ? `Здоровье: ${health}   Убито: ${kills}   Патроны: ${reloading ? 'перезарядка...' : ammo} / ${reserve}`
     : `Ты умер. Убито: ${kills}. Нажми F5, чтобы начать заново`;
   renderer.render(scene, camera);
   requestAnimationFrame(loop);
