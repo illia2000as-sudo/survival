@@ -73,11 +73,14 @@ function resolveCollisions(pos, r) {
 }
 
 // Деревья (ствол твёрдый, крона нет)
+const trees = []; // деревья, которые можно рубить
 for (let i = 0; i < 150; i++) {
   const x = (Math.random() - 0.5) * 300, z = (Math.random() - 0.5) * 300;
   if (Math.abs(x) < 8 && Math.abs(z) < 8) continue;
-  box(0.6, 3, 0.6, 0x5b3a1e, x, 1.5, z, true);
-  box(3, 2.5, 3, 0x2f5a2a, x, 4, z);
+  const trunk = box(0.6, 3, 0.6, 0x5b3a1e, x, 1.5, z, true);
+  const collider = colliders[colliders.length - 1];
+  const crown = box(3, 2.5, 3, 0x2f5a2a, x, 4, z);
+  trees.push({ trunk, crown, collider, hp: 4 });
 }
 
 // Дома: 4 стены, дверь с южной стороны (+Z), крыша
@@ -122,7 +125,7 @@ let ammo = 12, reserve = 24, reloading = false;
 const keys = {};
 
 // Инвентарь: сколько предметов у игрока
-const inv = { food: 0, water: 0, medkit: 0 };
+const inv = { food: 0, water: 0, medkit: 0, wood: 0, scrap: 0 };
 
 // Пистолет в руках (прикреплён к камере)
 const gun = new THREE.Group();
@@ -157,7 +160,7 @@ function spawnAmmoBox(x, z) {
 for (let i = 0; i < 15; i++) spawnAmmoBox();
 
 // Предметы на земле: еда (коричневая), вода (синяя), аптечка (белая)
-const itemColors = { food: 0xb5651d, water: 0x3a8fd6, medkit: 0xf2f2f2 };
+const itemColors = { food: 0xb5651d, water: 0x3a8fd6, medkit: 0xf2f2f2, scrap: 0x8a8a92 };
 const items = [];
 function spawnItem(type, x, z) {
   const m = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.4, 0.4), new THREE.MeshStandardMaterial({ color: itemColors[type] }));
@@ -167,6 +170,7 @@ function spawnItem(type, x, z) {
 }
 for (let i = 0; i < 10; i++) { spawnItem('food'); spawnItem('water'); }
 for (let i = 0; i < 5; i++) spawnItem('medkit');
+for (let i = 0; i < 20; i++) spawnItem('scrap'); // лом для крафта
 
 // Лут внутри каждого дома
 for (const h of housePositions) {
@@ -174,6 +178,8 @@ for (const h of housePositions) {
   spawnItem('food', h.x + 2, h.z - 2);
   spawnItem('water', h.x, h.z - 2.5);
   spawnAmmoBox(h.x + 2, h.z + 1);
+  spawnItem('scrap', h.x - 2.5, h.z + 1);
+  spawnItem('scrap', h.x + 2.5, h.z - 1);
 }
 
 // HUD
@@ -181,7 +187,7 @@ const hud = document.createElement('div');
 hud.style.cssText = 'position:fixed;top:10px;left:10px;color:#fff;font:20px monospace;text-shadow:1px 1px 3px #000;white-space:pre';
 document.body.appendChild(hud);
 const hotbar = document.createElement('div');
-hotbar.style.cssText = 'position:fixed;bottom:15px;left:50%;transform:translateX(-50%);color:#fff;font:20px monospace;text-shadow:1px 1px 3px #000;background:rgba(0,0,0,0.4);padding:8px 16px;border-radius:6px';
+hotbar.style.cssText = 'position:fixed;bottom:15px;left:50%;transform:translateX(-50%);color:#fff;font:20px monospace;text-shadow:1px 1px 3px #000;background:rgba(0,0,0,0.4);padding:8px 16px;border-radius:6px;white-space:pre;text-align:center';
 document.body.appendChild(hotbar);
 const cross = document.createElement('div');
 cross.textContent = '+';
@@ -196,17 +202,185 @@ function useItem(type) {
   if (type === 'medkit' && health < 100) { health = Math.min(100, health + 40); inv.medkit--; }
 }
 
+
+// --- Строительство и крафт ---
+const notice = document.createElement('div');
+notice.style.cssText = 'position:fixed;top:30%;left:50%;transform:translateX(-50%);color:#ffe9a0;font:22px monospace;text-shadow:1px 1px 3px #000';
+document.body.appendChild(notice);
+let noticeT = 0;
+function notify(t) { notice.textContent = t; noticeT = 2; }
+
+const pieces = {
+  wall: { name: 'Стена', cost: 4, color: 0x8b6b3e },
+  roof: { name: 'Крыша', cost: 3, color: 0x6b4f2e },
+  fire: { name: 'Костёр', cost: 5, color: 0xff7a2a },
+};
+const pieceKeys = ['wall', 'roof', 'fire'];
+const MAX_FIRES = 4;
+let buildMode = false, selPiece = 'wall', rot = 0, chopCd = 0;
+const built = [];        // все постройки игрока
+const builtMeshes = [];
+
+// Призрак: показывает, куда встанет постройка
+const ghost = new THREE.Mesh(
+  new THREE.BoxGeometry(1, 1, 1),
+  new THREE.MeshBasicMaterial({ color: 0x44ff44, transparent: true, opacity: 0.4 })
+);
+ghost.visible = false;
+scene.add(ghost);
+
+// Размеры детали: ширина, высота, глубина, высота центра
+function pieceGeometry(type, r) {
+  if (type === 'wall') return r === 0 ? [2, 3, 0.3, 1.5] : [0.3, 3, 2, 1.5];
+  if (type === 'roof') return [2, 0.2, 2, 3.1];
+  return [0.8, 0.4, 0.8, 0.2];
+}
+
+// Привязка к сетке, чтобы стены стыковались
+function targetPos() {
+  const px = camera.position.x - Math.sin(yaw) * 4;
+  const pz = camera.position.z - Math.cos(yaw) * 4;
+  if (selPiece === 'wall') {
+    return rot === 0
+      ? [2 * Math.floor(px / 2) + 1, 2 * Math.round(pz / 2)]
+      : [2 * Math.round(px / 2), 2 * Math.floor(pz / 2) + 1];
+  }
+  if (selPiece === 'roof') return [2 * Math.floor(px / 2) + 1, 2 * Math.floor(pz / 2) + 1];
+  return [Math.round(px * 2) / 2, Math.round(pz * 2) / 2];
+}
+
+function placePiece() {
+  if (health <= 0) return;
+  const p = pieces[selPiece];
+  const [x, z] = targetPos();
+  const [w, h, d, y] = pieceGeometry(selPiece, rot);
+  const key = `${selPiece}:${selPiece === 'wall' ? rot : 0}:${x}:${z}`;
+  if (built.some(b => b.key === key)) return notify('Тут уже занято');
+  if (inv.wood < p.cost) return notify(`Нужно дерева: ${p.cost}`);
+  if (selPiece === 'fire' && built.filter(b => b.type === 'fire').length >= MAX_FIRES) return notify('Костров не больше 4');
+  inv.wood -= p.cost;
+
+  const mat = new THREE.MeshStandardMaterial({ color: p.color });
+  if (selPiece === 'fire') { mat.emissive = new THREE.Color(0xff5500); mat.emissiveIntensity = 1; }
+  const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+  mesh.position.set(x, y, z);
+  scene.add(mesh);
+
+  const b = { key, type: selPiece, mesh, collider: null, light: null };
+  if (selPiece === 'wall') {
+    b.collider = { minX: x - w / 2, maxX: x + w / 2, minZ: z - d / 2, maxZ: z + d / 2 };
+    colliders.push(b.collider);
+    blockers.push(mesh);
+  }
+  if (selPiece === 'roof') blockers.push(mesh);
+  if (selPiece === 'fire') {
+    b.light = new THREE.PointLight(0xff8a3a, 8, 20, 1);
+    b.light.position.set(x, 1, z);
+    scene.add(b.light);
+  }
+  built.push(b);
+  builtMeshes.push(mesh);
+}
+
+// Убрать постройку (V) - возвращается половина дерева
+function removePiece() {
+  raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
+  const hit = raycaster.intersectObjects(builtMeshes, false)[0];
+  if (!hit || hit.distance > 6) return;
+  const i = built.findIndex(b => b.mesh === hit.object);
+  if (i < 0) return;
+  const b = built[i];
+  scene.remove(b.mesh);
+  if (b.light) scene.remove(b.light);
+  if (b.collider) colliders.splice(colliders.indexOf(b.collider), 1);
+  const bi = blockers.indexOf(b.mesh);
+  if (bi >= 0) blockers.splice(bi, 1);
+  builtMeshes.splice(builtMeshes.indexOf(b.mesh), 1);
+  built.splice(i, 1);
+  inv.wood += Math.floor(pieces[b.type].cost / 2);
+}
+
+// Рубка дерева (E)
+function chop() {
+  if (health <= 0 || chopCd > 0) return;
+  raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
+  const hit = raycaster.intersectObjects(trees.map(t => t.trunk), false)[0];
+  if (!hit || hit.distance > 3.5) return notify('Подойди ближе и смотри на ствол дерева');
+  chopCd = 0.4;
+  const ti = trees.findIndex(t => t.trunk === hit.object);
+  const t = trees[ti];
+  t.hp--;
+  inv.wood++;
+  if (t.hp <= 0) {
+    scene.remove(t.trunk);
+    scene.remove(t.crown);
+    colliders.splice(colliders.indexOf(t.collider), 1);
+    blockers.splice(blockers.indexOf(t.trunk), 1);
+    trees.splice(ti, 1);
+    inv.wood += 3;
+    notify('Дерево срублено, +3 дерева');
+  }
+}
+
+// Крафт из лома
+function craft(type) {
+  if (health <= 0) return;
+  if (type === 'ammo') {
+    if (inv.scrap < 2) return notify('Нужно 2 лома');
+    inv.scrap -= 2; reserve += 6; notify('Сделано: +6 патронов');
+  }
+  if (type === 'medkit') {
+    if (inv.scrap < 4) return notify('Нужно 4 лома');
+    inv.scrap -= 4; inv.medkit++; notify('Сделано: +1 аптечка');
+  }
+}
+
+// Обновление каждый кадр: призрак, костры, подсказки
+function updateBuild(dt) {
+  noticeT -= dt;
+  if (noticeT <= 0) notice.textContent = '';
+  chopCd -= dt;
+  gun.visible = !buildMode;
+  ghost.visible = buildMode && health > 0;
+  if (ghost.visible) {
+    const [x, z] = targetPos();
+    const [w, h, d, y] = pieceGeometry(selPiece, rot);
+    ghost.scale.set(w, h, d);
+    ghost.position.set(x, y, z);
+    ghost.material.color.set(inv.wood >= pieces[selPiece].cost ? 0x44ff44 : 0xff4444);
+  }
+  for (const b of built) {
+    if (b.type !== 'fire') continue;
+    b.light.intensity = 7 + Math.random() * 2; // мерцание
+    const near = Math.hypot(b.mesh.position.x - camera.position.x, b.mesh.position.z - camera.position.z) < 4;
+    if (near && health > 0 && health < 100) health = Math.min(100, health + 1.5 * dt); // у костра лечишься
+  }
+}
+
 // Управление
 addEventListener('keydown', e => {
   keys[e.code] = true;
-  if (e.code === 'Digit1') useItem('food');
-  if (e.code === 'Digit2') useItem('water');
-  if (e.code === 'Digit3') useItem('medkit');
+  if (e.code === 'KeyB') buildMode = !buildMode;
+  if (buildMode) {
+    if (e.code === 'Digit1') selPiece = 'wall';
+    if (e.code === 'Digit2') selPiece = 'roof';
+    if (e.code === 'Digit3') selPiece = 'fire';
+    if (e.code === 'KeyQ') rot = 1 - rot;
+    if (e.code === 'KeyV') removePiece();
+  } else {
+    if (e.code === 'Digit1') useItem('food');
+    if (e.code === 'Digit2') useItem('water');
+    if (e.code === 'Digit3') useItem('medkit');
+    if (e.code === 'KeyZ') craft('ammo');
+    if (e.code === 'KeyX') craft('medkit');
+  }
+  if (e.code === 'KeyE') chop();
   if (e.code === 'KeyF') { flashOn = !flashOn; flash.intensity = flashOn ? 25 : 0; }
 });
 addEventListener('keyup', e => keys[e.code] = false);
 renderer.domElement.addEventListener('click', () => {
   if (document.pointerLockElement !== renderer.domElement) renderer.domElement.requestPointerLock();
+  else if (buildMode) placePiece();
   else attack();
 });
 addEventListener('mousemove', e => {
@@ -275,6 +449,7 @@ function loop() {
     else if (hunger > 70 && thirst > 70) health = Math.min(100, health + 0.5 * dt); // медленное лечение
   }
   camera.rotation.set(pitch, yaw, 0);
+  updateBuild(dt);
 
   // Оружие возвращается на место после отдачи
   gun.position.z += (-0.6 - gun.position.z) * 12 * dt;
@@ -329,7 +504,10 @@ function loop() {
   }
   const hh = String(Math.floor(gameHour)).padStart(2, '0');
   const mm = String(Math.floor((gameHour % 1) * 60)).padStart(2, '0');
-  hotbar.textContent = `[1] Еда x${inv.food}    [2] Вода x${inv.water}    [3] Аптечка x${inv.medkit}    [F] Фонарик ${flashOn ? 'вкл' : 'выкл'}    ${hh}:${mm}`;
+  const line1 = buildMode
+    ? 'СТРОЙКА: ' + pieceKeys.map((k, i) => `${selPiece === k ? '>' : ' '}[${i + 1}] ${pieces[k].name} (${pieces[k].cost} дер.)`).join('  ') + '\n[Q] поворот   [клик] поставить   [V] убрать   [B] выйти'
+    : `[1] Еда x${inv.food}    [2] Вода x${inv.water}    [3] Аптечка x${inv.medkit}    [F] Фонарик ${flashOn ? 'вкл' : 'выкл'}    ${hh}:${mm}`;
+  hotbar.textContent = line1 + `\nДерево: ${inv.wood}   Лом: ${inv.scrap}   [E] рубить   [B] строить   [Z] патроны (2 лома)   [X] аптечка (4 лома)`;
 
   renderer.render(scene, camera);
   requestAnimationFrame(loop);
