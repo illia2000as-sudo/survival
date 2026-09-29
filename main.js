@@ -73,9 +73,13 @@ function spawnZombie() {
 for (let i = 0; i < 12; i++) spawnZombie();
 
 // --- Игрок ---
-let health = 100, yaw = 0, pitch = 0, kills = 0;
+let health = 100, hunger = 100, thirst = 100;
+let yaw = 0, pitch = 0, kills = 0;
 let ammo = 12, reserve = 24, reloading = false;
 const keys = {};
+
+// Инвентарь: сколько предметов у игрока
+const inv = { food: 0, water: 0, medkit: 0 };
 
 // Пистолет в руках (прикреплён к камере)
 const gun = new THREE.Group();
@@ -96,17 +100,45 @@ function spawnAmmoBox() {
 }
 for (let i = 0; i < 15; i++) spawnAmmoBox();
 
+// Предметы на земле: еда (коричневая), вода (синяя), аптечка (белая)
+const itemColors = { food: 0xb5651d, water: 0x3a8fd6, medkit: 0xf2f2f2 };
+const items = [];
+function spawnItem(type) {
+  const m = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.4, 0.4), new THREE.MeshStandardMaterial({ color: itemColors[type] }));
+  m.position.set((Math.random() - 0.5) * 200, 0.3, (Math.random() - 0.5) * 200);
+  scene.add(m);
+  items.push({ mesh: m, type });
+}
+for (let i = 0; i < 10; i++) { spawnItem('food'); spawnItem('water'); }
+for (let i = 0; i < 5; i++) spawnItem('medkit');
+
 // HUD
 const hud = document.createElement('div');
-hud.style.cssText = 'position:fixed;top:10px;left:10px;color:#fff;font:20px monospace;text-shadow:1px 1px 3px #000';
+hud.style.cssText = 'position:fixed;top:10px;left:10px;color:#fff;font:20px monospace;text-shadow:1px 1px 3px #000;white-space:pre';
 document.body.appendChild(hud);
+const hotbar = document.createElement('div');
+hotbar.style.cssText = 'position:fixed;bottom:15px;left:50%;transform:translateX(-50%);color:#fff;font:20px monospace;text-shadow:1px 1px 3px #000;background:rgba(0,0,0,0.4);padding:8px 16px;border-radius:6px';
+document.body.appendChild(hotbar);
 const cross = document.createElement('div');
 cross.textContent = '+';
 cross.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);color:#fff;font:24px monospace';
 document.body.appendChild(cross);
 
+// Использование предметов
+function useItem(type) {
+  if (health <= 0 || inv[type] <= 0) return;
+  if (type === 'food' && hunger < 100) { hunger = Math.min(100, hunger + 30); inv.food--; }
+  if (type === 'water' && thirst < 100) { thirst = Math.min(100, thirst + 30); inv.water--; }
+  if (type === 'medkit' && health < 100) { health = Math.min(100, health + 40); inv.medkit--; }
+}
+
 // Управление
-addEventListener('keydown', e => keys[e.code] = true);
+addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (e.code === 'Digit1') useItem('food');
+  if (e.code === 'Digit2') useItem('water');
+  if (e.code === 'Digit3') useItem('medkit');
+});
 addEventListener('keyup', e => keys[e.code] = false);
 renderer.domElement.addEventListener('click', () => {
   if (document.pointerLockElement !== renderer.domElement) renderer.domElement.requestPointerLock();
@@ -156,6 +188,12 @@ function loop() {
     if (keys.KeyS) camera.position.addScaledVector(fwd, -speed);
     if (keys.KeyD) camera.position.addScaledVector(right, speed);
     if (keys.KeyA) camera.position.addScaledVector(right, -speed);
+
+    // Голод и жажда
+    hunger = Math.max(0, hunger - 0.4 * dt);
+    thirst = Math.max(0, thirst - 0.6 * dt);
+    if (hunger <= 0 || thirst <= 0) health -= 2 * dt;          // урон от голода/жажды
+    else if (hunger > 70 && thirst > 70) health = Math.min(100, health + 0.5 * dt); // медленное лечение
   }
   camera.rotation.set(pitch, yaw, 0);
 
@@ -169,6 +207,18 @@ function loop() {
       scene.remove(ammoBoxes[i]);
       ammoBoxes.splice(i, 1);
       spawnAmmoBox();
+    }
+  }
+
+  // Подбор еды, воды, аптечек
+  for (let i = items.length - 1; i >= 0; i--) {
+    items[i].mesh.rotation.y += dt; // предметы медленно вращаются
+    if (items[i].mesh.position.distanceTo(camera.position) < 2) {
+      const type = items[i].type;
+      inv[type]++;
+      scene.remove(items[i].mesh);
+      items.splice(i, 1);
+      spawnItem(type);
     }
   }
 
@@ -187,9 +237,16 @@ function loop() {
     if (dist <= 1.5 && z.cooldown <= 0 && health > 0) { health -= 10; z.cooldown = 1; }
   }
 
-  hud.textContent = health > 0
-    ? `Здоровье: ${health}   Убито: ${kills}   Патроны: ${reloading ? 'перезарядка...' : ammo} / ${reserve}`
-    : `Ты умер. Убито: ${kills}. Нажми F5, чтобы начать заново`;
+  if (health <= 0) {
+    health = 0;
+    hud.textContent = `Ты умер. Убито: ${kills}. Нажми F5, чтобы начать заново`;
+  } else {
+    hud.textContent =
+      `Здоровье: ${Math.ceil(health)}   Еда: ${Math.ceil(hunger)}   Вода: ${Math.ceil(thirst)}\n` +
+      `Убито: ${kills}   Патроны: ${reloading ? 'перезарядка...' : ammo} / ${reserve}`;
+  }
+  hotbar.textContent = `[1] Еда x${inv.food}    [2] Вода x${inv.water}    [3] Аптечка x${inv.medkit}`;
+
   renderer.render(scene, camera);
   requestAnimationFrame(loop);
 }
