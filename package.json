@@ -1,6 +1,7 @@
 {
   "name": "my-game",
-  "version": "1.0.0",
+  "productName": "MyGame",
+  "version": "1.0.2",
   "main": "electron-main.js",
   "scripts": { "start": "electron ." },
   "dependencies": { "three": "^0.160.0" },
@@ -10,6 +11,11 @@
   },
   "build": {
     "appId": "com.example.mygame",
-    "win": { "target": "portable" }
+    "win": { "target": "nsis" },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "artifactName": "${productName}-Setup-${version}.exe"
+    }
   }
 }
