@@ -20,12 +20,12 @@ jobs:
       - name: Установка зависимостей
         run: npm install
 
-      - name: Сборка exe
-        run: npx electron-builder --win portable --publish never
+      - name: Сборка установщика
+        run: npx electron-builder --win --publish never
 
       - name: Публикация в Releases
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}
           name: Игра, сборка ${{ github.run_number }}
-          files: dist/*.exe
+          files: dist/*Setup*.exe
