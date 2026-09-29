@@ -1,7 +1,7 @@
 {
   "name": "my-game",
   "productName": "DeadZone",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "main": "electron-main.js",
   "scripts": { "start": "electron ." },
   "dependencies": { "three": "^0.160.0" },
