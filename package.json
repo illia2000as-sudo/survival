@@ -1,7 +1,7 @@
 {
   "name": "my-game",
-  "productName": "MyGame",
-  "version": "1.0.2",
+  "productName": "DeadZone",
+  "version": "1.0.4",
   "main": "electron-main.js",
   "scripts": { "start": "electron ." },
   "dependencies": { "three": "^0.160.0" },
@@ -10,7 +10,7 @@
     "electron-builder": "^24.13.3"
   },
   "build": {
-    "appId": "com.example.mygame",
+    "appId": "com.example.deadzone",
     "win": { "target": "nsis" },
     "nsis": {
       "oneClick": false,
