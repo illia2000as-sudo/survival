@@ -76,27 +76,185 @@ function resolveCollisions(pos, r) {
 const trees = []; // деревья, которые можно рубить
 for (let i = 0; i < 150; i++) {
   const x = (Math.random() - 0.5) * 300, z = (Math.random() - 0.5) * 300;
-  if (Math.abs(x) < 8 && Math.abs(z) < 8) continue;
+  if ((Math.abs(x) < 8 && Math.abs(z) < 8) || Math.abs(x) < 4.5 || Math.abs(z) < 4.5) continue; // не на дороге
   const trunk = box(0.6, 3, 0.6, 0x5b3a1e, x, 1.5, z, true);
   const collider = colliders[colliders.length - 1];
   const crown = box(3, 2.5, 3, 0x2f5a2a, x, 4, z);
   trees.push({ trunk, crown, collider, hp: 4 });
 }
 
-// Дома: 4 стены, дверь с южной стороны (+Z), крыша
+// --- Дома: стены с окнами, дверь с южной стороны (+Z), двускатная крыша, крыльцо, мебель ---
 const housePositions = [];
+const HOUSE_STYLES = [
+  { wall: 0xd8cdb4, trim: 0x5a4632, roof: 0x8a3b2e, door: 0x5a3a20, base: 0x7d7b75, floor: 0x8a6a45 }, // светлый дом с красной крышей
+  { wall: 0x8a6a45, trim: 0x3f2c1a, roof: 0x3b3f44, door: 0x3a2614, base: 0x6a645c, floor: 0x7a5a38 }, // деревянный сруб
+  { wall: 0xa9b0ad, trim: 0x4a4f50, roof: 0x4d6a46, door: 0x6a4a2a, base: 0x77797a, floor: 0x806343 }, // серый дом с зелёной крышей
+];
+const glassMat = new THREE.MeshStandardMaterial({ color: 0x9fd0e8, roughness: 0.2, metalness: 0.1, transparent: true, opacity: 0.3, depthWrite: false });
+
+function addBox(w, h, d, color, x, y, z, bullet) { // bullet=false - декор, пули летят сквозь
+  const m = box(w, h, d, color, x, y, z, false);
+  if (bullet !== false) blockers.push(m);
+  return m;
+}
+
+// Стена с проёмами. along: 'x' или 'z'. openings: { c (центр), w, sill, h, door }
+function wallLine(cx, cz, along, H, color, trim, openings) {
+  const T = 0.4, L = 8;
+  const at = s => along === 'x' ? [cx + s, cz] : [cx, cz + s];
+  const dims = (len, h, th) => along === 'x' ? [len, h, th] : [th, h, len];
+  const piece = (s0, s1, y0, y1) => {
+    const len = s1 - s0, h = y1 - y0;
+    if (len < 0.01 || h < 0.01) return;
+    const [px, pz] = at((s0 + s1) / 2), [w, hh, d] = dims(len, h, T);
+    addBox(w, hh, d, color, px, (y0 + y1) / 2, pz);
+  };
+  let cur = -L / 2;
+  for (const o of openings.slice().sort((a, b) => a.c - b.c)) {
+    const a = o.c - o.w / 2, b = o.c + o.w / 2;
+    piece(cur, a, 0, H);
+    if (o.door) piece(a, b, o.h, H);
+    else {
+      piece(a, b, 0, o.sill);
+      piece(a, b, o.sill + o.h, H);
+      const [gx, gz] = at(o.c), gy = o.sill + o.h / 2;
+      const [gw, gh, gd] = dims(o.w, o.h, 0.04);
+      const glass = new THREE.Mesh(new THREE.BoxGeometry(gw, gh, gd), glassMat);
+      glass.position.set(gx, gy, gz); scene.add(glass);
+      const fr = (len, h, dx, dy) => { // деталь рамы
+        const [px, pz] = at(o.c + dx), [w, hh, d] = dims(len, h, T + 0.1);
+        addBox(w, hh, d, trim, px, gy + dy, pz, false);
+      };
+      fr(o.w + 0.2, 0.1, 0, o.h / 2 + 0.05); fr(o.w + 0.2, 0.1, 0, -o.h / 2 - 0.05);
+      fr(0.1, o.h, o.w / 2 + 0.05, 0); fr(0.1, o.h, -o.w / 2 - 0.05, 0);
+      fr(0.05, o.h, 0, 0); fr(o.w, 0.05, 0, 0);
+    }
+    cur = b;
+  }
+  piece(cur, L / 2, 0, H);
+}
+
+function buildHouse(x, z, st) {
+  const H = 3.4, S = HOUSE_STYLES[st];
+  const col = (minX, maxX, minZ, maxZ) => colliders.push({ minX, maxX, minZ, maxZ });
+  const win = c => ({ c, w: 1.4, sill: 1.0, h: 1.2 });
+
+  // Пол и каменный цоколь
+  addBox(7.2, 0.03, 7.2, S.floor, x, 0.015, z, false);
+  addBox(9, 0.14, 0.5, S.base, x, 0.07, z - 4.1, false);
+  addBox(0.5, 0.14, 8.2, S.base, x - 4.1, 0.07, z, false);
+  addBox(0.5, 0.14, 8.2, S.base, x + 4.1, 0.07, z, false);
+
+  // Стены с окнами
+  wallLine(x, z - 3.8, 'x', H, S.wall, S.trim, [win(-2.2), win(2.2)]);
+  wallLine(x - 3.8, z, 'z', H, S.wall, S.trim, [win(0)]);
+  wallLine(x + 3.8, z, 'z', H, S.wall, S.trim, [win(0)]);
+  wallLine(x, z + 3.8, 'x', H, S.wall, S.trim, [{ c: 0, w: 2, h: 2.4, door: true }, { c: -2.6, w: 1.2, sill: 1.0, h: 1.2 }, { c: 2.6, w: 1.2, sill: 1.0, h: 1.2 }]);
+  col(x - 4, x + 4, z - 4, z - 3.6);
+  col(x - 4, x - 3.6, z - 4, z + 4);
+  col(x + 3.6, x + 4, z - 4, z + 4);
+  col(x - 4, x - 1, z + 3.6, z + 4);
+  col(x + 1, x + 4, z + 3.6, z + 4);
+  [[-1, -1], [1, -1], [-1, 1], [1, 1]].forEach(([sx, sz]) => addBox(0.5, H, 0.5, S.trim, x + sx * 4, H / 2, z + sz * 4, false)); // угловые столбы
+
+  // Дверь: рама и открытая створка
+  addBox(0.12, 2.4, 0.5, S.trim, x - 1.06, 1.2, z + 3.8, false);
+  addBox(0.12, 2.4, 0.5, S.trim, x + 1.06, 1.2, z + 3.8, false);
+  const leaf = new THREE.Group();
+  const leafMesh = new THREE.Mesh(new THREE.BoxGeometry(1.0, 2.3, 0.08), new THREE.MeshStandardMaterial({ color: S.door, roughness: 0.9 }));
+  leafMesh.position.set(-0.5, 1.15, 0);
+  const knob = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.08, 0.14), new THREE.MeshStandardMaterial({ color: 0xc9a227, metalness: 0.8, roughness: 0.4 }));
+  knob.position.set(-0.85, 1.05, 0);
+  leaf.add(leafMesh, knob);
+  leaf.position.set(x + 1.0, 0, z + 3.8); leaf.rotation.y = 1.3;
+  scene.add(leaf);
+
+  // Двускатная крыша, конёк, фронтоны, труба
+  const rise = 1.8, half = 4.5, ang = Math.atan2(rise, half), slope = Math.hypot(half, rise) + 0.3;
+  [-1, 1].forEach(sg => {
+    const slab = addBox(9.6, 0.18, slope, S.roof, x, H + rise / 2 + 0.05, z + sg * half / 2);
+    slab.rotation.x = sg * ang;
+  });
+  addBox(9.8, 0.14, 0.3, S.trim, x, H + rise + 0.12, z, false);
+  const tri = new THREE.Shape([new THREE.Vector2(-4.2, 0), new THREE.Vector2(4.2, 0), new THREE.Vector2(0, rise + 0.05)]);
+  [-1, 1].forEach(sx => {
+    const g = new THREE.ExtrudeGeometry(tri, { depth: 0.4, bevelEnabled: false });
+    g.translate(0, 0, -0.2); g.rotateY(Math.PI / 2);
+    const m = new THREE.Mesh(g, new THREE.MeshStandardMaterial({ color: S.wall, roughness: 0.9 }));
+    m.position.set(x + sx * 3.8, H, z); scene.add(m); blockers.push(m);
+  });
+  const cx = (st % 2 ? 2.6 : -2.6);
+  addBox(0.8, 2.4, 0.8, 0x77716a, x + cx, H + 1.5, z + 1.2, false);
+  addBox(1.0, 0.12, 1.0, 0x55504a, x + cx, H + 2.74, z + 1.2, false);
+
+  // Крыльцо с навесом
+  addBox(3.4, 0.14, 1.8, S.floor, x, 0.07, z + 4.7, false);
+  addBox(2.0, 0.07, 0.4, S.floor, x, 0.035, z + 5.8, false);
+  [-1, 1].forEach(sx => addBox(0.16, 2.5, 0.16, S.trim, x + sx * 1.55, 1.25, z + 5.5, false));
+  const awn = addBox(3.8, 0.12, 2.1, S.roof, x, 2.75, z + 4.8, false); awn.rotation.x = 0.1;
+
+  // Мебель: кровать у юго-западного угла, стол или стеллаж
+  addBox(1.0, 0.35, 1.9, S.trim, x - 3.0, 0.175, z + 2.55, false);
+  addBox(0.9, 0.18, 1.7, 0xb9b2a0, x - 3.0, 0.44, z + 2.55, false);
+  addBox(0.7, 0.12, 0.35, 0xe6e0d0, x - 3.0, 0.58, z + 3.2, false);
+  col(x - 3.5, x - 2.5, z + 1.6, z + 3.5);
+  if (st !== 1) { // стол
+    addBox(1.0, 0.08, 1.0, 0x7a5a38, x + 2.9, 0.78, z + 2.8, false);
+    [[-1, -1], [1, -1], [-1, 1], [1, 1]].forEach(([a, b]) => addBox(0.08, 0.75, 0.08, 0x5a4026, x + 2.9 + a * 0.42, 0.375, z + 2.8 + b * 0.42, false));
+    col(x + 2.4, x + 3.4, z + 2.3, z + 3.3);
+  }
+  if (st !== 0) { // стеллаж с банками
+    [0.3, 0.8, 1.3, 1.8].forEach(yy => addBox(0.5, 0.06, 2.0, 0x6a4a2a, x - 3.3, yy, z - 2.0, false));
+    [-1, 1].forEach(sz => addBox(0.5, 1.85, 0.06, 0x5a4026, x - 3.3, 0.92, z - 2.0 + sz, false));
+    for (let i = 0; i < 7; i++) addBox(0.12, 0.16, 0.12, [0xc2552a, 0x6b8f3a, 0xc9a227][i % 3], x - 3.3, 0.38 + (i % 3) * 0.5, z - 2.7 + i * 0.22, false);
+    col(x - 3.55, x - 3.05, z - 3.0, z - 1.0);
+  }
+}
+
 for (let i = 0; i < 8; i++) {
   const x = (Math.random() - 0.5) * 200, z = (Math.random() - 0.5) * 200;
-  if (Math.abs(x) < 15 && Math.abs(z) < 15) continue;
-  const wall = 0x8a8074;
-  box(8, 4, 0.4, wall, x, 2, z - 3.8, true);          // северная стена
-  box(0.4, 4, 8, wall, x - 3.8, 2, z, true);          // западная стена
-  box(0.4, 4, 8, wall, x + 3.8, 2, z, true);          // восточная стена
-  box(3, 4, 0.4, wall, x - 2.5, 2, z + 3.8, true);    // южная стена, левая часть
-  box(3, 4, 0.4, wall, x + 2.5, 2, z + 3.8, true);    // южная стена, правая часть
-  box(9, 0.6, 9, 0x4a3a35, x, 4.3, z, false);         // крыша
-  blockers.push(scene.children[scene.children.length - 1]);
+  if ((Math.abs(x) < 15 && Math.abs(z) < 15) || Math.abs(x) < 8 || Math.abs(z) < 8) continue;
+  buildHouse(x, z, i % 3);
+  // деревья внутри дома и на крыльце убираем
+  for (let k = trees.length - 1; k >= 0; k--) {
+    const t = trees[k];
+    if (Math.abs(t.trunk.position.x - x) < 6.5 && Math.abs(t.trunk.position.z - z) < 7.5) {
+      scene.remove(t.trunk); scene.remove(t.crown);
+      colliders.splice(colliders.indexOf(t.collider), 1); blockers.splice(blockers.indexOf(t.trunk), 1);
+      trees.splice(k, 1);
+    }
+  }
   housePositions.push({ x, z });
+}
+
+// --- Дороги, пятна травы, камни и кусты ---
+{
+  const roadMat = new THREE.MeshStandardMaterial({ color: 0x6f6350, roughness: 1, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
+  [[400, 7], [7, 400]].forEach(([w, d]) => {
+    const r = new THREE.Mesh(new THREE.PlaneGeometry(w, d), roadMat);
+    r.rotation.x = -Math.PI / 2; r.position.y = 0.02; scene.add(r);
+  });
+  const greens = [0x566a41, 0x5f7249, 0x4f6339, 0x66784c];
+  for (let i = 0; i < 90; i++) {
+    const mt = new THREE.MeshStandardMaterial({ color: greens[i % 4], roughness: 1, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1, depthWrite: false });
+    const p = new THREE.Mesh(new THREE.CircleGeometry(3 + Math.random() * 7, 9), mt);
+    p.rotation.x = -Math.PI / 2; p.position.set((Math.random() - 0.5) * 300, 0.01, (Math.random() - 0.5) * 300); scene.add(p);
+  }
+  const free = (x, z) => !colliders.some(c => x > c.minX - 1 && x < c.maxX + 1 && z > c.minZ - 1 && z < c.maxZ + 1);
+  for (let i = 0; i < 80; i++) {
+    const x = (Math.random() - 0.5) * 300, z = (Math.random() - 0.5) * 300;
+    if ((Math.abs(x) < 8 && Math.abs(z) < 8) || !free(x, z)) continue;
+    const r = 0.3 + Math.random() * 0.7;
+    const rock = new THREE.Mesh(new THREE.DodecahedronGeometry(r, 0), new THREE.MeshStandardMaterial({ color: 0x77777a + Math.floor(Math.random() * 4) * 0x080808, roughness: 1, flatShading: true }));
+    rock.scale.set(1, 0.6, 1); rock.position.set(x, r * 0.35, z); rock.rotation.y = Math.random() * 6; scene.add(rock);
+  }
+  for (let i = 0; i < 110; i++) {
+    const x = (Math.random() - 0.5) * 300, z = (Math.random() - 0.5) * 300;
+    if ((Math.abs(x) < 8 && Math.abs(z) < 8) || !free(x, z)) continue;
+    const r = 0.4 + Math.random() * 0.5;
+    const bush = new THREE.Mesh(new THREE.IcosahedronGeometry(r, 0), new THREE.MeshStandardMaterial({ color: 0x2f5a2a + (Math.floor(Math.random() * 3) << 8), roughness: 1, flatShading: true }));
+    bush.scale.y = 0.8; bush.position.set(x, r * 0.6, z); scene.add(bush);
+  }
 }
 
 // --- Зомби ---
@@ -127,6 +285,17 @@ let ammo = MAG, reserve = 21, reloading = false;
 let rT = 0, loaded = false, lockAtStart = false, lock = false;
 let cool = 0, recoil = 0, kick = 0, slidePulse = 0, mzT = 0, gunT = 0;
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const easeOut = x => 1 - Math.pow(1 - x, 3);
+const sstep = (a, b, x) => { const u = clamp((x - a) / (b - a), 0, 1); return u * u * (3 - 2 * u); };
+// Дробовик и смена оружия
+const SG_MAG = 5;                          // патронов в магазине дробовика
+let weapon = 'pistol', hasShotgun = false, drawT = 1;
+let sgAmmo = SG_MAG, sgReserve = 0, sgRecoil = 0, sgFlashT = 0;
+let sgReloading = false, sgRT = 0, sgReloadN = 0, sgLoadedIn = -1, sgLhBlend = 0;
+let sgRacking = false, sgRackT = 0, sgClack1 = false;
+let hasAxe = false, swingT = -1, swingHitDone = false; // топор
+const sgLastLh = new THREE.Vector3();
+const casings = [];                        // вылетевшие гильзы
 const keys = {};
 
 // --- Инвентарь: 35 слотов (0-4 быстрые слоты игрока, 5-34 рюкзак) ---
@@ -140,6 +309,56 @@ const ITEMS = {
 };
 const slots = new Array(SLOTS).fill(null); // каждый слот: null или { type, n }
 const hex = c => '#' + c.toString(16).padStart(6, '0');
+
+// Пиксельные иконки 16x16 для слотов (рисуются кодом)
+function makeIcons() {
+  const out = {};
+  const mk = draw => {
+    const c = document.createElement('canvas'); c.width = c.height = 16;
+    const x = c.getContext('2d');
+    draw((col, px, py, w, h) => { x.fillStyle = col; x.fillRect(px, py, w || 1, h || 1); });
+    return c.toDataURL();
+  };
+  out.wood = mk(f => { // бревно: торец с годовыми кольцами
+    for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
+      const r = Math.hypot(x - 7.5, y - 7.5);
+      if (r > 7.5) continue;
+      let col = '#e0b878';
+      if (r > 6.3) col = '#4e2f15'; else if (r > 5.4) col = '#7a4a24';
+      else if (r > 3.6 && r < 4.3) col = '#b8884a';
+      else if (r > 1.7 && r < 2.4) col = '#b8884a';
+      else if (r < 0.9) col = '#8a5a2b';
+      f(col, x, y);
+    }
+    f('#f0cf96', 4, 4); f('#f0cf96', 5, 3);
+  });
+  out.scrap = mk(f => { // шестерёнка (железо)
+    for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
+      const dx = x - 7.5, dy = y - 7.5, r = Math.hypot(dx, dy), a = Math.atan2(dy, dx);
+      const outer = Math.cos(a * 8) > 0.15 ? 7.6 : 6.0;
+      if (r <= outer && r > 2.4) f(x + y < 15 ? '#b4bbc3' : '#7d848c', x, y);
+      else if (r <= 2.4 && r > 1.6) f('#4a4f55', x, y);
+    }
+    f('#8a4b2a', 4, 9); f('#8a4b2a', 10, 5); f('#a35a30', 11, 10);
+  });
+  out.food = mk(f => { // консервная банка
+    f('#e6eaee', 3, 2, 10, 2); f('#aeb4bb', 3, 4, 10, 10);
+    f('#c9532b', 3, 6, 10, 5); f('#f3d9a0', 5, 7, 6, 3); f('#8f2a12', 7, 8, 2, 1);
+    f('#8a9097', 3, 14, 10, 1); f('#eef1f4', 4, 4, 1, 10); f('#6f757c', 12, 4, 1, 10);
+  });
+  out.water = mk(f => { // бутылка воды
+    f('#1f5f9e', 6, 0, 4, 2); f('#cfe8f5', 7, 2, 2, 2); f('#cfe8f5', 5, 4, 6, 2);
+    f('#cfe8f5', 4, 6, 8, 2); f('#4aa3e8', 4, 8, 8, 6); f('#2f7fc4', 4, 8, 1, 6); f('#2f7fc4', 11, 8, 1, 6);
+    f('#f4f4f4', 4, 9, 8, 3); f('#2f7fc4', 5, 10, 6, 1); f('#bfe3fa', 5, 6, 1, 7); f('#2f7fc4', 4, 14, 8, 1);
+  });
+  out.medkit = mk(f => { // аптечка с красным крестом
+    f('#2b2b2b', 5, 2, 6, 1); f('#2b2b2b', 5, 3, 1, 1); f('#2b2b2b', 10, 3, 1, 1);
+    f('#2b2b2b', 1, 4, 14, 10); f('#f4f4f4', 2, 5, 12, 8); f('#d9d9d9', 2, 12, 12, 1);
+    f('#d63030', 7, 6, 2, 6); f('#d63030', 5, 8, 6, 2); f('#8a8f96', 2, 8, 1, 2); f('#8a8f96', 13, 8, 1, 2);
+  });
+  return out;
+}
+const ICONS = makeIcons();
 
 function countOf(type) {
   let n = 0;
@@ -203,7 +422,7 @@ function slotHtml(i, picked, clickable) {
   const border = picked ? '#c8e07a' : (i < HOTBAR ? '#8a9a5a' : '#4a5a3a');
   return `<div ${clickable ? `data-slot="${i}"` : ''} title="${def ? def.name : ''}" style="position:relative;width:56px;height:56px;box-sizing:border-box;border:2px solid ${border};background:${picked ? '#3d4a2a' : 'rgba(20,26,18,.85)'};border-radius:6px;cursor:${clickable ? 'pointer' : 'default'};flex:none">` +
     (i < HOTBAR ? `<div style="position:absolute;left:4px;top:1px;font-size:12px;opacity:.8">${i + 1}</div>` : '') +
-    (s ? `<div style="position:absolute;left:50%;top:44%;width:26px;height:26px;transform:translate(-50%,-50%);background:${hex(def.color)};border:2px solid rgba(255,255,255,.55);border-radius:5px"></div>` +
+    (s ? `<img src="${ICONS[s.type]}" style="position:absolute;left:50%;top:44%;width:34px;height:34px;transform:translate(-50%,-50%);image-rendering:pixelated">` +
          `<div style="position:absolute;right:4px;top:1px;font-size:14px">${s.n > 1 ? s.n : ''}</div>` +
          `<div style="position:absolute;left:0;right:0;bottom:2px;text-align:center;font-size:10px;opacity:.85">${def.name}</div>` : '') +
     `</div>`;
@@ -359,6 +578,242 @@ gp.muzzle.add(mzG);
 const mzLight = new THREE.PointLight(0xffb060, 0, 4, 2);
 gp.muzzle.add(mzLight);
 
+// Патрон для дробовика: красный пластиковый корпус и латунная гильза. Ось - Z, носик смотрит в -Z.
+function makeShell(full) {
+  const g = new THREE.Group();
+  const m = (c, r, mt) => new THREE.MeshStandardMaterial({ color: c, roughness: r, metalness: mt, flatShading: true });
+  const hull = new THREE.Mesh(new THREE.CylinderGeometry(0.0105, 0.0105, full ? 0.055 : 0.045, 8), m(full ? 0xb02a22 : 0x8f231c, 0.7, 0));
+  hull.rotation.x = Math.PI / 2; hull.position.z = -0.005;
+  const base = new THREE.Mesh(new THREE.CylinderGeometry(0.0113, 0.0113, 0.018, 8), m(0xc9a227, 0.35, 0.8));
+  base.rotation.x = Math.PI / 2; base.position.z = full ? 0.0325 : 0.0265;
+  g.add(hull, base);
+  return g;
+}
+
+// Помповый дробовик DeadZone. Оси: ствол смотрит в -Z, вверх +Y.
+function createShotgun(opts) {
+  opts = opts || {};
+  const root = new THREE.Group();
+  const pump = new THREE.Group();     // цевьё (ездит вперёд-назад)
+  const PUMP_Z = -0.31;
+  pump.position.z = PUMP_Z;
+  root.add(pump);
+
+  const mat = (color, rough, metal) => new THREE.MeshStandardMaterial({ color, roughness: rough, metalness: metal, flatShading: true });
+  const M = {
+    metal: mat(0x1f2226, 0.45, 0.6), barrel: mat(0x2a2e33, 0.4, 0.7), tube: mat(0x3a3f45, 0.5, 0.6),
+    wood: mat(0x6b4423, 0.85, 0), woodD: mat(0x4e3119, 0.9, 0), black: mat(0x0b0c0d, 0.9, 0),
+    pad: mat(0x1a1a1a, 0.95, 0), brass: mat(0xc9a227, 0.35, 0.8), steel: mat(0x8a8f96, 0.35, 0.8),
+    skin: mat(0xd9a67a, 0.9, 0), sleeve: mat(0x3a4a6a, 0.95, 0),
+  };
+  const box = (w, h, d, m, x, y, z, parent) => {
+    const b = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m);
+    b.position.set(x, y, z); (parent || root).add(b); return b;
+  };
+  const cyl = (r, len, m, x, y, z, parent) => { // цилиндр вдоль Z
+    const c = new THREE.Mesh(new THREE.CylinderGeometry(r, r, len, 10), m);
+    c.rotation.x = Math.PI / 2; c.position.set(x, y, z); (parent || root).add(c); return c;
+  };
+  function extrude(pts, width, m, bevel) {
+    bevel = bevel === undefined ? 0.003 : bevel;
+    const shape = new THREE.Shape(pts.map(p => new THREE.Vector2(p[0], p[1])));
+    const g = new THREE.ExtrudeGeometry(shape, { depth: width, bevelEnabled: true, bevelThickness: bevel, bevelSize: bevel, bevelSegments: 1, steps: 1 });
+    g.translate(0, 0, -width / 2); g.rotateY(Math.PI / 2);
+    return new THREE.Mesh(g, m);
+  }
+  const limb = (parent, sx, sy, sz, dx, dy, dz, parts) => { // рука-рукав от запястья
+    const dir = new THREE.Vector3(dx, dy, dz).normalize();
+    const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), dir);
+    parts.forEach(([len, off, w, m]) => {
+      const c = new THREE.Vector3(sx, sy, sz).addScaledVector(dir, off + len / 2);
+      const b = box(w, w, len, m, c.x, c.y, c.z, parent); b.quaternion.copy(q);
+    });
+  };
+
+  // --- Ствольная коробка ---
+  box(0.056, 0.092, 0.28, M.metal, 0, 0, 0.05);
+  box(0.05, 0.01, 0.2, M.barrel, 0, 0.051, 0.06);
+  box(0.004, 0.032, 0.1, M.black, 0.029, 0.014, 0.03);   // окно выброса
+  box(0.034, 0.004, 0.075, M.black, 0, -0.047, 0.05);    // окно заряжания снизу
+  box(0.012, 0.012, 0.03, M.steel, 0.032, -0.02, 0.09);  // кнопка предохранителя
+
+  // --- Ствол, магазинная трубка, мушка ---
+  cyl(0.0175, 0.66, M.barrel, 0, 0.032, -0.51);
+  box(0.01, 0.006, 0.5, M.barrel, 0, 0.052, -0.45);
+  cyl(0.011, 0.004, M.black, 0, 0.032, -0.842);
+  box(0.006, 0.014, 0.006, M.brass, 0, 0.058, -0.82);
+  cyl(0.0135, 0.52, M.tube, 0, -0.01, -0.42);
+  cyl(0.017, 0.03, M.metal, 0, -0.01, -0.68);
+  box(0.03, 0.055, 0.02, M.metal, 0, 0.011, -0.66);
+
+  // --- Приклад и затылок ---
+  root.add(extrude([[-0.12, 0.045], [-0.30, 0.04], [-0.44, 0.025], [-0.455, -0.115], [-0.30, -0.10], [-0.19, -0.06], [-0.12, -0.075]], 0.05, M.wood));
+  const pad = box(0.052, 0.14, 0.02, M.pad, 0, -0.045, 0.463); pad.rotation.x = -0.1;
+
+  // --- Спуск ---
+  box(0.014, 0.006, 0.1, M.metal, 0, -0.075, 0.10);
+  box(0.014, 0.028, 0.006, M.metal, 0, -0.061, 0.05);
+  const trg = box(0.008, 0.026, 0.008, M.metal, 0, -0.058, 0.085); trg.rotation.x = 0.2;
+
+  // --- Цевьё (помпа) ---
+  box(0.058, 0.054, 0.23, M.wood, 0, -0.012, 0, pump);
+  for (let i = 0; i < 6; i++) box(0.06, 0.006, 0.01, M.woodD, 0, -0.04, -0.09 + i * 0.035, pump);
+  [-1, 1].forEach(s => box(0.008, 0.008, 0.3, M.metal, s * 0.022, -0.018, 0.2, pump)); // тяги (видны, когда помпа впереди)
+
+  // --- Точки для эффектов ---
+  const muzzle = new THREE.Object3D(); muzzle.position.set(0, 0.032, -0.85); root.add(muzzle);
+  const port = new THREE.Object3D(); port.position.set(0.035, 0.014, 0.03); root.add(port);
+
+  // --- Правая рука на шейке приклада ---
+  const rightHand = new THREE.Group(); root.add(rightHand);
+  box(0.022, 0.11, 0.11, M.skin, 0.04, -0.03, 0.245, rightHand);
+  box(0.022, 0.1, 0.06, M.skin, -0.04, -0.03, 0.28, rightHand);
+  box(0.022, 0.022, 0.09, M.skin, -0.028, 0.05, 0.24, rightHand);
+  box(0.075, 0.02, 0.09, M.skin, 0, -0.09, 0.235, rightHand);
+  box(0.08, 0.03, 0.06, M.skin, 0, 0.052, 0.29, rightHand);
+  box(0.016, 0.016, 0.12, M.skin, 0.02, -0.062, 0.145, rightHand);  // палец на спуске
+  limb(rightHand, 0.01, -0.09, 0.31, 0.28, -0.7, 0.66, [[0.2, 0, 0.085, M.skin], [0.8, 0.2, 0.125, M.sleeve]]);
+
+  // --- Левая рука: держит цевьё, а при заряжании ходит за патронами ---
+  const leftHand = new THREE.Group(); root.add(leftHand);
+  box(0.085, 0.035, 0.11, M.skin, 0, -0.052, 0, leftHand);
+  [-1, 1].forEach(s => box(0.02, 0.06, 0.1, M.skin, s * 0.048, -0.02, 0, leftHand));
+  box(0.02, 0.02, 0.07, M.skin, -0.03, 0.032, 0, leftHand);
+  limb(leftHand, 0, -0.07, 0.07, -0.45, -0.7, 0.55, [[0.2, 0, 0.085, M.skin], [0.8, 0.2, 0.125, M.sleeve]]);
+  const shellCarry = makeShell(true);       // патрон в пальцах при заряжании
+  shellCarry.position.set(0, -0.005, 0);
+  shellCarry.visible = false;
+  leftHand.add(shellCarry);
+  leftHand.position.set(0, 0, PUMP_Z);
+
+  if (opts.hands === false) { rightHand.visible = false; leftHand.visible = false; }
+  return { root, pump, PUMP_Z, muzzle, port, rightHand, leftHand, shellCarry };
+}
+
+// Военный ящик. Перед ящиком +Z, крышка крепится сзади (-Z) и откидывается вверх.
+function createMilCase() {
+  const root = new THREE.Group();
+  const mat = (c, r, m) => new THREE.MeshStandardMaterial({ color: c, roughness: r, metalness: m, flatShading: true });
+  const olive = mat(0x4a5230, 0.85, 0.05), oliveD = mat(0x3a4126, 0.9, 0.05), metal = mat(0x2f332a, 0.55, 0.5);
+  const steel = mat(0x8d9288, 0.4, 0.7), foam = mat(0x1b1e19, 1, 0);
+  const L = 1.4, H = 0.3, D = 0.5, T = 0.03;
+  const box = (w, h, d, m, x, y, z, parent) => {
+    const b = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m);
+    b.position.set(x, y, z); (parent || root).add(b); return b;
+  };
+
+  // Корпус (открытая коробка с поролоном внутри)
+  box(L, T, D, olive, 0, T / 2, 0);
+  box(L, H, T, olive, 0, H / 2, D / 2 - T / 2);
+  box(L, H, T, olive, 0, H / 2, -D / 2 + T / 2);
+  [-1, 1].forEach(s => box(T, H, D - 2 * T, olive, s * (L / 2 - T / 2), H / 2, 0));
+  box(L - 2 * T, 0.02, D - 2 * T, foam, 0, T + 0.01, 0);
+  [0.09, 0.19].forEach(y => box(L * 0.92, 0.02, 0.008, oliveD, 0, y, D / 2 + 0.002)); // рёбра жёсткости
+  [-1, 1].forEach(sx => [-1, 1].forEach(sz => box(0.06, H, 0.06, metal, sx * (L / 2 - 0.02), H / 2, sz * (D / 2 - 0.02)))); // углы
+  [-1, 1].forEach(s => {                                                                         // боковые ручки
+    box(0.012, 0.05, 0.14, metal, s * (L / 2 + 0.01), 0.17, 0);
+    box(0.02, 0.02, 0.16, steel, s * (L / 2 + 0.03), 0.145, 0);
+  });
+  const latches = [];
+  [-0.4, 0.4].forEach(x => {                                                                      // замки
+    box(0.09, 0.09, 0.02, steel, x, 0.235, D / 2 + 0.012);
+    latches.push(box(0.06, 0.035, 0.028, metal, x, 0.19, D / 2 + 0.026));
+  });
+
+  // Крышка на шарнире
+  const lid = new THREE.Group();
+  lid.position.set(0, H, -D / 2);
+  box(L, 0.07, D, olive, 0, 0.035, D / 2, lid);
+  box(L * 0.94, 0.02, 0.01, oliveD, 0, 0.03, D - 0.005, lid);
+  [-1, 1].forEach(s => box(0.05, 0.012, D * 0.8, oliveD, s * L * 0.3, 0.076, D / 2, lid));         // рёбра на крышке
+  [-1, 1].forEach(s => box(0.03, 0.03, 0.03, metal, s * 0.09, 0.085, D / 2, lid));                   // ручка сверху
+  box(0.21, 0.02, 0.03, metal, 0, 0.105, D / 2, lid);
+  const cv = document.createElement('canvas'); cv.width = 512; cv.height = 180;
+  const cx = cv.getContext('2d');
+  cx.fillStyle = '#e9e6cf'; cx.textAlign = 'center';
+  cx.font = 'bold 44px monospace'; cx.fillText('ВОЕННЫЙ ЯЩИК', 256, 56);
+  cx.font = 'bold 30px monospace'; cx.fillText('ОРУЖИЕ · ПАТРОНЫ', 256, 102);
+  cx.font = '26px monospace'; cx.fillText('№ 12-DZ   ★', 256, 146);
+  const stencil = new THREE.Mesh(new THREE.PlaneGeometry(0.62, 0.22), new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(cv), transparent: true }));
+  stencil.rotation.x = -Math.PI / 2; stencil.position.set(0, 0.0715, D / 2 + 0.06); lid.add(stencil);
+  root.add(lid);
+
+  // Содержимое: дробовик и коробки с патронами (добавляется снаружи)
+  const loot = new THREE.Group();
+  loot.position.y = T + 0.02;
+  root.add(loot);
+  const cartonMat = mat(0xa62a22, 0.8, 0), stripMat = mat(0xc9a227, 0.5, 0.5);
+  [[-0.5, 0.13], [-0.32, 0.13]].forEach(([x, z]) => {
+    box(0.16, 0.07, 0.1, cartonMat, x, 0.035, z, loot);
+    box(0.165, 0.012, 0.105, stripMat, x, 0.06, z, loot);
+  });
+  return { root, lid, loot, latches, L, H, D };
+}
+
+// Топор: модель из кода
+function createAxe() {
+  const root = new THREE.Group();
+  const m = (c, r, mt) => new THREE.MeshStandardMaterial({ color: c, roughness: r, metalness: mt, flatShading: true });
+  const wood = m(0x7a5230, 0.85, 0), woodD = m(0x4e3119, 0.9, 0), steel = m(0x9aa1a8, 0.35, 0.8), steelD = m(0x6c7279, 0.45, 0.7);
+  const skin = m(0xd9a67a, 0.9, 0), sleeve = m(0x3a4a6a, 0.95, 0);
+  const box = (w, h, d, mat, x, y, z) => { const b = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat); b.position.set(x, y, z); root.add(b); return b; };
+  box(0.045, 0.8, 0.045, wood, 0, 0.4, 0);          // рукоять
+  box(0.065, 0.07, 0.065, woodD, 0, 0.015, 0);      // набалдашник
+  box(0.054, 0.2, 0.054, woodD, 0, 0.2, 0);         // обмотка
+  const shape = new THREE.Shape([[-0.035, 0.66], [-0.035, 0.78], [0.03, 0.80], [0.13, 0.88], [0.17, 0.86], [0.17, 0.56], [0.13, 0.54], [0.03, 0.60]].map(p => new THREE.Vector2(p[0], p[1])));
+  const hg = new THREE.ExtrudeGeometry(shape, { depth: 0.035, bevelEnabled: true, bevelThickness: 0.004, bevelSize: 0.004, bevelSegments: 1 });
+  hg.translate(0, 0, -0.0175); hg.rotateY(Math.PI / 2);
+  root.add(new THREE.Mesh(hg, steel));                // головка (лезвие смотрит вперёд, в -Z)
+  box(0.038, 0.3, 0.01, steelD, 0, 0.71, -0.172);    // кромка лезвия
+  box(0.045, 0.075, 0.05, steelD, 0, 0.72, 0.06);    // обух
+  const limb = (sx, sy, sz, dx, dy, dz) => {
+    const dir = new THREE.Vector3(dx, dy, dz).normalize(), q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), dir);
+    [[0.2, 0, 0.08, skin], [0.8, 0.2, 0.12, sleeve]].forEach(([len, off, w, mt]) => {
+      const c = new THREE.Vector3(sx, sy, sz).addScaledVector(dir, off + len / 2);
+      const b = box(w, w, len, mt, c.x, c.y, c.z); b.quaternion.copy(q);
+    });
+  };
+  box(0.09, 0.09, 0.09, skin, 0, 0.12, 0); limb(0, 0.09, 0.04, 0.3, -0.7, 0.65);    // правая рука внизу
+  box(0.09, 0.09, 0.09, skin, 0, 0.40, 0); limb(0, 0.37, 0.04, -0.5, -0.6, 0.6);    // левая рука выше
+  return { root };
+}
+const axeRig = createAxe().root;
+axeRig.position.set(0.26, -0.5, -0.5);
+axeRig.rotation.set(-0.35, 0, 0.3);
+axeRig.visible = false;
+camera.add(axeRig);
+
+// Дробовик в руках (камера), показывается только после находки в ящике
+const sg = createShotgun();
+const sgun = sg.root;
+sgun.position.set(0.2, -0.24, -0.42);
+sgun.rotation.y = 0.12;
+sgun.visible = false;
+camera.add(sgun);
+const sgFlashMat = new THREE.MeshBasicMaterial({ color: 0xffe0a0 });
+const sgFlashG = new THREE.Group();
+sgFlashG.add(new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.08, 0.03), sgFlashMat));
+const sgFa = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.018, 0.018), sgFlashMat);
+const sgFb = sgFa.clone(); sgFb.rotation.z = Math.PI / 2;
+sgFlashG.add(sgFa, sgFb);
+sgFlashG.visible = false;
+sg.muzzle.add(sgFlashG);
+const sgLight = new THREE.PointLight(0xffb060, 0, 5, 2);
+sg.muzzle.add(sgLight);
+const _sgFollow = new THREE.Vector3(), _sgLh = new THREE.Vector3();
+const SG_B = new THREE.Vector3(-0.24, -0.42, 0.30);   // где левая рука берёт патроны (за кадром)
+const SG_P0 = new THREE.Vector3(0, -0.085, 0.06);     // под окном заряжания
+const SG_P1 = new THREE.Vector3(0, -0.045, 0.06);     // патрон вставлен
+
+function ejectCasing() { // гильза вылетает из окна при передёргивании помпы
+  const m = makeShell(false);
+  scene.add(m);
+  const wp = new THREE.Vector3(); sg.port.getWorldPosition(wp); m.position.copy(wp);
+  const q = new THREE.Quaternion(); sgun.getWorldQuaternion(q);
+  const v = new THREE.Vector3(1.7 + Math.random() * 0.6, 1.5 + Math.random() * 0.5, 0.5 + Math.random() * 0.6).applyQuaternion(q);
+  casings.push({ m, v, spin: new THREE.Vector3(Math.random() * 12, Math.random() * 12, Math.random() * 12), life: 4 });
+}
+
 // Фонарик (клавиша F)
 const flash = new THREE.SpotLight(0xfff2cc, 0, 45, Math.PI / 6, 0.4, 1);
 flash.position.set(0, 0, 0);
@@ -378,17 +833,23 @@ const barkMat = new THREE.MeshStandardMaterial({ color: 0x6b4423, roughness: 1, 
 const endMat = new THREE.MeshStandardMaterial({ color: 0xd2ab6f, roughness: 1, flatShading: true });
 const metalMat = c => new THREE.MeshStandardMaterial({ color: c, roughness: 0.55, metalness: 0.5, flatShading: true });
 
-function makeLogs() { // 3 бревна: два внизу, одно сверху
+function makeLogs(n) { // от 2 до 5 брёвен горкой
   const group = new THREE.Group();
-  const spots = [[0.0, 0.39, 0.0, 0.05], [-0.04, 0.14, 0.15, -0.08], [0.03, 0.14, -0.15, 0.06]];
-  const parts = spots.map(([x, y, z, ry]) => {
+  const layouts = { // [x, y, z]; верхние брёвна идут первыми на вынос
+    1: [[0, 0.14, 0]],
+    2: [[0, 0.14, -0.145], [0, 0.14, 0.145]],
+    3: [[0, 0.38, 0], [0, 0.14, -0.145], [0, 0.14, 0.145]],
+    4: [[0, 0.38, -0.145], [0, 0.14, -0.29], [0, 0.14, 0.29], [0, 0.14, 0]],
+    5: [[0, 0.38, -0.145], [0, 0.38, 0.145], [0, 0.14, -0.29], [0, 0.14, 0.29], [0, 0.14, 0]],
+  };
+  const parts = layouts[clamp(n, 1, 5)].map(([x, y, z]) => {
     const log = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.14, 1.05, 8), [barkMat, endMat, endMat]);
-    log.position.set(x, y, z);
-    log.rotation.set(0, ry, Math.PI / 2); // кладём бревно на бок
+    log.position.set(x + (Math.random() - 0.5) * 0.08, y, z);
+    log.rotation.set(0, (Math.random() - 0.5) * 0.14, Math.PI / 2); // кладём бревно на бок
     group.add(log);
     return log;
   });
-  return { group, parts }; // порядок: верхнее бревно забирается первым
+  return { group, parts };
 }
 
 function makeScrap() { // 3 детали: ржавая труба, балка, лист металла
@@ -406,7 +867,8 @@ function makeScrap() { // 3 детали: ржавая труба, балка, �
   return { group, parts: [pipe, beam, plate] };
 }
 
-function spawnPile(type, x, z) {
+function spawnPile(type, x, z, n) {
+  if (n === undefined) n = type === 'wood' ? 2 + Math.floor(Math.random() * 4) : 3; // дерево: от 2 до 5
   if (x === undefined) { // случайное место, не внутри деревьев и домов
     for (let tries = 0; tries < 30; tries++) {
       x = (Math.random() - 0.5) * 200; z = (Math.random() - 0.5) * 200;
@@ -414,11 +876,11 @@ function spawnPile(type, x, z) {
       if (!colliders.some(c => x > c.minX - 0.8 && x < c.maxX + 0.8 && z > c.minZ - 0.8 && z < c.maxZ + 0.8)) break;
     }
   }
-  const model = type === 'wood' ? makeLogs() : makeScrap();
+  const model = type === 'wood' ? makeLogs(n) : makeScrap();
   model.group.position.set(x, 0, z);
   model.group.rotation.y = Math.random() * Math.PI * 2;
   scene.add(model.group);
-  piles.push({ type, n: 3, group: model.group, parts: model.parts });
+  piles.push({ type, n, group: model.group, parts: model.parts });
 }
 for (let i = 0; i < 16; i++) spawnPile('wood');
 for (let i = 0; i < 18; i++) spawnPile('scrap');
@@ -433,14 +895,14 @@ function takeFromPile(p) { // берём одну штуку, модель ум�
   if (p.n <= 0) { scene.remove(p.group); piles.splice(piles.indexOf(p), 1); spawnPile(p.type); } // где-то появится новая
 }
 
-// Подсказка «[E] Взять» и поиск кучи, на которую смотрит игрок
-let lookedPile = null;
+// Подсказка «[E] ...» и поиск кучи или ящика, на которые смотрит игрок
+let lookedPile = null, lookedCase = null;
 const promptEl = document.createElement('div');
 promptEl.style.cssText = 'position:fixed;top:58%;left:50%;transform:translateX(-50%);color:#fff;font:20px monospace;text-shadow:1px 1px 3px #000;background:rgba(0,0,0,.35);padding:4px 12px;border-radius:6px;display:none';
 document.body.appendChild(promptEl);
 const _fwd = new THREE.Vector3(), _to = new THREE.Vector3();
 function updatePrompt() {
-  lookedPile = null;
+  lookedPile = null; lookedCase = null;
   if (!menuOpen && !buildMode && health > 0) {
     _fwd.set(0, 0, -1).applyQuaternion(camera.quaternion);
     let best = 0.88; // конус примерно 28 градусов
@@ -451,22 +913,100 @@ function updatePrompt() {
       const c = _to.normalize().dot(_fwd);
       if (c > best) { best = c; lookedPile = p; }
     }
-    if (lookedPile) { // через стену не берём
-      _to.set(lookedPile.group.position.x - camera.position.x, 0.25 - camera.position.y, lookedPile.group.position.z - camera.position.z);
+    for (const k of cases) {
+      if (k.state !== 'closed' && k.state !== 'open') continue;
+      _to.set(k.x - camera.position.x, 0.3 - camera.position.y, k.z - camera.position.z);
+      const d = _to.length();
+      if (d > 3.8) continue;
+      const c = _to.normalize().dot(_fwd);
+      if (c > best) { best = c; lookedCase = k; lookedPile = null; }
+    }
+    const tx = lookedCase ? lookedCase.x : lookedPile ? lookedPile.group.position.x : null;
+    const tz = lookedCase ? lookedCase.z : lookedPile ? lookedPile.group.position.z : null;
+    if (tx !== null) { // через стену не берём
+      _to.set(tx - camera.position.x, 0.25 - camera.position.y, tz - camera.position.z);
       const d = _to.length();
       raycaster.set(camera.position, _to.normalize());
       const wall = raycaster.intersectObjects(blockers, false)[0];
-      if (wall && wall.distance < d) lookedPile = null;
+      if (wall && wall.distance < d) { lookedPile = null; lookedCase = null; }
     }
   }
-  if (lookedPile) {
+  if (lookedCase) {
+    promptEl.textContent = lookedCase.state === 'closed' ? '[E] Открыть военный ящик' : '[E] Взять: дробовик (5 патронов) + 20 патронов в запас';
+    promptEl.style.display = 'block';
+  } else if (lookedPile) {
     promptEl.textContent = `[E] Взять: ${ITEMS[lookedPile.type].name} (осталось ${lookedPile.n})`;
     promptEl.style.display = 'block';
   } else promptEl.style.display = 'none';
 }
-function interact() { // клавиша E: куча рядом - берём, иначе рубим дерево
-  if (lookedPile) takeFromPile(lookedPile);
-  else chop();
+function treeHint() { // E у дерева: подсказка, рубить надо топором
+  raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
+  const hit = raycaster.intersectObjects(trees.map(t => t.trunk), false)[0];
+  if (hit && hit.distance < 3.5) notify(hasAxe ? 'Достань топор клавишей Q и бей левой кнопкой мыши' : 'Нужен топор: Tab, вкладка Крафт');
+}
+function interact() { // клавиша E: ящик или куча рядом - открываем/берём, иначе рубим дерево
+  if (lookedCase) caseInteract(lookedCase);
+  else if (lookedPile) takeFromPile(lookedPile);
+  else treeHint();
+}
+
+// --- Военные ящики: в каждом дробовик (5 патронов в магазине) + 20 патронов в запас ---
+const cases = [];
+function spawnCase(x, z, rotY) {
+  if (x === undefined) { // случайное место вне домов и деревьев
+    for (let tries = 0; tries < 40; tries++) {
+      x = (Math.random() - 0.5) * 220; z = (Math.random() - 0.5) * 220;
+      if (Math.abs(x) < 10 && Math.abs(z) < 10) continue;
+      if (!colliders.some(c => x > c.minX - 1.5 && x < c.maxX + 1.5 && z > c.minZ - 1.5 && z < c.maxZ + 1.5)) break;
+    }
+    rotY = Math.random() < 0.5 ? 0 : Math.PI / 2;
+  }
+  const mc = createMilCase();
+  mc.root.position.set(x, 0, z);
+  mc.root.rotation.y = rotY;
+  const lootGun = createShotgun({ hands: false });
+  lootGun.root.rotation.y = Math.PI / 2;
+  lootGun.root.position.set(0.05, 0.14, -0.05);
+  mc.loot.add(lootGun.root);
+  scene.add(mc.root);
+  const along = Math.abs(Math.sin(rotY)) < 0.5;
+  const hw = along ? mc.L / 2 : mc.D / 2, hd = along ? mc.D / 2 : mc.L / 2;
+  const collider = { minX: x - hw, maxX: x + hw, minZ: z - hd, maxZ: z + hd };
+  colliders.push(collider);
+  cases.push({ root: mc.root, lid: mc.lid, loot: mc.loot, latches: mc.latches, x, z, state: 'closed', t: 0, collider });
+}
+function caseInteract(c) {
+  if (c.state === 'closed') { c.state = 'opening'; c.t = 0; }
+  else if (c.state === 'open') {
+    c.state = 'taking'; c.t = 0;
+    if (!hasShotgun) {
+      hasShotgun = true; sgAmmo = SG_MAG; sgReserve += 20;
+      weapon = 'shotgun'; drawT = 0;
+      notify('Получен дробовик: 5 патронов в магазине + 20 в запас. [Q] - сменить оружие');
+    } else { sgReserve += SG_MAG + 20; notify('+25 патронов для дробовика'); }
+    spawnCase(); // где-то на карте появится новый ящик
+  }
+}
+function updateCases(dt) {
+  for (let i = cases.length - 1; i >= 0; i--) {
+    const c = cases[i];
+    if (c.state === 'opening') {
+      c.t += dt;
+      const u = clamp(c.t / 1.0, 0, 1);
+      c.lid.rotation.x = -1.95 * easeOut(u) + (u > 0.7 ? 0.06 * Math.sin(((u - 0.7) / 0.3) * Math.PI) : 0);
+      c.latches.forEach(l => { l.rotation.x = -easeOut(clamp(c.t / 0.25, 0, 1)) * 1.2; });
+      if (u >= 1) c.state = 'open';
+    } else if (c.state === 'taking') {
+      c.t += dt;
+      const u = clamp(c.t / 0.6, 0, 1), e = easeOut(u);
+      c.loot.position.set(0, 0.05 + 0.5 * e, 1.0 * e);
+      c.loot.scale.setScalar(Math.max(0.001, 1 - e));
+      if (u >= 1) { c.loot.visible = false; c.state = 'empty'; c.t = 0; }
+    } else if (c.state === 'empty') {
+      c.t += dt; // пустой ящик исчезает через 90 секунд
+      if (c.t > 90) { scene.remove(c.root); colliders.splice(colliders.indexOf(c.collider), 1); cases.splice(i, 1); }
+    }
+  }
 }
 
 // Патроны на земле
@@ -479,11 +1019,59 @@ function spawnAmmoBox(x, z) {
 }
 for (let i = 0; i < 15; i++) spawnAmmoBox();
 
-// Предметы на земле: еда (коричневая), вода (синяя), аптечка (белая)
+// Предметы на земле: консервы (еда), бутылки (вода), аптечка с красным крестом
 const items = [];
+function makeItemModel(type) {
+  const g = new THREE.Group();
+  const mat = (c, r, m, extra) => new THREE.MeshStandardMaterial(Object.assign({ color: c, roughness: r, metalness: m, flatShading: true }, extra || {}));
+  const add = (geo, m, x, y, z) => { const o = new THREE.Mesh(geo, m); o.position.set(x, y, z); g.add(o); return o; };
+  const cyl = (rt, rb, h, seg) => new THREE.CylinderGeometry(rt, rb, h, seg || 10);
+  const box = (w, h, d) => new THREE.BoxGeometry(w, h, d);
+  if (type === 'medkit') {
+    const red = mat(0xd63030, 0.6, 0), white = mat(0xf2f2f2, 0.6, 0), dark = mat(0x2b2b2b, 0.8, 0.2);
+    add(box(0.42, 0.26, 0.3), white, 0, 0.13, 0);
+    add(box(0.44, 0.03, 0.32), mat(0xd0d0d0, 0.6, 0), 0, 0.17, 0);      // шов крышки
+    add(box(0.16, 0.012, 0.05), red, 0, 0.266, 0); add(box(0.05, 0.012, 0.16), red, 0, 0.266, 0); // крест сверху
+    add(box(0.16, 0.05, 0.012), red, 0, 0.13, 0.151); add(box(0.05, 0.16, 0.012), red, 0, 0.13, 0.151); // крест спереди
+    add(box(0.16, 0.03, 0.03), dark, 0, 0.29, 0);                           // ручка
+    add(box(0.03, 0.05, 0.03), dark, -0.075, 0.275, 0); add(box(0.03, 0.05, 0.03), dark, 0.075, 0.275, 0);
+    [-1, 1].forEach(s => add(box(0.03, 0.06, 0.02), mat(0x8a8f96, 0.4, 0.7), s * 0.17, 0.18, 0.155)); // замки
+  } else if (type === 'food') {
+    const can = (x, z, label, lying) => {
+      const c = new THREE.Group();
+      const add2 = (geo, m, y) => { const o = new THREE.Mesh(geo, m); o.position.y = y; c.add(o); };
+      add2(cyl(0.085, 0.085, 0.13), mat(0xb9bec4, 0.4, 0.7), 0.065);
+      add2(cyl(0.0875, 0.0875, 0.075), mat(label, 0.8, 0), 0.065);
+      add2(cyl(0.09, 0.09, 0.012), mat(0xe2e6ea, 0.35, 0.8), 0.134);
+      add2(cyl(0.09, 0.09, 0.012), mat(0x8a9097, 0.4, 0.7), 0.006);
+      if (lying) { c.rotation.z = Math.PI / 2; c.position.set(x, 0.085, z); c.rotation.y = 0.5; }
+      else c.position.set(x, 0, z);
+      g.add(c);
+    };
+    can(-0.1, 0, 0xc2552a, false); can(0.12, 0.04, 0x6b8f3a, false); can(0.0, -0.17, 0xc9a227, true);
+  } else if (type === 'water') {
+    const bottle = (x, z, lying) => {
+      const b = new THREE.Group();
+      const water = mat(0x5fb0ec, 0.25, 0, { transparent: true, opacity: 0.82 });
+      const add2 = (geo, m, y) => { const o = new THREE.Mesh(geo, m); o.position.y = y; b.add(o); };
+      add2(cyl(0.07, 0.07, 0.22), water, 0.11);
+      add2(cyl(0.035, 0.07, 0.06), water, 0.25);       // плечи
+      add2(cyl(0.032, 0.032, 0.04), water, 0.30);      // горлышко
+      add2(cyl(0.036, 0.036, 0.035), mat(0x1f5f9e, 0.6, 0), 0.337); // крышка
+      add2(cyl(0.0715, 0.0715, 0.07), mat(0xf4f4f4, 0.7, 0), 0.11); // этикетка
+      add2(cyl(0.0722, 0.0722, 0.018), mat(0x2f7fc4, 0.7, 0), 0.11);
+      if (lying) { b.rotation.z = Math.PI / 2; b.position.set(x, 0.07, z); b.rotation.y = 0.4; }
+      else b.position.set(x, 0, z);
+      g.add(b);
+    };
+    bottle(-0.08, 0, false); bottle(0.04, 0.2, true);
+  }
+  return g;
+}
 function spawnItem(type, x, z) {
-  const m = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.4, 0.4), new THREE.MeshStandardMaterial({ color: ITEMS[type].color }));
-  m.position.set(x ?? (Math.random() - 0.5) * 200, 0.3, z ?? (Math.random() - 0.5) * 200);
+  const m = makeItemModel(type);
+  m.position.set(x ?? (Math.random() - 0.5) * 200, 0, z ?? (Math.random() - 0.5) * 200);
+  m.rotation.y = Math.random() * Math.PI * 2;
   scene.add(m);
   items.push({ mesh: m, type });
 }
@@ -501,10 +1089,18 @@ for (const h of housePositions) {
   spawnPile('wood', h.x + 6, h.z + 5); // дрова у входа
 }
 
+// Военные ящики: по одному в первых трёх домах и ещё три снаружи
+housePositions.slice(0, 3).forEach(h => spawnCase(h.x, h.z - 3.3, 0));
+for (let i = 0; i < 3; i++) spawnCase();
+
 // HUD
 const hud = document.createElement('div');
-hud.style.cssText = 'position:fixed;top:10px;left:10px;color:#fff;font:20px monospace;text-shadow:1px 1px 3px #000;white-space:pre';
+hud.style.cssText = 'position:fixed;top:10px;left:86px;color:#fff;font:20px monospace;text-shadow:1px 1px 3px #000;white-space:pre';
 document.body.appendChild(hud);
+const avatar = document.createElement('img'); // аватарка игрока
+avatar.src = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAC6klEQVR42u1bS2sTURS+88yjKfYhNIWIdWFRFxW0Cv4AF4LVhShYQUFcuPHXCCKUags+8I26d+mmPjaupIJUpSkptmrSzGQyc11/59ZOEwcR8t3dl3tz7vDlnO+ec+7EKlfKWvXwsFWPD3eryV0lH9nS6Cxa/R/OY1sW4EQhXqq36AEkgASQgM5F0BEilyt6HW/wL2RStxPAURTTA0gACchAA/z+PODxqQlkT2iCTsyIt8RnVopGWNt46LbAy59XAK8vfMUF9YgeQAJIQBcasFfEfH4ANcFr4nmrNwngKO91HuQpiUQhRBUojY0A/jU6DPjTzGt6AAkgAV1ogF3A+HUDjL2Tt9+mxveLS4cAh0ITnATz+NjG3yQXmGf41Nw7tOHixo/OTdADSAAJIAF/L4JadIEt0X1NK2y6TXTSRmoulWh6AAkgAVkkQiKWAh/5ei6SHNsx+UxyrthQxKfn4LzQnaTgGzblvvKGqtVBxcUQIAHUgD+PuI0Nj++r64CHR4dwfWyev/HPDSxcHIz5RBRDtiiGZC6ilFKeaMbWltcAD+zooweQABKQRR4gzvVyZSc2Nxr45sWruQXDhmPjFkEYAC4WC4Dr9SbgwaF+w+aRU/vxucqDmAeEbXoACSABGWiAEc8eLm/rEOctx/jOtcvTgGfmHwO+cvGMmH8C+OqFs4bN2afPAE+e3idyDZseQAJIAAnIQARFE1THWBz5kbjV0WYCcv3WvS0ToRvz9zERauD8zTsPDJtHT4wDzoumSdiM6AEkgARkoAGJvBgRxc/uh+8BHz9/2LDRKoimKMqGimVDxMf11o+mYXPPyw+AV6Yn0abixQgJIAFZaED12yrgsRFsgiqhEaVN6AxLORn0MtlAk+JtD9dYr5TbwHM+jjD/qNbW6AEkgARkoAGBOIMXWzXAXw7iG5oH7r4xbHw8VsG8QFyWyrfJtYMa4DfN+qIvwZpkabEKeMOiB5AAEkACtjcs/nu8x8dvuWTToXhbGWMAAAAASUVORK5CYII=';
+avatar.style.cssText = 'position:fixed;top:10px;left:10px;width:64px;height:64px;image-rendering:pixelated;border:2px solid #5a6b45;border-radius:8px;background:#181c18';
+document.body.appendChild(avatar);
 const hotbar = document.createElement('div');
 hotbar.style.cssText = 'position:fixed;bottom:15px;left:50%;transform:translateX(-50%);color:#fff;font:20px monospace;text-shadow:1px 1px 3px #000;background:rgba(0,0,0,0.4);padding:8px 16px;border-radius:6px;white-space:pre;text-align:center';
 document.body.appendChild(hotbar);
@@ -513,6 +1109,65 @@ const cross = document.createElement('div');
 cross.textContent = '+';
 cross.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);color:#fff;font:24px monospace';
 document.body.appendChild(cross);
+
+// --- Костёр: камни, поленья, угли, живое пламя, искры и дым ---
+function makeCampfire() {
+  const g = new THREE.Group();
+  const flat = (c, r) => new THREE.MeshStandardMaterial({ color: c, roughness: r === undefined ? 1 : r, flatShading: true });
+  for (let i = 0; i < 9; i++) { // кольцо камней
+    const a = i / 9 * Math.PI * 2, sz = 0.14 + Math.random() * 0.1;
+    const st = new THREE.Mesh(new THREE.DodecahedronGeometry(sz, 0), flat(0x6e6e6a + Math.floor(Math.random() * 3) * 0x0a0a0a));
+    st.position.set(Math.cos(a) * 0.45, sz * 0.6, Math.sin(a) * 0.45);
+    st.rotation.set(Math.random() * 3, Math.random() * 3, Math.random() * 3); st.scale.y = 0.75;
+    g.add(st);
+  }
+  const ash = new THREE.Mesh(new THREE.CylinderGeometry(0.36, 0.38, 0.05, 10), flat(0x24201c)); ash.position.y = 0.025; g.add(ash);
+  const coalMat = new THREE.MeshBasicMaterial({ color: 0xff5a1a });
+  const coals = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.24, 0.04, 8), coalMat); coals.position.y = 0.06; g.add(coals);
+  for (let i = 0; i < 4; i++) { // поленья шалашиком
+    const pivot = new THREE.Object3D(); pivot.rotation.y = i * Math.PI / 2 + 0.4; g.add(pivot);
+    const log = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.065, 0.62, 7), flat(i % 2 ? 0x4a2f18 : 0x3a2412));
+    log.position.set(0.3, 0.14, 0); log.rotation.z = 1.1; pivot.add(log);
+  }
+  const fire = [], smoke = [], sparks = [];
+  const part = (mat, list, life) => {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), mat); g.add(m);
+    list.push({ m, mat, life, age: Math.random() * life, vx: 0, vy: 0, vz: 0, x0: 0, z0: 0, size: 0.2 });
+  };
+  for (let i = 0; i < 12; i++) part(new THREE.MeshBasicMaterial({ transparent: true, depthWrite: false, blending: THREE.AdditiveBlending }), fire, 0.55 + Math.random() * 0.4);
+  for (let i = 0; i < 7; i++) part(new THREE.MeshBasicMaterial({ color: 0x555555, transparent: true, depthWrite: false }), smoke, 2 + Math.random());
+  for (let i = 0; i < 6; i++) part(new THREE.MeshBasicMaterial({ color: 0xffcc55, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending }), sparks, 0.8 + Math.random() * 0.8);
+  let tt = 0;
+  g.userData.update = dt => {
+    tt += dt;
+    coalMat.color.setRGB(1, 0.25 + 0.15 * Math.sin(tt * 9) + Math.random() * 0.05, 0.05);
+    for (const p of fire) {
+      p.age += dt;
+      if (p.age >= p.life) { p.age = 0; p.x0 = (Math.random() - 0.5) * 0.28; p.z0 = (Math.random() - 0.5) * 0.28; p.vx = -p.x0 * 0.5; p.vz = -p.z0 * 0.5; p.vy = 0.7 + Math.random() * 0.5; p.size = 0.13 + Math.random() * 0.1; }
+      const t = p.age / p.life, sz = p.size * (1 - t * 0.85) + 0.02;
+      p.m.position.set(p.x0 + p.vx * p.age, 0.12 + p.vy * p.age, p.z0 + p.vz * p.age);
+      p.m.scale.set(sz, sz * 1.7, sz); p.m.rotation.y += dt * 3;
+      p.mat.color.setRGB(1, 0.85 - t * 0.65, 0.3 - t * 0.25);
+      p.mat.opacity = (1 - t) * 0.9;
+    }
+    for (const p of smoke) {
+      p.age += dt;
+      if (p.age >= p.life) { p.age = 0; p.x0 = (Math.random() - 0.5) * 0.2; p.z0 = (Math.random() - 0.5) * 0.2; p.vx = (Math.random() - 0.3) * 0.25; p.vz = (Math.random() - 0.5) * 0.15; p.vy = 0.5 + Math.random() * 0.3; }
+      const t = p.age / p.life, sz = 0.12 + t * 0.5;
+      p.m.position.set(p.x0 + p.vx * p.age, 0.6 + p.vy * p.age, p.z0 + p.vz * p.age);
+      p.m.scale.set(sz, sz, sz); p.m.rotation.y += dt;
+      p.mat.opacity = 0.28 * (1 - t) * Math.min(1, t * 8);
+    }
+    for (const p of sparks) {
+      p.age += dt;
+      if (p.age >= p.life) { p.age = 0; p.x0 = (Math.random() - 0.5) * 0.2; p.z0 = (Math.random() - 0.5) * 0.2; p.vx = (Math.random() - 0.5) * 0.8; p.vz = (Math.random() - 0.5) * 0.8; p.vy = 1 + Math.random() * 1.2; }
+      const t = p.age / p.life;
+      p.m.position.set(p.x0 + p.vx * p.age, 0.3 + p.vy * p.age - 0.5 * 1.2 * p.age * p.age, p.z0 + p.vz * p.age);
+      p.m.scale.set(0.03, 0.03, 0.03); p.mat.opacity = 1 - t;
+    }
+  };
+  return g;
+}
 
 // --- Строительство и крафт ---
 const notice = document.createElement('div');
@@ -571,8 +1226,9 @@ function placePiece() {
   if (selPiece === 'fire' && built.filter(b => b.type === 'fire').length >= MAX_FIRES) return notify('Костров не больше 4');
   takeItem('wood', p.cost);
 
-  const mat = new THREE.MeshStandardMaterial({ color: p.color });
-  if (selPiece === 'fire') { mat.emissive = new THREE.Color(0xff5500); mat.emissiveIntensity = 1; }
+  const mat = selPiece === 'fire'
+    ? new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false }) // невидимая зона костра (для V)
+    : new THREE.MeshStandardMaterial({ color: p.color });
   const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
   mesh.position.set(x, y, z);
   scene.add(mesh);
@@ -585,6 +1241,7 @@ function placePiece() {
   }
   if (selPiece === 'roof') blockers.push(mesh);
   if (selPiece === 'fire') {
+    b.vis = makeCampfire(); b.vis.position.set(x, 0, z); scene.add(b.vis);
     b.light = new THREE.PointLight(0xff8a3a, 8, 20, 1);
     b.light.position.set(x, 1, z);
     scene.add(b.light);
@@ -603,6 +1260,7 @@ function removePiece() {
   const b = built[i];
   scene.remove(b.mesh);
   if (b.light) scene.remove(b.light);
+  if (b.vis) scene.remove(b.vis);
   if (b.collider) colliders.splice(colliders.indexOf(b.collider), 1);
   const bi = blockers.indexOf(b.mesh);
   if (bi >= 0) blockers.splice(bi, 1);
@@ -612,25 +1270,25 @@ function removePiece() {
 }
 
 // Рубка дерева (E)
-function chop() {
+function chop(quiet) {
   if (health <= 0 || chopCd > 0) return;
   raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
   const hit = raycaster.intersectObjects(trees.map(t => t.trunk), false)[0];
-  if (!hit || hit.distance > 3.5) return notify('Подойди ближе и смотри на ствол дерева');
-  if (freeRoom('wood') < 1) return notify('Инвентарь полон');
+  if (!hit || hit.distance > 3.5) { if (!quiet) notify('Подойди ближе и смотри на ствол дерева'); return; }
   chopCd = 0.4;
   const ti = trees.findIndex(t => t.trunk === hit.object);
   const t = trees[ti];
   t.hp--;
-  addItem('wood', 1);
+  if (t.hp > 0) notify('Рублю... осталось ударов: ' + t.hp);
   if (t.hp <= 0) {
     scene.remove(t.trunk);
     scene.remove(t.crown);
     colliders.splice(colliders.indexOf(t.collider), 1);
     blockers.splice(blockers.indexOf(t.trunk), 1);
     trees.splice(ti, 1);
-    spawnPile('wood', t.trunk.position.x, t.trunk.position.z);
-    notify('Дерево срублено, подбери брёвна (E)');
+    const n = 2 + Math.floor(Math.random() * 4); // выпадает от 2 до 5 брёвен
+    spawnPile('wood', t.trunk.position.x, t.trunk.position.z, n);
+    notify(`Дерево срублено, выпало брёвен: ${n} (E - взять)`);
   }
 }
 
@@ -640,6 +1298,12 @@ function craft(type) {
   if (type === 'ammo') {
     if (countOf('scrap') < 2) return notify('Нужно 2 лома');
     takeItem('scrap', 2); reserve += 7; notify('Сделано: +7 патронов');
+  }
+  if (type === 'axe') {
+    if (hasAxe) return notify('Топор уже есть');
+    if (countOf('wood') < 3 || countOf('scrap') < 2) return notify('Нужно 3 дерева и 2 лома');
+    takeItem('wood', 3); takeItem('scrap', 2);
+    hasAxe = true; weapon = 'axe'; drawT = 0; notify('Сделан топор! Рубить: ЛКМ у дерева. [Q] - сменить оружие');
   }
   if (type === 'medkit') {
     if (countOf('scrap') < 4) return notify('Нужно 4 лома');
@@ -653,7 +1317,9 @@ function updateBuild(dt) {
   noticeT -= dt;
   if (noticeT <= 0) notice.textContent = '';
   chopCd -= dt;
-  gun.visible = !buildMode;
+  gun.visible = !buildMode && weapon === 'pistol';
+  sgun.visible = !buildMode && weapon === 'shotgun';
+  axeRig.visible = !buildMode && weapon === 'axe';
   ghost.visible = buildMode && health > 0;
   if (ghost.visible) {
     const [x, z] = targetPos();
@@ -664,7 +1330,9 @@ function updateBuild(dt) {
   }
   for (const b of built) {
     if (b.type !== 'fire') continue;
-    b.light.intensity = 7 + Math.random() * 2; // мерцание
+    b.vis.userData.update(dt);
+    b.light.intensity = 7 + Math.sin(gunT * 13 + b.mesh.position.x) * 1.2 + Math.random() * 1.5; // мерцание
+    b.light.position.y = 0.9 + Math.random() * 0.25;
     const near = Math.hypot(b.mesh.position.x - camera.position.x, b.mesh.position.z - camera.position.z) < 4;
     if (near && health > 0 && health < 100) health = Math.min(100, health + 1.5 * dt); // у костра лечишься
   }
@@ -699,10 +1367,11 @@ function renderMenu() {
       ? `<b>${ITEMS[sel.type].name}</b> x${sel.n} ` + btn('Использовать', 'use', !!ITEMS[sel.type].use) + btn('Выбросить 1', 'drop:1') + btn('Выбросить всё', 'drop:all') +
         ` <span style="opacity:.7;font-size:14px">или нажми на другой слот, чтобы переложить</span>`
       : `<span style="opacity:.7;font-size:14px">Нажми на предмет, чтобы выбрать, потом на другой слот, чтобы переложить. Одинаковые предметы объединяются.</span>`) + `</div>`;
-    body += `<div style="opacity:.85">Патроны: ${ammo} в обойме, ${reserve} в запасе</div>`;
+    body += `<div style="opacity:.85">Пистолет: ${ammo} в обойме, ${reserve} в запасе` + (hasShotgun ? `<br>Дробовик: ${sgAmmo} в магазине, ${sgReserve} в запасе` : '') + `</div>`;
   }
   if (menuTab === 'craft') {
     body += row('Патроны x7 <small>(2 лома)</small>', btn('Создать', 'craft:ammo', countOf('scrap') >= 2));
+    body += row('Топор <small>(3 дерева + 2 лома)</small>', hasAxe ? '<span style="opacity:.7">есть</span>' : btn('Создать', 'craft:axe', countOf('wood') >= 3 && countOf('scrap') >= 2));
     body += row('Аптечка <small>(4 лома)</small>', btn('Создать', 'craft:medkit', countOf('scrap') >= 4));
     body += `<div style="margin-top:12px;opacity:.8">У тебя: лом x${countOf('scrap')}. Лом лежит на земле и в домах.</div>`;
   }
@@ -776,6 +1445,7 @@ addEventListener('keydown', e => {
     if (e.code >= 'Digit1' && e.code <= 'Digit5') useSlot(+e.code.slice(5) - 1); // быстрые слоты
     if (e.code === 'KeyZ') craft('ammo');
     if (e.code === 'KeyX') craft('medkit');
+    if (e.code === 'KeyQ') switchWeapon();
   }
   if (e.code === 'KeyE') interact();
   if (e.code === 'KeyF') { flashOn = !flashOn; flash.intensity = flashOn ? 25 : 0; }
@@ -794,15 +1464,66 @@ addEventListener('mousemove', e => {
 
 // Стрельба (пули останавливаются о стены и деревья)
 const raycaster = new THREE.Raycaster();
+function switchWeapon() { // клавиша Q
+  const owned = ['pistol'];
+  if (hasShotgun) owned.push('shotgun');
+  if (hasAxe) owned.push('axe');
+  if (owned.length < 2 || reloading || sgReloading || sgRacking || swingT >= 0 || cool > 0.3) return;
+  weapon = owned[(owned.indexOf(weapon) + 1) % owned.length];
+  drawT = 0;
+}
+
 function startReload() { // клавиша R
-  if (health <= 0 || reloading || menuOpen) return;
+  if (health <= 0 || menuOpen || weapon === 'axe') return;
+  if (weapon === 'shotgun') { // дробовик заряжается по одному патрону
+    if (sgReloading || sgRacking || sgAmmo >= SG_MAG) return;
+    if (sgReserve <= 0) return notify('Нет патронов для дробовика');
+    sgReloading = true; sgRT = 0; sgLoadedIn = -1; sgReloadN = Math.min(SG_MAG - sgAmmo, sgReserve);
+    return;
+  }
+  if (reloading) return;
   if (ammo >= MAG && !lock) return;
   if (reserve <= 0) return notify('Нет запасных патронов');
   reloading = true; rT = 0; loaded = false; lockAtStart = lock;
 }
 
+function startSwing() { // ЛКМ с топором: замах, удар, возврат
+  if (swingT >= 0) return;
+  swingT = 0; swingHitDone = false; cool = 0.6;
+}
+function axeHit() { // момент удара: дерево перед тобой и зомби рядом
+  chopCd = 0; chop(true);
+  const fwd2 = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw));
+  for (const z of zombies) {
+    const to = z.mesh.position.clone().sub(camera.position).setY(0);
+    const d = to.length();
+    if (d < 2.6 && to.normalize().dot(fwd2) > 0.6) { z.hp -= 2; z.mesh.position.addScaledVector(to, 0.8); }
+  }
+  kick += 0.03;
+}
+
+function attackShotgun() { // 6 дробинок с разбросом
+  if (sgReloading) { if (sgAmmo <= 0) return; sgReloading = false; sgLhBlend = 1; } // выстрел прерывает заряжание
+  if (sgAmmo <= 0) return notify('Дробовик пуст, нажми R');
+  sgAmmo--;
+  cool = 0.95; sgRecoil = 1; kick += 0.05; sgFlashT = 0.08;
+  sgRacking = true; sgRackT = 0; sgClack1 = false;
+  for (let i = 0; i < 6; i++) {
+    raycaster.setFromCamera(new THREE.Vector2((Math.random() - 0.5) * 0.08, (Math.random() - 0.5) * 0.08), camera);
+    const zHits = raycaster.intersectObjects(zombies.map(z => z.mesh), true);
+    if (!zHits.length || zHits[0].distance > 22) continue;
+    const wallHits = raycaster.intersectObjects(blockers, false);
+    if (wallHits.length && wallHits[0].distance < zHits[0].distance) continue;
+    const z = zombies.find(z => z.mesh === zHits[0].object.parent);
+    if (z) z.hp -= zHits[0].point.y > 1.8 ? 2 : 1;
+  }
+}
+
 function attack() {
-  if (health <= 0 || reloading || cool > 0) return;
+  if (health <= 0 || cool > 0 || drawT < 0.7) return;
+  if (weapon === 'shotgun') return attackShotgun();
+  if (weapon === 'axe') return startSwing();
+  if (reloading) return;
   if (ammo <= 0) return notify('Магазин пуст, нажми R');
   ammo--;
   cool = 0.22; recoil = 1; kick += 0.02; mzT = 0.06; slidePulse = 1; // отдача, вспышка, затвор
@@ -866,6 +1587,7 @@ function loop() {
       px += Math.sin(st) * 0.012; py += Math.abs(Math.cos(st)) * 0.014 - 0.007; rz += Math.sin(st) * 0.02;
     }
     pz += recoil * 0.06; rx += recoil * 0.16; py += recoil * 0.008;
+    { const dd = Math.pow(1 - drawT, 3); py -= dd * 0.4; rx -= dd * 0.7; } // достаём пистолет
     let slideOff = Math.max(lock ? 0.05 : 0, 0.05 * slidePulse);
     gp.lhand.visible = false;
     gp.magGroup.visible = true;
@@ -915,11 +1637,100 @@ function loop() {
     if (mzT > 0) mzG.rotation.z = Math.random() * 6;
   }
 
+  // Анимация дробовика: помпа, гильзы, заряжание по одному патрону
+  drawT = Math.min(1, drawT + dt * 2.6);
+  sgRecoil *= Math.exp(-dt * 9); sgFlashT = Math.max(0, sgFlashT - dt);
+  {
+    let off = 0;
+    if (sgRacking) { // после выстрела помпа уезжает назад (гильза вылетает) и возвращается
+      sgRackT += dt;
+      const u = clamp((sgRackT - 0.22) / 0.6, 0, 1);
+      off = 0.11 * Math.sin(u * Math.PI);
+      if (u >= 0.45 && !sgClack1) { sgClack1 = true; ejectCasing(); }
+      if (sgRackT >= 0.82) sgRacking = false;
+    }
+    sg.pump.position.z = sg.PUMP_Z + off;
+    const follow = _sgFollow.set(0, 0, sg.PUMP_Z + off);
+    const lh = _sgLh.copy(follow);
+    let tiltR = 0, carry = false;
+    if (sgReloading) {
+      sgRT += dt;
+      const inner = sgReloadN * 0.55, total = 0.3 + inner + 0.3;
+      if (sgRT < 0.3) { const k = sstep(0, 1, sgRT / 0.3); lh.lerpVectors(follow, SG_B, k); tiltR = k; }
+      else if (sgRT < 0.3 + inner) {
+        const tt = sgRT - 0.3, c = Math.floor(tt / 0.55), u = (tt - c * 0.55) / 0.55;
+        tiltR = 1;
+        if (u < 0.45) { lh.lerpVectors(SG_B, SG_P0, sstep(0, 1, u / 0.45)); carry = true; }
+        else if (u < 0.6) {
+          lh.lerpVectors(SG_P0, SG_P1, Math.sin(((u - 0.45) / 0.15) * Math.PI)); carry = u < 0.55;
+          if (u >= 0.5 && sgLoadedIn !== c) { sgLoadedIn = c; sgAmmo++; sgReserve--; }
+        } else { lh.lerpVectors(SG_P0, SG_B, sstep(0, 1, (u - 0.6) / 0.4)); carry = u > 0.88; }
+      } else { const k = sstep(0, 1, (sgRT - 0.3 - inner) / 0.3); lh.lerpVectors(SG_B, follow, k); tiltR = 1 - k; }
+      sgLastLh.copy(lh);
+      if (sgRT >= total) sgReloading = false;
+    } else if (sgLhBlend > 0.01) {
+      sgLhBlend *= Math.exp(-dt * 10);
+      lh.lerpVectors(follow, sgLastLh, sgLhBlend);
+    }
+    sg.leftHand.position.copy(lh);
+    sg.shellCarry.visible = carry;
+    let px = 0.2, py = -0.24, pz = -0.42, rx = 0, rz = 0;
+    px += Math.sin(gunT * 0.8) * 0.003; py += Math.sin(gunT * 1.6) * 0.004;
+    if (health > 0 && (keys.KeyW || keys.KeyA || keys.KeyS || keys.KeyD)) {
+      const st = gunT * (keys.ShiftLeft ? 12 : 9);
+      px += Math.sin(st) * 0.012; py += Math.abs(Math.cos(st)) * 0.014 - 0.007; rz += Math.sin(st) * 0.02;
+    }
+    const dd = Math.pow(1 - drawT, 3); py -= dd * 0.45; rx -= dd * 0.7;
+    pz += sgRecoil * 0.1; rx += sgRecoil * 0.26; py += sgRecoil * 0.012;
+    rz -= tiltR * 0.5; rx -= tiltR * 0.08; px -= tiltR * 0.03; py -= tiltR * 0.03;
+    sgun.position.set(px, py, pz);
+    sgun.rotation.set(rx, 0.12, rz);
+    sgFlashG.visible = sgFlashT > 0;
+    sgLight.intensity = sgFlashT > 0 ? 10 : 0;
+    if (sgFlashT > 0) sgFlashG.rotation.z = Math.random() * 6;
+  }
+
+  // Анимация топора: замах, удар по дереву, возврат
+  {
+    let px = 0.26, py = -0.5, pz = -0.5, rx = -0.35, rz = 0.3;
+    px += Math.sin(gunT * 0.8) * 0.003; py += Math.sin(gunT * 1.6) * 0.005;
+    if (health > 0 && (keys.KeyW || keys.KeyA || keys.KeyS || keys.KeyD)) {
+      const st = gunT * (keys.ShiftLeft ? 12 : 9);
+      px += Math.sin(st) * 0.012; py += Math.abs(Math.cos(st)) * 0.014 - 0.007; rz += Math.sin(st) * 0.02;
+    }
+    if (swingT >= 0) {
+      swingT += dt;
+      if (!swingHitDone && swingT >= 0.3) { swingHitDone = true; axeHit(); }
+      const w = sstep(0, 0.2, swingT), s = sstep(0.2, 0.32, swingT), r = sstep(0.36, 0.6, swingT);
+      rx += 0.9 * w - 2.25 * s + 1.35 * r;
+      py += 0.12 * w - 0.28 * s + 0.16 * r;
+      pz += -0.18 * s + 0.18 * r;
+      rz += -0.5 * s + 0.5 * r;
+      if (swingT >= 0.6) swingT = -1;
+    }
+    const dd = Math.pow(1 - drawT, 3); py -= dd * 0.5; rx -= dd * 0.6;
+    axeRig.position.set(px, py, pz);
+    axeRig.rotation.set(rx, 0, rz);
+  }
+
+  // Гильзы падают на землю
+  for (let i = casings.length - 1; i >= 0; i--) {
+    const c = casings[i];
+    c.v.y -= 9.8 * dt;
+    c.m.position.addScaledVector(c.v, dt);
+    c.m.rotation.x += c.spin.x * dt; c.m.rotation.y += c.spin.y * dt; c.m.rotation.z += c.spin.z * dt;
+    if (c.m.position.y < 0.012) { c.m.position.y = 0.012; c.v.y *= -0.35; c.v.x *= 0.6; c.v.z *= 0.6; c.spin.multiplyScalar(0.6); }
+    c.life -= dt;
+    if (c.life <= 0) { scene.remove(c.m); casings.splice(i, 1); }
+  }
+  updateCases(dt);
+
   // Подбор патронов
   for (let i = ammoBoxes.length - 1; i >= 0; i--) {
     const p = ammoBoxes[i].position;
     if (Math.hypot(p.x - camera.position.x, p.z - camera.position.z) < 1.5) {
       reserve += 14;
+      if (hasShotgun) sgReserve += 4;
       scene.remove(ammoBoxes[i]);
       ammoBoxes.splice(i, 1);
       spawnAmmoBox();
@@ -962,14 +1773,14 @@ function loop() {
   } else {
     hud.textContent =
       `Здоровье: ${Math.ceil(health)}   Еда: ${Math.ceil(hunger)}   Вода: ${Math.ceil(thirst)}\n` +
-      `Убито: ${kills}   Патроны: ${reloading ? 'перезарядка...' : ammo} / ${reserve}`;
+      `Убито: ${kills}   ` + (weapon === 'pistol' ? `Пистолет: ${reloading ? 'перезарядка...' : ammo} / ${reserve}` : weapon === 'shotgun' ? `Дробовик: ${sgReloading ? 'заряжаю... ' : ''}${sgAmmo} / ${sgReserve}` : 'Топор: ЛКМ - рубить и бить');
   }
   const hh = String(Math.floor(gameHour)).padStart(2, '0');
   const mm = String(Math.floor((gameHour % 1) * 60)).padStart(2, '0');
   const slotsRow = `<div style="display:flex;gap:6px;justify-content:center">${[0, 1, 2, 3, 4].map(i => slotHtml(i, false, false)).join('')}</div>`;
   const info = buildMode
     ? 'СТРОЙКА: ' + pieceKeys.map((k, i) => `${selPiece === k ? '▶' : ''}[${i + 1}] ${pieces[k].name} (${pieces[k].cost} дер.)`).join('  ') + `   Дерево: ${countOf('wood')}<br>[Q] поворот   [клик] поставить   [V] убрать   [B] выйти`
-    : `[F] Фонарик ${flashOn ? 'вкл' : 'выкл'}   [R] Перезарядка   [E] Взять / рубить   [B] Строить   [Tab] Меню   ${hh}:${mm}<br>Дерево: ${countOf('wood')}   Лом: ${countOf('scrap')}`;
+    : `[F] Фонарик ${flashOn ? 'вкл' : 'выкл'}   [R] Перезарядка${hasShotgun || hasAxe ? '   [Q] Оружие' : ''}   [E] Взять   [B] Строить   [Tab] Меню   ${hh}:${mm}<br>Дерево: ${countOf('wood')}   Лом: ${countOf('scrap')}`;
   const hotHtml = slotsRow + `<div style="margin-top:6px;font-size:16px">${info}</div>`;
   if (hotHtml !== lastHot) { hotbar.innerHTML = hotHtml; lastHot = hotHtml; }
 
