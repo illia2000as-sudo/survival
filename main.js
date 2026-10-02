@@ -2,15 +2,38 @@ import * as THREE from 'three';
 
 // --- Сцена ---
 const scene = new THREE.Scene();
+
+// --- Графика: тени для крупных предметов ---
+const SHADOWS = true; // false - выключить тени, если игра тормозит
+function shade(o) {
+  o.traverse(c => {
+    if (!c.isMesh || !c.material) return;
+    const m = Array.isArray(c.material) ? c.material[0] : c.material;
+    if (!m.isMeshStandardMaterial || (m.transparent && m.opacity < 0.6)) return;
+    c.receiveShadow = true;
+    if (c.geometry.type === 'PlaneGeometry' || c.geometry.type === 'CircleGeometry') return; // плоскости только принимают тени
+    if (!c.geometry.boundingBox) c.geometry.computeBoundingBox();
+    const sz = new THREE.Vector3(); c.geometry.boundingBox.getSize(sz);
+    if (Math.max(sz.x * Math.abs(c.scale.x), sz.y * Math.abs(c.scale.y), sz.z * Math.abs(c.scale.z)) >= 0.4) c.castShadow = true;
+  });
+}
+const _sceneAdd = scene.add.bind(scene);
+scene.add = (...objs) => { if (SHADOWS) objs.forEach(shade); return _sceneAdd(...objs); };
 scene.background = new THREE.Color(0x8a9a8a);
 scene.fog = new THREE.Fog(0x8a9a8a, 10, 80);
 
-const camera = new THREE.PerspectiveCamera(75, innerWidth / innerHeight, 0.1, 200);
+const camera = new THREE.PerspectiveCamera(75, innerWidth / innerHeight, 0.1, 260);
 camera.position.set(0, 1.7, 0);
 camera.rotation.order = 'YXZ';
 scene.add(camera); // нужно, чтобы оружие в руках было видно
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;   // кинематографичная цветокоррекция
+renderer.toneMappingExposure = 1.15;
+renderer.shadowMap.enabled = SHADOWS;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.setSize(innerWidth, innerHeight);
 document.body.appendChild(renderer.domElement);
 addEventListener('resize', () => {
@@ -24,14 +47,89 @@ scene.add(hemi);
 const sun = new THREE.DirectionalLight(0xffffff, 1.5);
 sun.position.set(20, 40, 10);
 scene.add(sun);
+sun.castShadow = SHADOWS;                      // тени от солнца следуют за игроком
+sun.shadow.mapSize.set(2048, 2048);
+const shCam = sun.shadow.camera;
+shCam.near = 1; shCam.far = 160; shCam.left = -45; shCam.right = 45; shCam.top = 45; shCam.bottom = -45;
+sun.shadow.bias = -0.0004; sun.shadow.normalBias = 0.05;
+scene.add(sun.target);
 
 // --- Мир ---
+const groundTex = (() => { // пиксельная трава
+  const c = document.createElement('canvas'); c.width = c.height = 32;
+  const x = c.getContext('2d');
+  const cols = ['#5a6b45', '#566840', '#5f7049', '#52623d', '#647650', '#4f5e3a'];
+  for (let i = 0; i < 32; i++) for (let j = 0; j < 32; j++) { x.fillStyle = cols[Math.floor(Math.random() * cols.length)]; x.fillRect(i, j, 1, 1); }
+  for (let k = 0; k < 24; k++) { x.fillStyle = 'rgba(40,32,18,.22)'; x.fillRect(Math.floor(Math.random() * 32), Math.floor(Math.random() * 32), 2, 1); }
+  const t = new THREE.CanvasTexture(c);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(100, 100);
+  t.magFilter = THREE.NearestFilter; t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4;
+  return t;
+})();
 const ground = new THREE.Mesh(
   new THREE.PlaneGeometry(400, 400),
-  new THREE.MeshStandardMaterial({ color: 0x5a6b45 })
+  new THREE.MeshStandardMaterial({ color: 0xffffff, map: groundTex, roughness: 1 })
 );
 ground.rotation.x = -Math.PI / 2;
 scene.add(ground);
+
+// --- Небо: градиент, солнце, звёзды ночью, облака ---
+const SKY_DAY_TOP = new THREE.Color(0x5f8fc0), SKY_DAY_BOT = new THREE.Color(0xb7c6c8);
+const SKY_WARM_TOP = new THREE.Color(0x3a4f78), SKY_WARM_BOT = new THREE.Color(0xf09050);
+const SKY_NIGHT_TOP = new THREE.Color(0x03060d), SKY_NIGHT_BOT = new THREE.Color(0x0a1019);
+const WHITE = new THREE.Color(0xffffff), skyTop = new THREE.Color(), skyBot = new THREE.Color();
+const skyMat = new THREE.ShaderMaterial({
+  side: THREE.BackSide, depthWrite: false,
+  uniforms: { top: { value: new THREE.Color() }, bottom: { value: new THREE.Color() }, sunDir: { value: new THREE.Vector3(0, 1, 0) }, sunCol: { value: new THREE.Color() }, night: { value: 0 } },
+  vertexShader: 'varying vec3 vP; void main() { vP = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+  fragmentShader: `
+    uniform vec3 top; uniform vec3 bottom; uniform vec3 sunDir; uniform vec3 sunCol; uniform float night;
+    varying vec3 vP;
+    void main() {
+      vec3 d = normalize(vP);
+      float h = clamp(d.y * 1.25 + 0.12, 0.0, 1.0);
+      vec3 col = mix(bottom, top, pow(h, 0.65));
+      float s = max(dot(d, normalize(sunDir)), 0.0);
+      col += sunCol * (pow(s, 700.0) * 4.0 + pow(s, 14.0) * 0.28);
+      vec3 q = floor(d * 160.0);
+      float st = step(0.9985, fract(sin(dot(q, vec3(12.9898, 78.233, 37.719))) * 43758.5453)) * night * smoothstep(0.05, 0.35, d.y);
+      col += vec3(st);
+      gl_FragColor = vec4(col, 1.0);
+      #include <tonemapping_fragment>
+      #include <colorspace_fragment>
+    }`,
+});
+const sky = new THREE.Mesh(new THREE.SphereGeometry(150, 24, 12), skyMat);
+sky.frustumCulled = false; sky.renderOrder = -10;
+scene.add(sky);
+
+const cloudMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.88, fog: false, depthWrite: false });
+const clouds = [];
+for (let i = 0; i < 18; i++) {
+  const c = new THREE.Group();
+  const n = 3 + Math.floor(Math.random() * 3);
+  for (let k = 0; k < n; k++) {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(8 + Math.random() * 12, 2.2 + Math.random() * 1.5, 6 + Math.random() * 6), cloudMat);
+    m.position.set((k - n / 2) * 9 + Math.random() * 3, Math.random() * 1.5, (Math.random() - 0.5) * 6);
+    c.add(m);
+  }
+  c.position.set((Math.random() - 0.5) * 280, 62 + Math.random() * 18, (Math.random() - 0.5) * 280);
+  clouds.push(c); scene.add(c);
+}
+function updateClouds(dt) { // облака плывут; ночью тёмные
+  cloudMat.color.setRGB(0.1 + 0.9 * daylight, 0.11 + 0.89 * daylight, 0.16 + 0.84 * daylight);
+  for (const c of clouds) {
+    c.position.x += 1.6 * dt;
+    const dx = c.position.x - camera.position.x, dz = c.position.z - camera.position.z;
+    if (dx > 140) c.position.x -= 280; else if (dx < -140) c.position.x += 280;
+    if (dz > 140) c.position.z -= 280; else if (dz < -140) c.position.z += 280;
+  }
+}
+
+// Виньетка: лёгкое затемнение углов экрана
+const vig = document.createElement('div');
+vig.style.cssText = 'position:fixed;inset:0;pointer-events:none;background:radial-gradient(ellipse at center, rgba(0,0,0,0) 58%, rgba(0,0,0,0.38) 100%)';
+document.body.appendChild(vig);
 
 // Столкновения: colliders - плоские коробки (вид сверху), blockers - то, что останавливает пули
 const colliders = [];
@@ -73,13 +171,24 @@ function resolveCollisions(pos, r) {
 }
 
 // Деревья (ствол твёрдый, крона нет)
+function makeCrown(x, z) { // крона из трёх ярусов
+  const g = new THREE.Group();
+  [[1.75, 1.9, 3.0], [1.4, 1.7, 4.0], [1.0, 1.5, 4.9]].forEach(([r, h, y], i) => {
+    const green = new THREE.Color(0x2f5a2a).offsetHSL((Math.random() - 0.5) * 0.04, 0, (Math.random() - 0.5) * 0.06 + i * 0.015);
+    const m = new THREE.Mesh(new THREE.ConeGeometry(r, h, 7), new THREE.MeshStandardMaterial({ color: green, roughness: 1, flatShading: true }));
+    m.position.y = y; m.rotation.y = Math.random() * 6; g.add(m);
+  });
+  g.position.set(x, 0, z); g.scale.setScalar(0.9 + Math.random() * 0.35);
+  scene.add(g);
+  return g;
+}
 const trees = []; // деревья, которые можно рубить
 for (let i = 0; i < 150; i++) {
   const x = (Math.random() - 0.5) * 300, z = (Math.random() - 0.5) * 300;
   if ((Math.abs(x) < 8 && Math.abs(z) < 8) || Math.abs(x) < 4.5 || Math.abs(z) < 4.5) continue; // не на дороге
   const trunk = box(0.6, 3, 0.6, 0x5b3a1e, x, 1.5, z, true);
   const collider = colliders[colliders.length - 1];
-  const crown = box(3, 2.5, 3, 0x2f5a2a, x, 4, z);
+  const crown = makeCrown(x, z);
   trees.push({ trunk, crown, collider, hp: 4 });
 }
 
@@ -261,18 +370,50 @@ for (let i = 0; i < 8; i++) {
 const zombies = [];
 function spawnZombie() {
   const g = new THREE.Group();
-  const body = new THREE.Mesh(new THREE.BoxGeometry(0.8, 1.2, 0.4), new THREE.MeshStandardMaterial({ color: 0x3a4a6a }));
-  body.position.y = 1.2;
-  const head = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.5, 0.5), new THREE.MeshStandardMaterial({ color: 0x6b8f5a }));
-  head.position.y = 2.05;
-  const legs = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.6, 0.35), new THREE.MeshStandardMaterial({ color: 0x2a2a2a }));
-  legs.position.y = 0.3;
-  g.add(body, head, legs);
+  const M = (c, r) => new THREE.MeshStandardMaterial({ color: c, roughness: r || 0.9, flatShading: true });
+  const part = (w, h, d, mat, x, y, z, parent) => { const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat); m.position.set(x, y, z); (parent || g).add(m); return m; };
+  const shirts = [0x3a4a6a, 0x6a3a3a, 0x4a5a3a, 0x55504a, 0x3a3a55];
+  const skin = new THREE.Color(0x6b8f5a).offsetHSL((Math.random() - 0.5) * 0.05, 0, (Math.random() - 0.5) * 0.08);
+  const skinM = M(skin), shirtM = M(shirts[Math.floor(Math.random() * shirts.length)]), pantsM = M(0x2a2a2a);
+  const body = part(0.7, 0.95, 0.38, shirtM, 0, 1.45, 0);
+  part(0.72, 0.16, 0.4, M(0x1f2a1f), 0, 1.0, 0);                       // ремень
+  part(0.2, 0.3, 0.02, skinM, 0.18, 1.3, 0.2);                           // дыра в рубашке
+  const head = part(0.46, 0.46, 0.46, skinM, 0, 2.15, 0.02);
+  const eye = new THREE.MeshBasicMaterial({ color: 0xff2a1a });
+  part(0.1, 0.07, 0.03, eye, -0.11, 2.2, 0.245); part(0.1, 0.07, 0.03, eye, 0.11, 2.2, 0.245);
+  part(0.22, 0.07, 0.03, M(0x1a0f0f), 0, 2.03, 0.245);                  // рот
+  part(0.48, 0.1, 0.48, M(0x2b2118), 0, 2.4, 0);                        // волосы
+  const arm = side => { // рука вытянута вперёд
+    const p = new THREE.Group(); p.position.set(side * 0.46, 1.82, 0);
+    part(0.2, 0.4, 0.2, shirtM, 0, -0.2, 0, p); part(0.18, 0.4, 0.18, skinM, 0, -0.6, 0, p);
+    g.add(p); return p;
+  };
+  const leg = side => {
+    const p = new THREE.Group(); p.position.set(side * 0.17, 0.95, 0);
+    part(0.26, 0.9, 0.28, pantsM, 0, -0.45, 0, p); part(0.28, 0.12, 0.34, M(0x1a1410), 0, -0.9, 0.03, p);
+    g.add(p); return p;
+  };
+  const parts = { body, head, armL: arm(-1), armR: arm(1), legL: leg(-1), legR: leg(1) };
+  parts.armL.rotation.x = parts.armR.rotation.x = -1.35;
   const a = Math.random() * Math.PI * 2, r = 25 + Math.random() * 40;
   g.position.set(Math.cos(a) * r, 0, Math.sin(a) * r);
   resolveCollisions(g.position, 0.6);
   scene.add(g);
-  zombies.push({ mesh: g, hp: 3, cooldown: 0 });
+  zombies.push({ mesh: g, hp: 3, cooldown: 0, parts, phase: Math.random() * 6 });
+}
+function animateZombie(z, moving, dt) { // походка: ноги шагают, руки качаются
+  const p = z.parts;
+  z.phase += dt * (moving ? 7 : 1.5);
+  const s = Math.sin(z.phase), amp = moving ? 0.7 : 0.08;
+  p.legL.rotation.x = s * amp; p.legR.rotation.x = -s * amp;
+  p.armL.rotation.x = -1.35 + Math.sin(z.phase * 0.9) * 0.12;
+  p.armR.rotation.x = -1.35 - Math.sin(z.phase * 0.9) * 0.12;
+  p.body.rotation.x = moving ? 0.12 : 0.05;
+  p.head.position.y = 2.15 + (moving ? Math.abs(s) * 0.03 : 0);
+}
+function zombieOf(o) { // зомби по любой его части (рука, нога, голова)
+  while (o) { for (const z of zombies) if (z.mesh === o) return z; o = o.parent; }
+  return null;
 }
 for (let i = 0; i < 12; i++) spawnZombie();
 
@@ -2108,7 +2249,7 @@ function attackShotgun() { // 6 дробинок с разбросом
     if (!zHits.length || zHits[0].distance > 22) continue;
     const wallHits = raycaster.intersectObjects(blockers, false);
     if (wallHits.length && wallHits[0].distance < zHits[0].distance) continue;
-    const z = zombies.find(z => z.mesh === zHits[0].object.parent);
+    const z = zombieOf(zHits[0].object);
     if (z) z.hp -= zHits[0].point.y > 1.8 ? 2 : 1;
   }
 }
@@ -2129,7 +2270,7 @@ function attack() {
   const wallHits = raycaster.intersectObjects(blockers, false);
   if (wallHits.length && wallHits[0].distance < zHits[0].distance) return; // пуля попала в стену
 
-  const z = zombies.find(z => z.mesh === zHits[0].object.parent);
+  const z = zombieOf(zHits[0].object);
   if (z) z.hp -= zHits[0].point.y > 1.8 ? 2 : 1; // в голову урон x2
 }
 
@@ -2143,12 +2284,26 @@ function loop() {
   gameHour = (gameHour + dt * 0.1) % 24;
   const ang = (gameHour - 6) / 24 * Math.PI * 2;
   daylight = Math.max(0, Math.min(1, (Math.sin(ang) + 0.2) / 0.6));
-  sun.position.set(Math.cos(ang) * 40, Math.max(5, Math.sin(ang) * 40), 10);
+  {
+    const px = camera.position.x, pz = camera.position.z; // солнце и его тени следуют за игроком
+    sun.position.set(px + Math.cos(ang) * 40, Math.max(9, Math.sin(ang) * 40), pz + 12);
+    sun.target.position.set(px, 0, pz); sun.target.updateMatrixWorld();
+  }
   sun.intensity = 1.5 * daylight;
   hemi.intensity = 0.12 + 1.08 * daylight;
-  scene.background.copy(nightColor).lerp(dayColor, daylight);
-  scene.fog.color.copy(scene.background);
-  scene.fog.far = 35 + 45 * daylight;
+  const elev = Math.sin(ang), warm = clamp(1 - Math.abs(elev - 0.08) / 0.32, 0, 1) * (elev > -0.25 ? 1 : 0); // рассвет и закат
+  skyTop.copy(SKY_NIGHT_TOP).lerp(SKY_DAY_TOP, daylight).lerp(SKY_WARM_TOP, warm * 0.35);
+  skyBot.copy(SKY_NIGHT_BOT).lerp(SKY_DAY_BOT, daylight).lerp(SKY_WARM_BOT, warm * 0.75);
+  skyMat.uniforms.top.value.copy(skyTop); skyMat.uniforms.bottom.value.copy(skyBot);
+  skyMat.uniforms.sunDir.value.set(Math.cos(ang) * 40, Math.sin(ang) * 40, 12).normalize();
+  skyMat.uniforms.sunCol.value.setRGB(1.0, 0.85 - warm * 0.25, 0.6 - warm * 0.3).multiplyScalar(daylight);
+  skyMat.uniforms.night.value = 1 - daylight;
+  sky.position.copy(camera.position);
+  scene.background.copy(skyBot); scene.fog.color.copy(skyBot);
+  scene.fog.near = 12; scene.fog.far = 55 + 70 * daylight;
+  hemi.color.copy(skyTop).lerp(WHITE, 0.45); hemi.groundColor.setRGB(0.24, 0.27, 0.2);
+  sun.color.setRGB(1, 0.94 - warm * 0.3, 0.84 - warm * 0.5);
+  updateClouds(dt);
 
   if (health > 0) {
     if (!riding) {
@@ -2363,6 +2518,7 @@ function loop() {
       z.mesh.rotation.y = Math.atan2(to.x, to.z);
       resolveCollisions(z.mesh.position, 0.6);
     }
+    animateZombie(z, dist < 35 && dist > 1.2, dt);
     z.cooldown -= dt;
     if (dist <= 1.5 && z.cooldown <= 0 && health > 0 && !menuOpen) { health -= 10; z.cooldown = 1; }
   }
