@@ -54,6 +54,24 @@ shCam.near = 1; shCam.far = 160; shCam.left = -45; shCam.right = 45; shCam.top =
 sun.shadow.bias = -0.0004; sun.shadow.normalBias = 0.05;
 scene.add(sun.target);
 
+// --- Настройки (сохраняются на компьютере) ---
+const DEFAULT_SETTINGS = { shadows: true, fov: 75, sens: 1, exposure: 1.15, volume: 0.8, fog: 1, res: Math.min(window.devicePixelRatio || 1, 2) };
+const SETTINGS = Object.assign({}, DEFAULT_SETTINGS);
+try { Object.assign(SETTINGS, JSON.parse(localStorage.getItem('dz_settings') || '{}')); } catch (e) { /* первый запуск */ }
+const SET_FMT = {
+  fov: v => Math.round(v) + '°', sens: v => v.toFixed(2) + 'x', exposure: v => v.toFixed(2),
+  volume: v => Math.round(v * 100) + '%', fog: v => Math.round(v * 100) + '%', res: v => Math.round(v * 100) + '%',
+};
+function saveSettings() { try { localStorage.setItem('dz_settings', JSON.stringify(SETTINGS)); } catch (e) { /* нет доступа */ } }
+function applySettings() {
+  sun.castShadow = SHADOWS && SETTINGS.shadows;
+  camera.fov = SETTINGS.fov; camera.updateProjectionMatrix();
+  renderer.toneMappingExposure = SETTINGS.exposure;
+  renderer.setPixelRatio(SETTINGS.res);
+  renderer.setSize(innerWidth, innerHeight);
+}
+applySettings();
+
 // --- Мир ---
 const groundTex = (() => { // пиксельная трава
   const c = document.createElement('canvas'); c.width = c.height = 32;
@@ -1014,6 +1032,263 @@ const dayColor = new THREE.Color(0x8a9a8a);
 const nightColor = new THREE.Color(0x04060a);
 let daylight = 1;
 
+// --- Склад: большое здание с заколоченным люком в подвал (люк надо прорубить топором) ---
+const warehouses = [];
+let inBasement = false, curW = null;
+const basementLamp = new THREE.PointLight(0xffc88a, 0, 30, 1); // свет подвала (одна лампа на оба подвала)
+scene.add(basementLamp);
+const splinterMat = new THREE.MeshBasicMaterial({ color: 0x8a6a3a });
+const fadeEl = document.createElement('div'); // затемнение при спуске и подъёме
+fadeEl.style.cssText = 'position:fixed;inset:0;background:#000;opacity:0;pointer-events:none;z-index:9';
+document.body.appendChild(fadeEl);
+
+function corrugated(base, dark, rep) { // гофрированный металл
+  const c = document.createElement('canvas'); c.width = 8; c.height = 8;
+  const g = c.getContext('2d');
+  for (let i = 0; i < 8; i++) { g.fillStyle = (i % 4 < 2) ? base : dark; g.fillRect(i, 0, 1, 8); }
+  const t = new THREE.CanvasTexture(c);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(rep, 1);
+  t.magFilter = THREE.NearestFilter; t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+function makeRack(cx, cz, along, len, solid) { // стеллаж с ящиками
+  const depth = 0.8, H = 3.4, g = new THREE.Group();
+  const metal = new THREE.MeshStandardMaterial({ color: 0x3c5a7a, roughness: 0.6, metalness: 0.5, flatShading: true });
+  const wood = new THREE.MeshStandardMaterial({ color: 0x7a5c34, roughness: 0.9, flatShading: true });
+  const crates = [0x7a5c34, 0x5e6b4a, 0x6b4f2e, 0x4a5a6a, 0x8a6a3a];
+  const add = (w, h, d, m, x, y, z) => { const o = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m); o.position.set(x, y, z); g.add(o); return o; };
+  [-len / 2, len / 2].forEach(px => [-depth / 2, depth / 2].forEach(pz => add(0.08, H, 0.08, metal, px, H / 2, pz)));
+  [0.45, 1.5, 2.55].forEach(y => {
+    add(len, 0.05, depth, wood, 0, y, 0);
+    let px = -len / 2 + 0.5;
+    while (px < len / 2 - 0.4) {
+      const w = 0.5 + Math.random() * 0.5, h = 0.35 + Math.random() * 0.4, d = 0.45 + Math.random() * 0.25;
+      if (px + w / 2 > len / 2 - 0.1) break;
+      if (Math.random() < 0.8) add(w, h, d, new THREE.MeshStandardMaterial({ color: crates[Math.floor(Math.random() * crates.length)], roughness: 0.9, flatShading: true }), px, y + 0.025 + h / 2, (Math.random() - 0.5) * 0.1);
+      px += w + 0.12;
+    }
+  });
+  g.position.set(cx, 0, cz);
+  if (along === 'z') g.rotation.y = Math.PI / 2;
+  scene.add(g);
+  if (solid) {
+    const hw = along === 'x' ? len / 2 : depth / 2, hd = along === 'x' ? depth / 2 : len / 2;
+    colliders.push({ minX: cx - hw, maxX: cx + hw, minZ: cz - hd, maxZ: cz + hd });
+  }
+  return g;
+}
+function makeBarrels(cx, cz, n) { // бочки кучкой
+  const cols = [0x8a2b20, 0x2b4a7a, 0x4a5a3a, 0x6a6a2a];
+  for (let i = 0; i < n; i++) {
+    const b = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.3, 0.9, 10), new THREE.MeshStandardMaterial({ color: cols[i % cols.length], roughness: 0.6, metalness: 0.4, flatShading: true }));
+    b.position.set(cx + (i % 3) * 0.7, 0.45, cz + Math.floor(i / 3) * 0.7); scene.add(b);
+    const band = new THREE.Mesh(new THREE.CylinderGeometry(0.31, 0.31, 0.06, 10), new THREE.MeshStandardMaterial({ color: 0x2a2a2a, roughness: 0.5, metalness: 0.7 }));
+    band.position.set(b.position.x, 0.6, b.position.z); scene.add(band);
+  }
+  colliders.push({ minX: cx - 0.4, maxX: cx + 0.7 * Math.min(n, 3) - 0.3, minZ: cz - 0.4, maxZ: cz + 0.7 * Math.ceil(n / 3) - 0.3 });
+}
+function makeHatch() { // заколоченный люк: доски, железные полосы, крест из досок, замок
+  const g = new THREE.Group();
+  const wood = c => new THREE.MeshStandardMaterial({ color: c, roughness: 0.95, flatShading: true });
+  const iron = new THREE.MeshStandardMaterial({ color: 0x2f3236, roughness: 0.5, metalness: 0.7, flatShading: true });
+  const bx = (w, h, d, m, x, y, z) => { const o = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m); o.position.set(x, y, z); g.add(o); return o; };
+  for (let i = 0; i < 5; i++) bx(2.0, 0.1, 0.38, wood([0x7a5c34, 0x6e5230, 0x80613a][i % 3]), 0, 0.05, -0.8 + i * 0.4);
+  [-0.55, 0.55].forEach(x => bx(0.14, 0.04, 2.05, iron, x, 0.12, 0));
+  const c1 = bx(2.6, 0.06, 0.2, wood(0x5e4528), 0, 0.15, 0); c1.rotation.y = 0.78;
+  const c2 = bx(2.6, 0.06, 0.2, wood(0x5e4528), 0, 0.18, 0); c2.rotation.y = -0.78;
+  bx(0.22, 0.12, 0.16, iron, 0, 0.22, 0);
+  [-1.1, 1.1].forEach(s => { bx(0.12, 0.08, 2.3, iron, s, 0.04, 0); bx(2.3, 0.08, 0.12, iron, 0, 0.04, s); });
+  return g;
+}
+function makeHole() { // проём с лестницей (после того как люк разрублен)
+  const g = new THREE.Group();
+  const bx = (w, h, d, m, x, y, z) => { const o = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m); o.position.set(x, y, z); g.add(o); return o; };
+  const black = new THREE.MeshBasicMaterial({ color: 0x050505 });
+  const iron = new THREE.MeshStandardMaterial({ color: 0x2f3236, roughness: 0.5, metalness: 0.7, flatShading: true });
+  const wood = new THREE.MeshStandardMaterial({ color: 0x7a5c34, roughness: 0.9, flatShading: true });
+  bx(2.0, 0.02, 2.0, black, 0, 0.02, 0);
+  [-1.1, 1.1].forEach(s => { bx(0.12, 0.08, 2.3, iron, s, 0.04, 0); bx(2.3, 0.08, 0.12, iron, 0, 0.04, s); });
+  [-0.35, 0.35].forEach(x => bx(0.07, 0.6, 0.07, wood, x, 0.3, 0.7));
+  [0.1, 0.4].forEach(y => bx(0.8, 0.05, 0.06, wood, 0, y, 0.7));
+  return g;
+}
+function hitHatch(w) { // удар топором по люку
+  if (w.state !== 'closed') return false;
+  w.hp--;
+  w.hatch.position.x = w.hx + (Math.random() - 0.5) * 0.08; w.hatch.position.z = w.hz + (Math.random() - 0.5) * 0.08;
+  for (let i = 0; i < 4; i++) {
+    addPuff(new THREE.Vector3(w.hx + (Math.random() - 0.5), 0.25, w.hz + (Math.random() - 0.5)),
+      new THREE.Vector3((Math.random() - 0.5) * 2, 2 + Math.random() * 1.5, (Math.random() - 0.5) * 2), splinterMat, 0.6, 0.35);
+  }
+  if (w.hp <= 0) {
+    w.state = 'open'; scene.remove(w.hatch); w.hole.visible = true;
+    for (let i = 0; i < 7; i++) { // щепки и доски разлетаются
+      const m = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.05, 0.12), new THREE.MeshStandardMaterial({ color: 0x7a5c34, roughness: 0.95, flatShading: true }));
+      m.position.set(w.hx + (Math.random() - 0.5) * 1.5, 0.3, w.hz + (Math.random() - 0.5) * 1.5); scene.add(m);
+      casings.push({ m, v: new THREE.Vector3((Math.random() - 0.5) * 4, 2 + Math.random() * 2, (Math.random() - 0.5) * 4), spin: new THREE.Vector3(Math.random() * 8, Math.random() * 8, Math.random() * 8), life: 12 });
+    }
+    notify('Люк разрублен! Внизу темно: нажми E и спустись');
+  } else notify('Люк трещит... осталось ударов: ' + w.hp);
+  kick += 0.02;
+  return true;
+}
+
+function buildWarehouse(x, z, idx) {
+  const W = 16, D = 12, H = 5.4, T = 0.4;
+  const wallMat = rep => new THREE.MeshStandardMaterial({ color: 0xffffff, map: corrugated('#8f9aa3', '#6c7780', rep), roughness: 0.85, metalness: 0.2 });
+  const concrete = new THREE.MeshStandardMaterial({ color: 0x6e6e68, roughness: 1, flatShading: true });
+  const dark = new THREE.MeshStandardMaterial({ color: 0x353a3f, roughness: 0.7, metalness: 0.4, flatShading: true });
+  const part = (w, h, d, mat, px, py, pz, solid, bullet) => {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+    m.position.set(px, py, pz); scene.add(m);
+    if (solid) colliders.push({ minX: px - w / 2, maxX: px + w / 2, minZ: pz - d / 2, maxZ: pz + d / 2 });
+    if (solid || bullet) blockers.push(m);
+    return m;
+  };
+  // деревья внутри участка убираем
+  for (let i = trees.length - 1; i >= 0; i--) {
+    const t = trees[i], p = t.trunk.position;
+    if (Math.abs(p.x - x) < W / 2 + 5 && Math.abs(p.z - z) < D / 2 + 6) {
+      scene.remove(t.trunk); scene.remove(t.crown);
+      colliders.splice(colliders.indexOf(t.collider), 1); blockers.splice(blockers.indexOf(t.trunk), 1); trees.splice(i, 1);
+    }
+  }
+  // стены (ворота 5 м посередине южной стены)
+  const seg = (W - 5) / 2;
+  part(W, H, T, wallMat(W), x, H / 2, z - D / 2, true);
+  part(T, H, D, wallMat(D), x - W / 2, H / 2, z, true);
+  part(T, H, D, wallMat(D), x + W / 2, H / 2, z, true);
+  part(seg, H, T, wallMat(seg), x - 2.5 - seg / 2, H / 2, z + D / 2, true);
+  part(seg, H, T, wallMat(seg), x + 2.5 + seg / 2, H / 2, z + D / 2, true);
+  part(5, H - 4.2, T, wallMat(5), x, 4.2 + (H - 4.2) / 2, z + D / 2, false, true);
+  // бетонный цоколь, угловые стойки, пол
+  part(W + 0.2, 1.0, T + 0.12, concrete, x, 0.5, z - D / 2, false);
+  part(T + 0.12, 1.0, D, concrete, x - W / 2, 0.5, z, false); part(T + 0.12, 1.0, D, concrete, x + W / 2, 0.5, z, false);
+  part(seg, 1.0, T + 0.12, concrete, x - 2.5 - seg / 2, 0.5, z + D / 2, false); part(seg, 1.0, T + 0.12, concrete, x + 2.5 + seg / 2, 0.5, z + D / 2, false);
+  [-1, 1].forEach(sx => [-1, 1].forEach(sz => part(0.6, H + 0.2, 0.6, dark, x + sx * W / 2, (H + 0.2) / 2, z + sz * D / 2, false)));
+  part(W - 0.4, 0.04, D - 0.4, concrete, x, 0.02, z, false);
+  // крыша-призма и конёк
+  const rs = new THREE.Shape(); rs.moveTo(-D / 2 - 0.7, 0); rs.lineTo(D / 2 + 0.7, 0); rs.lineTo(0, 2.5); rs.closePath();
+  const rg = new THREE.ExtrudeGeometry(rs, { depth: W + 1.4, bevelEnabled: false });
+  rg.translate(0, 0, -(W + 1.4) / 2); rg.rotateY(Math.PI / 2);
+  const roof = new THREE.Mesh(rg, new THREE.MeshStandardMaterial({ color: 0x7a4636, roughness: 0.9, metalness: 0.3, flatShading: true, side: THREE.DoubleSide }));
+  roof.position.set(x, H, z); scene.add(roof); blockers.push(roof);
+  part(W + 1.6, 0.14, 0.4, dark, x, H + 2.55, z, false);
+  // окна под крышей
+  const glass = new THREE.MeshStandardMaterial({ color: 0x1a232b, roughness: 0.1, metalness: 0.6 });
+  for (let i = -2; i <= 2; i++) {
+    part(1.7, 0.95, 0.08, dark, x + i * 3, 3.9, z - D / 2 - T / 2 - 0.04, false); part(1.5, 0.75, 0.1, glass, x + i * 3, 3.9, z - D / 2 - T / 2 - 0.05, false);
+  }
+  [-1, 1].forEach(sx => [-3.5, 0, 3.5].forEach(oz => {
+    part(0.08, 0.95, 1.7, dark, x + sx * (W / 2 + T / 2 + 0.04), 3.9, z + oz, false); part(0.1, 0.75, 1.5, glass, x + sx * (W / 2 + T / 2 + 0.05), 3.9, z + oz, false);
+  }));
+  // ворота: направляющая, сдвинутая створка, вывеска, пандус
+  part(8, 0.18, 0.2, dark, x - 1.5, 4.5, z + D / 2 + 0.3, false);
+  part(3.2, 4.0, 0.16, wallMat(3.2), x - 4.1, 2.0, z + D / 2 + 0.32, false);
+  const sc = document.createElement('canvas'); sc.width = 256; sc.height = 64;
+  const sx2 = sc.getContext('2d'); sx2.fillStyle = '#23282c'; sx2.fillRect(0, 0, 256, 64);
+  sx2.fillStyle = '#e8dfc8'; sx2.font = 'bold 40px monospace'; sx2.textAlign = 'center'; sx2.fillText('СКЛАД №' + (idx + 1), 128, 46);
+  const sign = new THREE.Mesh(new THREE.PlaneGeometry(3.6, 0.9), new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(sc) }));
+  sign.position.set(x, 4.85, z + D / 2 + T / 2 + 0.02); scene.add(sign);
+  part(6, 0.2, 2.6, concrete, x, 0.1, z + D / 2 + 1.5, false);
+  // внутри: стеллажи, бочки, ящики
+  makeRack(x - W / 2 + 0.9, z - 3.4, 'z', 3.6, true); makeRack(x - W / 2 + 0.9, z + 0.5, 'z', 3.6, true);
+  makeRack(x + W / 2 - 0.9, z - 3.4, 'z', 3.6, true); makeRack(x + W / 2 - 0.9, z + 0.5, 'z', 3.6, true);
+  makeRack(x - 3.8, z - D / 2 + 0.9, 'x', 4.0, true); makeRack(x + 0.4, z - D / 2 + 0.9, 'x', 4.0, true);
+  makeBarrels(x + 5.4, z + 3.6, 5);
+  for (let i = 0; i < 2; i++) { // штабели ящиков
+    const cx = x - 5.4 + i * 1.7, cz = z + 4.2;
+    part(1.4, 0.9, 1.2, new THREE.MeshStandardMaterial({ color: 0x7a5c34, roughness: 0.9, flatShading: true }), cx, 0.45, cz, true);
+    part(1.0, 0.7, 0.9, new THREE.MeshStandardMaterial({ color: 0x5e6b4a, roughness: 0.9, flatShading: true }), cx, 1.25, cz, false);
+  }
+  // люк в подвал
+  const hx = x + 3.6, hz = z - 2.2;
+  const hatch = makeHatch(); hatch.position.set(hx, 0.04, hz); scene.add(hatch);
+  const hole = makeHole(); hole.position.set(hx, 0.04, hz); hole.visible = false; scene.add(hole);
+  const bx = 600 + idx * 60, bz = 600;
+  const lad = buildBasement(bx, bz);
+  return { id: idx, x, z, hx, hz, hatch, hole, hp: 7, state: 'closed', bx, bz, ladderX: lad.x, ladderZ: lad.z };
+}
+
+function buildBasement(bx, bz) { // подземное помещение (далеко за краем карты, туда попадают через люк)
+  const W = 18, D = 12, H = 3.4, T = 0.5;
+  box(W + T, H, T, 0x5a5c58, bx, H / 2, bz - D / 2, true);
+  box(W + T, H, T, 0x5a5c58, bx, H / 2, bz + D / 2, true);
+  box(T, H, D, 0x5a5c58, bx - W / 2, H / 2, bz, true);
+  box(T, H, D, 0x5a5c58, bx + W / 2, H / 2, bz, true);
+  box(W, 0.1, D, 0x474846, bx, -0.05, bz, false);
+  box(W, 0.2, D, 0x3a3b3a, bx, H + 0.1, bz, false);
+  [-1, 1].forEach(sx => [-1, 1].forEach(sz => box(0.7, H, 0.7, 0x6a6c68, bx + sx * 4.5, H / 2, bz + sz * 1.8, true))); // колонны
+  for (let i = 0; i < 5; i++) box(0.35, 0.3, D, 0x2f302f, bx - 8 + i * 4, H - 0.15, bz, false);                       // балки
+  const pipeMat = new THREE.MeshStandardMaterial({ color: 0x6b5a48, roughness: 0.6, metalness: 0.6, flatShading: true });
+  [[-5.4, 2.85], [-5.4, 2.55], [5.4, 2.85]].forEach(([oz, y]) => {
+    const p = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, W - 1, 8), pipeMat);
+    p.rotation.z = Math.PI / 2; p.position.set(bx, y, bz + oz); scene.add(p);
+  });
+  const lampMat = new THREE.MeshBasicMaterial({ color: 0xffd9a0 });
+  [-5, 0, 5].forEach(ox => {
+    const cord = new THREE.Mesh(new THREE.CylinderGeometry(0.01, 0.01, 0.5, 4), pipeMat); cord.position.set(bx + ox, H - 0.3, bz); scene.add(cord);
+    const shade = new THREE.Mesh(new THREE.ConeGeometry(0.32, 0.22, 8), new THREE.MeshStandardMaterial({ color: 0x2a2d2a, roughness: 0.6, metalness: 0.5, flatShading: true })); shade.position.set(bx + ox, H - 0.62, bz); scene.add(shade);
+    const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.08, 6, 5), lampMat); bulb.position.set(bx + ox, H - 0.72, bz); scene.add(bulb);
+  });
+  // лестница вверх у восточной стены и светлое пятно люка
+  const lx = bx + W / 2 - 0.45;
+  const rail = new THREE.MeshStandardMaterial({ color: 0x7a5c34, roughness: 0.9, flatShading: true });
+  [-0.35, 0.35].forEach(oz => { const r = new THREE.Mesh(new THREE.BoxGeometry(0.07, H, 0.07), rail); r.position.set(lx, H / 2, bz + oz); scene.add(r); });
+  for (let i = 0; i < 9; i++) { const r = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.05, 0.7), rail); r.position.set(lx, 0.3 + i * 0.34, bz); scene.add(r); }
+  const lightQuad = new THREE.Mesh(new THREE.BoxGeometry(1.0, 0.02, 1.0), new THREE.MeshBasicMaterial({ color: 0xcfe6ff })); lightQuad.position.set(lx - 0.1, H - 0.01, bz); scene.add(lightQuad);
+  // стеллажи и бочки
+  makeRack(bx - 4.5, bz - 5.1, 'x', 4.2, true); makeRack(bx + 1.0, bz - 5.1, 'x', 4.2, true);
+  makeRack(bx - 4.5, bz + 5.1, 'x', 4.2, true); makeRack(bx + 1.0, bz + 5.1, 'x', 4.2, true);
+  makeBarrels(bx + 6.4, bz + 4.2, 4);
+  return { x: lx - 1.1, z: bz };
+}
+
+(function placeWarehouses() {
+  const spots = [];
+  for (let tries = 0; tries < 500 && spots.length < 2; tries++) {
+    const x = (Math.random() - 0.5) * 260, z = (Math.random() - 0.5) * 260;
+    if (Math.abs(x) < 24 || Math.abs(z) < 24) continue;                         // не на дорогах и не у старта
+    if (housePositions.some(h => Math.hypot(h.x - x, h.z - z) < 26)) continue;   // не вплотную к домам
+    if (spots.some(p => Math.hypot(p.x - x, p.z - z) < 60)) continue;
+    spots.push({ x, z });
+  }
+  spots.forEach((p, i) => warehouses.push(buildWarehouse(p.x, p.z, i)));
+})();
+
+function teleport(x, z, w, down, newYaw) { // переход между складом и подвалом с затемнением
+  fadeEl.style.transition = 'none'; fadeEl.style.opacity = '1';
+  void fadeEl.offsetWidth;
+  fadeEl.style.transition = 'opacity 0.8s'; fadeEl.style.opacity = '0';
+  inBasement = down; curW = down ? w : null;
+  camera.position.set(x, 1.7, z);
+  resolveCollisions(camera.position, 0.4);
+  yaw = newYaw; pitch = 0;
+}
+function useBasementPortal(p) { // клавиша E у люка или у лестницы
+  const w = p.w;
+  if (p.kind === 'hatch') {
+    if (w.state !== 'open') return notify(hasAxe ? 'Люк заколочен: руби его топором (ЛКМ)' : 'Люк заколочен досками. Нужен топор');
+    teleport(w.ladderX - 1.4, w.ladderZ, w, true, Math.PI / 2);
+    notify('Подвал склада: здесь много припасов. Лестница вверх - у восточной стены');
+  } else teleport(w.hx, w.hz + 2.4, w, false, Math.PI);
+}
+function stockWarehouses() { // раскладываем припасы (они не появляются заново)
+  for (const w of warehouses) {
+    spawnAmmoBox(w.x - 6.2, w.z + 2.8, true); spawnAmmoBox(w.x + 6.2, w.z + 2.0, true);
+    spawnPile('scrap', w.x - 3.2, w.z + 3.0, 3, true); spawnPile('rubber', w.x + 2.2, w.z + 3.6, 3, true); spawnPile('wood', w.x + 6.3, w.z - 0.8, 4, true);
+    spawnItem('food', w.x - 1.5, w.z + 1.8, true); spawnItem('water', w.x - 0.5, w.z + 2.0, true); spawnItem('fuel', w.x + 0.8, w.z + 1.6, true);
+    const cx = w.bx, cz = w.bz;
+    for (let i = 0; i < 5; i++) spawnPile('scrap', cx - 6 + i * 3, cz - 3.7, 3, true);
+    for (let i = 0; i < 4; i++) spawnPile('rubber', cx - 6 + i * 4, cz + 3.7, 3, true);
+    [[-5.8, -1.0], [-5.8, 1.0], [5.6, 0.0]].forEach(([ox, oz]) => spawnPile('wood', cx + ox, cz + oz, 5, true));
+    const loose = ['food', 'food', 'food', 'food', 'food', 'water', 'water', 'water', 'water', 'water', 'medkit', 'medkit', 'medkit', 'fuel', 'fuel', 'fuel'];
+    loose.forEach((t, i) => spawnItem(t, cx - 3.0 + (i % 5) * 1.5, cz - 0.6 + Math.floor(i / 5) * 0.6, true));
+    [-2.2, -0.8, 0.8, 2.2].forEach(oz => spawnAmmoBox(cx + 6.6, cz + oz, true));
+    spawnCase(cx - 7.6, cz, Math.PI / 2, true);
+  }
+}
+
 // --- Мотоцикл: собирается на верстаке из бензобака, двух колёс и руля ---
 // Мотоцикл DeadZone. Оси: вперёд -Z, вверх +Y, вправо +X. Начало координат - на земле посередине колёсной базы.
 function createMotorcycle(opts) {
@@ -1296,7 +1571,7 @@ function bikeSound(active, rpm, thr) {
   bEng.o1.frequency.setTargetAtTime(rpm / 60 * 2 + 18, t, 0.04);
   bEng.o2.frequency.setTargetAtTime(rpm / 60 + 9, t, 0.04);
   bEng.f.frequency.setTargetAtTime(350 + thr * 900 + rpm * 0.12, t, 0.05);
-  bEng.g.gain.setTargetAtTime(active ? 0.035 + thr * 0.06 : 0, t, 0.08);
+  bEng.g.gain.setTargetAtTime(active ? (0.035 + thr * 0.06) * SETTINGS.volume : 0, t, 0.08);
 }
 
 function parkBikeCollider() {
@@ -1478,7 +1753,7 @@ function makeTires(n) { // стопка старых покрышек (рези�
   return { group, parts };
 }
 
-function spawnPile(type, x, z, n) {
+function spawnPile(type, x, z, n, stash) {
   if (n === undefined) n = type === 'wood' ? 2 + Math.floor(Math.random() * 4) : 3; // дерево: от 2 до 5
   if (x === undefined) { // случайное место, не внутри деревьев и домов
     for (let tries = 0; tries < 30; tries++) {
@@ -1491,7 +1766,7 @@ function spawnPile(type, x, z, n) {
   model.group.position.set(x, 0, z);
   model.group.rotation.y = Math.random() * Math.PI * 2;
   scene.add(model.group);
-  piles.push({ type, n, group: model.group, parts: model.parts });
+  piles.push({ type, n, stash, group: model.group, parts: model.parts });
 }
 for (let i = 0; i < 16; i++) spawnPile('wood');
 for (let i = 0; i < 18; i++) spawnPile('scrap');
@@ -1504,17 +1779,17 @@ function takeFromPile(p) { // берём одну штуку, модель ум�
   chopCd = 0.25;
   p.group.remove(p.parts.shift());
   p.n--;
-  if (p.n <= 0) { scene.remove(p.group); piles.splice(piles.indexOf(p), 1); spawnPile(p.type); } // где-то появится новая
+  if (p.n <= 0) { scene.remove(p.group); piles.splice(piles.indexOf(p), 1); if (!p.stash) spawnPile(p.type); } // где-то появится новая
 }
 
 // Подсказка «[E] ...» и поиск кучи или ящика, на которые смотрит игрок
-let lookedPile = null, lookedCase = null, lookedBench = null;
+let lookedPile = null, lookedCase = null, lookedBench = null, lookedPortal = null;
 const promptEl = document.createElement('div');
 promptEl.style.cssText = 'position:fixed;top:58%;left:50%;transform:translateX(-50%);color:#fff;font:20px monospace;text-shadow:1px 1px 3px #000;background:rgba(0,0,0,.35);padding:4px 12px;border-radius:6px;display:none';
 document.body.appendChild(promptEl);
 const _fwd = new THREE.Vector3(), _to = new THREE.Vector3();
 function updatePrompt() {
-  lookedPile = null; lookedCase = null; lookedBench = null; lookedBike = false;
+  lookedPile = null; lookedCase = null; lookedBench = null; lookedBike = false; lookedPortal = null;
   if (!menuOpen && !buildMode && !riding && health > 0) {
     _fwd.set(0, 0, -1).applyQuaternion(camera.quaternion);
     let best = 0.88; // конус примерно 28 градусов
@@ -1548,18 +1823,34 @@ function updatePrompt() {
         if (c > best) { best = c; lookedBike = true; lookedBench = null; lookedCase = null; lookedPile = null; }
       }
     }
-    const tx = lookedBike ? bike.rig.root.position.x : lookedBench ? lookedBench.mesh.position.x : lookedCase ? lookedCase.x : lookedPile ? lookedPile.group.position.x : null;
-    const tz = lookedBike ? bike.rig.root.position.z : lookedBench ? lookedBench.mesh.position.z : lookedCase ? lookedCase.z : lookedPile ? lookedPile.group.position.z : null;
+    for (const w of warehouses) { // люк склада (наверху) и лестница (в подвале)
+      let px = null, pz = null, kind = null;
+      if (inBasement) { if (curW === w) { px = w.ladderX; pz = w.ladderZ; kind = 'up'; } }
+      else { px = w.hx; pz = w.hz; kind = 'hatch'; }
+      if (kind === null) continue;
+      _to.set(px - camera.position.x, 0.4 - camera.position.y, pz - camera.position.z);
+      if (_to.length() > 3.8) continue;
+      const c = _to.normalize().dot(_fwd);
+      if (c > best) { best = c; lookedPortal = { kind, w }; lookedBench = null; lookedCase = null; lookedPile = null; lookedBike = false; }
+    }
+    const tx = lookedPortal ? (lookedPortal.kind === 'up' ? lookedPortal.w.ladderX : lookedPortal.w.hx) : lookedBike ? bike.rig.root.position.x : lookedBench ? lookedBench.mesh.position.x : lookedCase ? lookedCase.x : lookedPile ? lookedPile.group.position.x : null;
+    const tz = lookedPortal ? (lookedPortal.kind === 'up' ? lookedPortal.w.ladderZ : lookedPortal.w.hz) : lookedBike ? bike.rig.root.position.z : lookedBench ? lookedBench.mesh.position.z : lookedCase ? lookedCase.z : lookedPile ? lookedPile.group.position.z : null;
     if (tx !== null) { // через стену не берём
       _to.set(tx - camera.position.x, 0.25 - camera.position.y, tz - camera.position.z);
       const d = _to.length();
       raycaster.set(camera.position, _to.normalize());
       const wall = raycaster.intersectObjects(blockers, false)[0];
-      if (wall && wall.distance < d) { lookedPile = null; lookedCase = null; lookedBench = null; lookedBike = false; }
+      if (wall && wall.distance < d) { lookedPile = null; lookedCase = null; lookedBench = null; lookedBike = false; lookedPortal = null; }
     }
   }
   if (riding) {
     promptEl.textContent = '[E] Слезть с мотоцикла';
+    promptEl.style.display = 'block';
+  } else if (lookedPortal) {
+    const w = lookedPortal.w;
+    promptEl.textContent = lookedPortal.kind === 'up' ? '[E] Подняться наверх'
+      : w.state === 'open' ? '[E] Спуститься в подвал'
+      : hasAxe ? 'Люк заколочен: руби топором (ЛКМ), ударов осталось: ' + w.hp : 'Люк заколочен досками. Нужен топор (Tab - Крафт)';
     promptEl.style.display = 'block';
   } else if (lookedBike) {
     promptEl.textContent = `[E] Сесть на мотоцикл (бензин ${Math.ceil(bike.fuel)}%)`;
@@ -1582,6 +1873,7 @@ function treeHint() { // E у дерева: подсказка, рубить н�
 }
 function interact() { // клавиша E: слезть/сесть, верстак, ящик, куча, иначе подсказка про дерево
   if (riding) return dismountBike();
+  if (lookedPortal) return useBasementPortal(lookedPortal);
   if (lookedBike) return mountBike();
   if (lookedBench) { menuTab = 'bench'; return toggleMenu(true); }
   if (lookedCase) caseInteract(lookedCase);
@@ -1591,7 +1883,7 @@ function interact() { // клавиша E: слезть/сесть, верста
 
 // --- Военные ящики: в каждом дробовик (5 патронов в магазине) + 20 патронов в запас ---
 const cases = [];
-function spawnCase(x, z, rotY) {
+function spawnCase(x, z, rotY, stash) {
   if (x === undefined) { // случайное место вне домов и деревьев
     for (let tries = 0; tries < 40; tries++) {
       x = (Math.random() - 0.5) * 220; z = (Math.random() - 0.5) * 220;
@@ -1612,7 +1904,7 @@ function spawnCase(x, z, rotY) {
   const hw = along ? mc.L / 2 : mc.D / 2, hd = along ? mc.D / 2 : mc.L / 2;
   const collider = { minX: x - hw, maxX: x + hw, minZ: z - hd, maxZ: z + hd };
   colliders.push(collider);
-  cases.push({ root: mc.root, lid: mc.lid, loot: mc.loot, latches: mc.latches, x, z, state: 'closed', t: 0, collider });
+  cases.push({ root: mc.root, lid: mc.lid, loot: mc.loot, latches: mc.latches, x, z, state: 'closed', t: 0, collider, stash });
 }
 function caseInteract(c) {
   if (c.state === 'closed') { c.state = 'opening'; c.t = 0; }
@@ -1623,7 +1915,7 @@ function caseInteract(c) {
       weapon = 'shotgun'; drawT = 0;
       notify('Получен дробовик: 5 патронов в магазине + 20 в запас. [Q] - сменить оружие');
     } else { sgReserve += SG_MAG + 20; notify('+25 патронов для дробовика'); }
-    spawnCase(); // где-то на карте появится новый ящик
+    if (!c.stash) spawnCase(); // где-то на карте появится новый ящик
   }
 }
 function updateCases(dt) {
@@ -1650,10 +1942,11 @@ function updateCases(dt) {
 
 // Патроны на земле
 const ammoBoxes = [];
-function spawnAmmoBox(x, z) {
+function spawnAmmoBox(x, z, stash) {
   const m = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.3, 0.35), new THREE.MeshStandardMaterial({ color: 0xd4a017 }));
   m.position.set(x ?? (Math.random() - 0.5) * 200, 0.15, z ?? (Math.random() - 0.5) * 200);
   scene.add(m);
+  m.userData.stash = stash;
   ammoBoxes.push(m);
 }
 for (let i = 0; i < 15; i++) spawnAmmoBox();
@@ -1716,12 +2009,12 @@ function makeItemModel(type) {
   }
   return g;
 }
-function spawnItem(type, x, z) {
+function spawnItem(type, x, z, stash) {
   const m = makeItemModel(type);
   m.position.set(x ?? (Math.random() - 0.5) * 200, 0, z ?? (Math.random() - 0.5) * 200);
   m.rotation.y = Math.random() * Math.PI * 2;
   scene.add(m);
-  items.push({ mesh: m, type });
+  items.push({ mesh: m, type, stash });
 }
 for (let i = 0; i < 10; i++) { spawnItem('food'); spawnItem('water'); }
 for (let i = 0; i < 5; i++) spawnItem('medkit');
@@ -1743,6 +2036,7 @@ for (const h of housePositions) {
 // Военные ящики: по одному в первых трёх домах и ещё три снаружи
 housePositions.slice(0, 3).forEach(h => spawnCase(h.x, h.z - 3.3, 0));
 for (let i = 0; i < 3; i++) spawnCase();
+stockWarehouses();
 
 // HUD
 const hud = document.createElement('div');
@@ -2068,7 +2362,7 @@ const bar = (label, v, color) =>
   `<div style="margin:4px 0">${label}: ${Math.ceil(v)}<div style="height:10px;background:#111;border-radius:5px"><div style="height:10px;width:${Math.max(0, Math.min(100, v))}%;background:${color};border-radius:5px"></div></div></div>`;
 
 function renderMenu() {
-  const tabs = [['inv', 'Инвентарь'], ['craft', 'Крафт'], ['bench', 'Верстак'], ['build', 'Стройка']];
+  const tabs = [['inv', 'Инвентарь'], ['craft', 'Крафт'], ['bench', 'Верстак'], ['build', 'Стройка'], ['settings', '⚙ Настройки']];
   let body = '';
   if (menuTab === 'inv') {
     body += bar('Здоровье', health, '#d64040') + bar('Еда', hunger, '#d19a3a') + bar('Вода', thirst, '#3a8fd6');
@@ -2103,6 +2397,15 @@ function renderMenu() {
     }
     body += `<div style="margin-top:12px;opacity:.8;font-size:14px">Резина: кучи старых покрышек (E). Лом: железные кучи. Бензин: канистры, заправка - слот 1-5 рядом с мотоциклом.</div>`;
   }
+  if (menuTab === 'settings') {
+    const sl = (k, label, min, max, step) => `<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;padding:7px 0;border-bottom:1px solid #3a4530"><span>${label}: <b id="v-${k}">${SET_FMT[k](SETTINGS[k])}</b></span><input type="range" data-set="${k}" min="${min}" max="${max}" step="${step}" value="${SETTINGS[k]}" style="width:240px;max-width:50%"></div>`;
+    body += row('Тени', btn(SETTINGS.shadows ? 'Включены' : 'Выключены', 'tog:shadows'));
+    body += sl('fov', 'Поле зрения', 60, 100, 1) + sl('sens', 'Чувствительность мыши', 0.3, 2.5, 0.05) + sl('exposure', 'Яркость', 0.6, 1.8, 0.05);
+    body += sl('volume', 'Громкость', 0, 1, 0.05) + sl('fog', 'Дальность видимости', 0.6, 1.6, 0.05) + sl('res', 'Разрешение картинки', 0.5, 2, 0.25);
+    body += row('Окно', btn('Полный экран', 'fs') + btn('Сбросить настройки', 'resetset'));
+    body += row('Игра', btn('Выйти из игры', 'quit'));
+    body += `<div style="margin-top:10px;opacity:.7;font-size:14px">Настройки сохраняются сами. Esc открывает это меню (игра на паузе).</div>`;
+  }
   if (menuTab === 'build') {
     for (const k of pieceKeys) {
       body += row(`${pieces[k].name} <small>(${pieces[k].cost} дерева)</small>`, btn('Строить', `build:${k}`, true));
@@ -2132,6 +2435,18 @@ function toggleMenu(open) {
   }
 }
 
+menu.addEventListener('input', e => { // ползунки настроек
+  const k = e.target.dataset && e.target.dataset.set;
+  if (!k) return;
+  SETTINGS[k] = parseFloat(e.target.value);
+  const lab = document.getElementById('v-' + k);
+  if (lab) lab.textContent = SET_FMT[k](SETTINGS[k]);
+  applySettings(); saveSettings();
+});
+// Esc (или потеря курсора) ставит игру на паузу и открывает настройки
+document.addEventListener('pointerlockchange', () => {
+  if (document.pointerLockElement !== renderer.domElement && !menuOpen && health > 0) { menuTab = 'settings'; toggleMenu(true); }
+});
 menu.addEventListener('click', e => {
   const sl = e.target.closest('[data-slot]');
   if (sl) {
@@ -2153,6 +2468,10 @@ menu.addEventListener('click', e => {
   }
   if (act === 'craft') craft(arg);
   if (act === 'bench') benchCraft(arg);
+  if (act === 'tog') { SETTINGS[arg] = !SETTINGS[arg]; applySettings(); saveSettings(); }
+  if (act === 'fs') { try { if (document.fullscreenElement) document.exitFullscreen(); else document.documentElement.requestFullscreen(); } catch (err) { /* не поддерживается */ } }
+  if (act === 'resetset') { Object.assign(SETTINGS, DEFAULT_SETTINGS); applySettings(); saveSettings(); }
+  if (act === 'quit') window.close();
   if (act === 'build') { selPiece = arg; buildMode = true; toggleMenu(false); return; }
   renderMenu();
 });
@@ -2192,8 +2511,8 @@ renderer.domElement.addEventListener('click', () => {
 });
 addEventListener('mousemove', e => {
   if (document.pointerLockElement !== renderer.domElement) return;
-  yaw -= e.movementX * 0.002;
-  pitch = Math.max(-1.5, Math.min(1.5, pitch - e.movementY * 0.002));
+  yaw -= e.movementX * 0.002 * SETTINGS.sens;
+  pitch = Math.max(-1.5, Math.min(1.5, pitch - e.movementY * 0.002 * SETTINGS.sens));
 });
 
 // Стрельба (пули останавливаются о стены и деревья)
@@ -2229,6 +2548,11 @@ function startSwing() { // ЛКМ с топором: замах, удар, во�
 function axeHit() { // момент удара: дерево перед тобой и зомби рядом
   chopCd = 0; chop(true);
   const fwd2 = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw));
+  for (const w of warehouses) { // удар по заколоченному люку
+    if (inBasement || w.state !== 'closed') continue;
+    const dx = w.hx - camera.position.x, dz = w.hz - camera.position.z, d = Math.hypot(dx, dz);
+    if (d < 3.6 && (d < 1.4 || (dx / d) * fwd2.x + (dz / d) * fwd2.z > 0.45)) { hitHatch(w); break; }
+  }
   for (const z of zombies) {
     const to = z.mesh.position.clone().sub(camera.position).setY(0);
     const d = to.length();
@@ -2300,9 +2624,16 @@ function loop() {
   skyMat.uniforms.night.value = 1 - daylight;
   sky.position.copy(camera.position);
   scene.background.copy(skyBot); scene.fog.color.copy(skyBot);
-  scene.fog.near = 12; scene.fog.far = 55 + 70 * daylight;
+  scene.fog.near = 12; scene.fog.far = (55 + 70 * daylight) * SETTINGS.fog;
   hemi.color.copy(skyTop).lerp(WHITE, 0.45); hemi.groundColor.setRGB(0.24, 0.27, 0.2);
   sun.color.setRGB(1, 0.94 - warm * 0.3, 0.84 - warm * 0.5);
+  if (inBasement && curW) { // подвал: темно, светят только лампа и фонарик
+    hemi.intensity = 0.3; sun.intensity = 0;
+    scene.background.setRGB(0.01, 0.01, 0.012); scene.fog.color.setRGB(0.01, 0.01, 0.012); scene.fog.near = 3; scene.fog.far = 28;
+    sky.visible = false;
+    basementLamp.position.set(curW.bx, 2.6, curW.bz);
+    basementLamp.intensity = 26 + Math.sin(gunT * 9) * 2 + Math.random() * 3;
+  } else { sky.visible = true; basementLamp.intensity = 0; }
   updateClouds(dt);
 
   if (health > 0) {
@@ -2486,9 +2817,10 @@ function loop() {
     if (Math.hypot(p.x - camera.position.x, p.z - camera.position.z) < 1.5) {
       reserve += 14;
       if (hasShotgun) sgReserve += 4;
+      const stashBox = ammoBoxes[i].userData.stash;
       scene.remove(ammoBoxes[i]);
       ammoBoxes.splice(i, 1);
-      spawnAmmoBox();
+      if (!stashBox) spawnAmmoBox();
     }
   }
 
@@ -2497,12 +2829,12 @@ function loop() {
     items[i].mesh.rotation.y += dt; // предметы медленно вращаются
     const p = items[i].mesh.position;
     if (Math.hypot(p.x - camera.position.x, p.z - camera.position.z) < 1.5) {
-      const type = items[i].type;
+      const type = items[i].type, stashItem = items[i].stash;
       if (freeRoom(type) < 1) { if (noticeT <= 0) notify('Инвентарь полон'); continue; }
       addItem(type, 1);
       scene.remove(items[i].mesh);
       items.splice(i, 1);
-      spawnItem(type);
+      if (!stashItem) spawnItem(type);
     }
   }
 
