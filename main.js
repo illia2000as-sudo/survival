@@ -306,6 +306,11 @@ const ITEMS = {
   medkit: { name: 'Аптечка', color: 0xf2f2f2, stack: 3,  use: 'heal' },
   wood:   { name: 'Дерево',  color: 0x8b6b3e, stack: 20 },
   scrap:  { name: 'Лом',     color: 0x8a8a92, stack: 20 },
+  rubber: { name: 'Резина',  color: 0x202020, stack: 10 },
+  fuel:   { name: 'Бензин',  color: 0xb02a1a, stack: 3,  use: 'fuel' },
+  tank:   { name: 'Бензобак', color: 0x8f2b21, stack: 1 },
+  wheel:  { name: 'Колесо',  color: 0x333333, stack: 2 },
+  bars:   { name: 'Руль',    color: 0xc9ced4, stack: 1 },
 };
 const slots = new Array(SLOTS).fill(null); // каждый слот: null или { type, n }
 const hex = c => '#' + c.toString(16).padStart(6, '0');
@@ -355,6 +360,42 @@ function makeIcons() {
     f('#2b2b2b', 5, 2, 6, 1); f('#2b2b2b', 5, 3, 1, 1); f('#2b2b2b', 10, 3, 1, 1);
     f('#2b2b2b', 1, 4, 14, 10); f('#f4f4f4', 2, 5, 12, 8); f('#d9d9d9', 2, 12, 12, 1);
     f('#d63030', 7, 6, 2, 6); f('#d63030', 5, 8, 6, 2); f('#8a8f96', 2, 8, 1, 2); f('#8a8f96', 13, 8, 1, 2);
+  });
+  out.rubber = mk(f => { // старая покрышка
+    for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
+      const r = Math.hypot(x - 7.5, y - 7.5);
+      if (r > 7.6 || r < 3.4) continue;
+      f(r > 6.4 ? '#101010' : r > 5.0 ? '#262626' : '#1a1a1a', x, y);
+    }
+    for (let a = 0; a < 12; a++) { const t = a / 12 * Math.PI * 2; f('#3c3c3c', Math.round(7.5 + Math.cos(t) * 6.9), Math.round(7.5 + Math.sin(t) * 6.9)); }
+    f('#555555', 5, 4); f('#555555', 4, 6);
+  });
+  out.fuel = mk(f => { // канистра с бензином
+    f('#7a1a10', 5, 2, 5, 1); f('#7a1a10', 5, 3, 1, 1); f('#7a1a10', 9, 3, 1, 1);
+    f('#d9d9d9', 11, 2, 2, 2); f('#e0b020', 11, 4, 2, 1);
+    f('#2b0a06', 2, 4, 12, 11); f('#b02a1a', 3, 5, 10, 9); f('#d04030', 3, 5, 10, 1);
+    f('#7a1a10', 3, 13, 10, 1); f('#e8e0c8', 5, 8, 6, 3); f('#b02a1a', 7, 8, 2, 3); f('#b02a1a', 5, 9, 6, 1);
+  });
+  out.tank = mk(f => { // бензобак
+    for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
+      const e = Math.pow((x - 7.5) / 7.2, 2) + Math.pow((y - 9) / 4.6, 2);
+      if (e <= 1) f(e > 0.72 ? '#5c1913' : '#8f2b21', x, y);
+    }
+    f('#c2493a', 4, 7, 7, 1); f('#c2493a', 5, 6, 5, 1); f('#c9ced4', 7, 3, 2, 2); f('#8a8f96', 7, 5, 2, 1);
+  });
+  out.wheel = mk(f => { // колесо: покрышка и диск со спицами
+    for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
+      const dx = x - 7.5, dy = y - 7.5, r = Math.hypot(dx, dy);
+      if (r > 7.6) continue;
+      if (r > 5.3) f(r > 6.6 ? '#101010' : '#262626', x, y);
+      else if (r > 1.6) f(Math.abs(Math.sin(Math.atan2(dy, dx) * 4)) < 0.22 ? '#6f757c' : '#aeb4bb', x, y);
+      else f('#555555', x, y);
+    }
+  });
+  out.bars = mk(f => { // руль
+    f('#c9ced4', 4, 7, 8, 1); f('#8a8f96', 4, 8, 8, 1);
+    f('#c9ced4', 3, 5, 1, 3); f('#c9ced4', 12, 5, 1, 3);
+    f('#111111', 1, 3, 2, 4); f('#111111', 13, 3, 2, 4); f('#444444', 7, 6, 2, 3);
   });
   return out;
 }
@@ -411,6 +452,11 @@ function useSlot(i) {
   if (u === 'eat' && hunger < 100) hunger = Math.min(100, hunger + 30);
   else if (u === 'drink' && thirst < 100) thirst = Math.min(100, thirst + 30);
   else if (u === 'heal' && health < 100) health = Math.min(100, health + 40);
+  else if (u === 'fuel') { // канистра заправляет мотоцикл рядом
+    if (!bike || Math.hypot(bike.rig.root.position.x - camera.position.x, bike.rig.root.position.z - camera.position.z) > 4) { notify('Подойди к мотоциклу, чтобы заправить'); return false; }
+    if (bike.fuel >= 99) { notify('Бак уже полный'); return false; }
+    bike.fuel = Math.min(100, bike.fuel + 40); notify('Мотоцикл заправлен');
+  }
   else return false;
   s.n--;
   if (s.n <= 0) slots[i] = null;
@@ -827,6 +873,417 @@ const dayColor = new THREE.Color(0x8a9a8a);
 const nightColor = new THREE.Color(0x04060a);
 let daylight = 1;
 
+// --- Мотоцикл: собирается на верстаке из бензобака, двух колёс и руля ---
+// Мотоцикл DeadZone. Оси: вперёд -Z, вверх +Y, вправо +X. Начало координат - на земле посередине колёсной базы.
+function createMotorcycle(opts) {
+  opts = opts || {};
+  const root = new THREE.Group();   // позиция и курс
+  const tilt = new THREE.Group();   // крен и наклон (от земли)
+  root.add(tilt);
+
+  const mat = (color, rough, metal, extra) => new THREE.MeshStandardMaterial(Object.assign({ color, roughness: rough, metalness: metal, flatShading: true }, extra || {}));
+  const M = {
+    frame: mat(0x1a1c1e, 0.5, 0.6), tank: mat(0x8f2b21, 0.32, 0.45), dark: mat(0x1b1b1b, 0.8, 0.1),
+    chrome: mat(0xc9ced4, 0.18, 0.95), steel: mat(0x7d838a, 0.4, 0.8), engine: mat(0x2f3338, 0.55, 0.65),
+    engineHi: mat(0x4a5057, 0.45, 0.7), black: mat(0x0e0f10, 0.9, 0.05), rubber: mat(0x141414, 0.95, 0),
+    tread: mat(0x0b0b0b, 1, 0), seat: mat(0x2a1d15, 0.9, 0), gold: mat(0xc99a2e, 0.35, 0.8), cream: mat(0xe8dfc8, 0.6, 0.1),
+    lens: new THREE.MeshStandardMaterial({ color: 0xfff6d8, emissive: 0xfff0b0, emissiveIntensity: 0, roughness: 0.1 }),
+    tail: new THREE.MeshStandardMaterial({ color: 0x7a0d0d, emissive: 0xff1a1a, emissiveIntensity: 0.3, roughness: 0.4 }),
+    mirror: mat(0x20262c, 0.15, 0.9), skin: mat(0xd9a67a, 0.9, 0), jacket: mat(0x2d3a2a, 0.95, 0),
+    pants: mat(0x3a3d44, 0.95, 0), helmet: mat(0x2b2f33, 0.3, 0.3), visor: mat(0x0f1620, 0.1, 0.6), glove: mat(0x1b1b1b, 0.8, 0),
+    boot: mat(0x2a2018, 0.85, 0),
+  };
+
+  const box = (w, h, d, m, x, y, z, parent) => {
+    const b = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m);
+    b.position.set(x, y, z); (parent || tilt).add(b); return b;
+  };
+  const cyl = (r, len, m, x, y, z, axis, parent, seg) => { // axis: 'x' | 'y' | 'z'
+    const g = new THREE.CylinderGeometry(r, r, len, seg || 12);
+    if (axis === 'x') g.rotateZ(Math.PI / 2); else if (axis === 'z') g.rotateX(Math.PI / 2);
+    const c = new THREE.Mesh(g, m); c.position.set(x, y, z); (parent || tilt).add(c); return c;
+  };
+  const tube = (p1, p2, r, m, parent, seg) => {
+    const a = new THREE.Vector3(p1[0], p1[1], p1[2]), b = new THREE.Vector3(p2[0], p2[1], p2[2]);
+    const d = b.clone().sub(a), len = d.length();
+    const mesh = new THREE.Mesh(new THREE.CylinderGeometry(r, r, len, seg || 8), m);
+    mesh.position.copy(a).addScaledVector(d, 0.5);
+    mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), d.normalize());
+    (parent || tilt).add(mesh); return mesh;
+  };
+  // Профиль (u вперёд, v вверх) выдавливается на ширину width. u вперёд = -Z.
+  function extrude(pts, width, m, bevel, segs) {
+    bevel = bevel === undefined ? 0.01 : bevel;
+    const shape = new THREE.Shape(pts.map(p => new THREE.Vector2(p[0], p[1])));
+    const g = new THREE.ExtrudeGeometry(shape, { depth: width, bevelEnabled: true, bevelThickness: bevel, bevelSize: bevel, bevelSegments: segs || 1, steps: 1 });
+    g.translate(0, 0, -width / 2); g.rotateY(Math.PI / 2);
+    return new THREE.Mesh(g, m);
+  }
+  function arcBand(r0, r1, a0, a1, width, m) { // дуга вокруг колеса (крыло)
+    const pts = [], n = Math.max(3, Math.round((a1 - a0) / 0.18));
+    for (let i = 0; i <= n; i++) { const a = a0 + (a1 - a0) * i / n; pts.push([r1 * Math.cos(a), r1 * Math.sin(a)]); }
+    for (let i = n; i >= 0; i--) { const a = a0 + (a1 - a0) * i / n; pts.push([r0 * Math.cos(a), r0 * Math.sin(a)]); }
+    return extrude(pts, width, m, 0.004);
+  }
+  function makeWheel() { // колесо вращается вокруг оси X
+    const g = new THREE.Group();
+    const tireGeo = new THREE.TorusGeometry(0.295, 0.068, 8, 24); tireGeo.rotateY(Math.PI / 2);
+    g.add(new THREE.Mesh(tireGeo, M.rubber));
+    const N = 24;
+    for (let i = 0; i < N; i++) { // блоки протектора
+      const a = (i / N) * Math.PI * 2;
+      const b = new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.028, 0.05), M.tread);
+      b.position.set(0, Math.sin(a) * 0.366, Math.cos(a) * 0.366);
+      b.rotation.x = Math.PI / 2 - a;
+      g.add(b);
+    }
+    cyl(0.235, 0.1, M.steel, 0, 0, 0, 'x', g, 20);
+    cyl(0.2, 0.108, M.black, 0, 0, 0, 'x', g, 20);
+    cyl(0.05, 0.17, M.chrome, 0, 0, 0, 'x', g, 10);
+    for (let i = 0; i < 16; i++) { // спицы
+      const a = (i / 16) * Math.PI * 2;
+      tube([0, Math.sin(a) * 0.05, Math.cos(a) * 0.05], [0, Math.sin(a) * 0.225, Math.cos(a) * 0.225], 0.005, M.chrome, g, 4);
+    }
+    cyl(0.15, 0.008, M.steel, 0.042, 0, 0, 'x', g, 18); // тормозной диск
+    return g;
+  }
+
+  // ===== Рама и подвеска =====
+  const HEAD = new THREE.Vector3(0, 0.998, -0.402);
+  const RAKE = 0.49;
+  tube([0, 0.94, -0.36], [0, 0.9, 0.34], 0.026, M.frame);                       // верхняя труба
+  tube([0, 0.92, -0.36], [0, 0.44, -0.2], 0.028, M.frame);                      // передняя труба
+  [-1, 1].forEach(s => {
+    tube([s * 0.075, 0.44, -0.2], [s * 0.075, 0.36, 0.1], 0.024, M.frame);      // нижняя колыбель
+    tube([s * 0.075, 0.36, 0.1], [s * 0.075, 0.52, 0.34], 0.024, M.frame);
+    tube([s * 0.065, 0.52, 0.34], [s * 0.065, 0.88, 0.34], 0.024, M.frame);     // стойка сиденья
+    tube([s * 0.07, 0.88, 0.34], [s * 0.09, 0.86, 0.82], 0.02, M.frame);        // подрамник
+    tube([s * 0.07, 0.62, 0.34], [s * 0.09, 0.86, 0.62], 0.018, M.frame);       // косынка
+    tube([s * 0.1, 0.46, 0.3], [s * 0.11, 0.36, 0.68], 0.03, M.frame);          // маятник
+    cyl(0.016, 0.1, M.chrome, s * 0.22, 0.36, 0.1, 'x');                         // подножка
+    tube([s * 0.075, 0.38, 0.08], [s * 0.2, 0.36, 0.1], 0.014, M.frame);
+    const topP = [s * 0.12, 0.88, 0.5], botP = [s * 0.13, 0.46, 0.66];          // амортизатор
+    tube(topP, botP, 0.017, M.chrome);
+    tube([topP[0] + (botP[0] - topP[0]) * 0.2, topP[1] + (botP[1] - topP[1]) * 0.2, topP[2] + (botP[2] - topP[2]) * 0.2],
+         [topP[0] + (botP[0] - topP[0]) * 0.85, topP[1] + (botP[1] - topP[1]) * 0.85, topP[2] + (botP[2] - topP[2]) * 0.85], 0.03, M.gold, null, 10);
+  });
+
+  // ===== Двигатель =====
+  box(0.25, 0.27, 0.38, M.engine, 0, 0.5, 0);                                     // картер
+  box(0.27, 0.12, 0.2, M.engineHi, 0, 0.45, 0.12);                                // крышка коробки передач
+  cyl(0.05, 0.03, M.chrome, 0.135, 0.5, 0.08, 'x');                               // крышка генератора
+  const cylG = new THREE.Group(); cylG.position.set(0, 0.62, -0.05); cylG.rotation.x = -0.35; tilt.add(cylG);
+  cyl(0.085, 0.24, M.engine, 0, 0.14, 0, 'y', cylG, 10);                          // гильза
+  for (let i = 0; i < 6; i++) cyl(0.115, 0.014, M.engineHi, 0, 0.04 + i * 0.037, 0, 'y', cylG, 10); // рёбра охлаждения
+  box(0.21, 0.1, 0.21, M.engineHi, 0, 0.29, 0, cylG);                             // головка
+  box(0.17, 0.04, 0.17, M.engine, 0, 0.35, 0, cylG);                              // крышка клапанов
+  cyl(0.045, 0.1, M.chrome, 0.1, 0.72, 0.17, 'z');                                // карбюратор
+  box(0.18, 0.14, 0.2, M.black, 0.1, 0.75, 0.28);                                 // воздушный фильтр
+  cyl(0.075, 0.07, M.chrome, 0.1, 0.75, 0.39, 'z');
+
+  // ===== Выхлоп (справа) =====
+  const ex = [[0.06, 0.82, -0.26], [0.14, 0.62, -0.35], [0.17, 0.42, -0.2], [0.17, 0.4, 0.2], [0.17, 0.45, 0.4]];
+  for (let i = 0; i < ex.length - 1; i++) tube(ex[i], ex[i + 1], 0.02, M.chrome, null, 8);
+  tube([0.17, 0.45, 0.36], [0.2, 0.6, 0.86], 0.052, M.chrome, null, 10);          // глушитель
+  [0.45, 0.62].forEach(f => tube([0.17 + 0.03 * f, 0.45 + 0.15 * f, 0.36 + 0.5 * f], [0.17 + 0.03 * f + 0.01, 0.45 + 0.15 * f + 0.02, 0.36 + 0.5 * f + 0.02], 0.058, M.gold, null, 10)); // хомуты
+  cyl(0.04, 0.02, M.black, 0.2, 0.6, 0.87, 'z');
+  const exhaustPos = new THREE.Object3D(); exhaustPos.position.set(0.2, 0.61, 0.9); tilt.add(exhaustPos);
+
+  // ===== Бак, сиденье, хвост =====
+  const tank = extrude([[0.32, 0.97], [0.3, 1.1], [0.2, 1.19], [0.0, 1.21], [-0.1, 1.15], [-0.14, 1.03], [-0.12, 0.97]], 0.24, M.tank, 0.035, 2);
+  tilt.add(tank);
+  cyl(0.036, 0.02, M.chrome, 0, 1.25, -0.03, 'y');                                // крышка бака
+  [-1, 1].forEach(s => {
+    box(0.014, 0.13, 0.2, M.dark, s * 0.152, 1.08, -0.02);                        // накладки под колени
+    cyl(0.04, 0.008, M.gold, s * 0.158, 1.1, -0.1, 'x');                          // значок
+  });
+  const seat = extrude([[-0.12, 1.06], [-0.14, 1.17], [-0.4, 1.18], [-0.62, 1.14], [-0.68, 1.09], [-0.66, 1.02], [-0.4, 1.0], [-0.14, 1.0]], 0.2, M.seat, 0.03, 2);
+  tilt.add(seat);
+  box(0.2, 0.025, 0.58, M.black, 0, 0.99, 0.4);                                   // основание сиденья
+  const rf = arcBand(0.4, 0.416, 0.9, 2.35, 0.15, M.dark); rf.position.set(0, 0.36, 0.68); tilt.add(rf); // заднее крыло
+  const tailMount = box(0.17, 0.03, 0.3, M.dark, 0, 0.9, 0.78); tailMount.rotation.x = 0.22;
+  box(0.11, 0.05, 0.04, M.tail, 0, 0.86, 0.94);                                   // стоп-сигнал
+  const tailLamp = M.tail;
+  const pc = document.createElement('canvas'); pc.width = 128; pc.height = 64;
+  const pctx = pc.getContext('2d'); pctx.fillStyle = '#e8e4d0'; pctx.fillRect(0, 0, 128, 64);
+  pctx.fillStyle = '#222'; pctx.font = 'bold 34px monospace'; pctx.textAlign = 'center'; pctx.fillText('DZ-777', 64, 44);
+  const plate = new THREE.Mesh(new THREE.PlaneGeometry(0.2, 0.1), new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(pc) }));
+  plate.position.set(0, 0.78, 0.945); plate.rotation.x = -0.1; tilt.add(plate);
+
+  // ===== Задняя вилка с колесом, цепь =====
+  const wheelR = makeWheel(); wheelR.position.set(0, 0.36, 0.68); tilt.add(wheelR);
+  cyl(0.12, 0.016, M.steel, -0.11, 0, 0, 'x', wheelR, 14);                        // задняя звезда
+  cyl(0.06, 0.02, M.steel, -0.115, 0.44, 0.18, 'x');                              // передняя звезда
+  tube([-0.115, 0.5, 0.18], [-0.115, 0.48, 0.68], 0.006, M.black, null, 4);       // цепь (верх)
+  tube([-0.115, 0.38, 0.18], [-0.115, 0.24, 0.68], 0.006, M.black, null, 4);      // цепь (низ)
+
+  // ===== Рулевая колонка и передняя вилка =====
+  const head = new THREE.Group(); head.position.copy(HEAD); head.rotation.x = RAKE; tilt.add(head);
+  cyl(0.045, 0.26, M.frame, 0, -0.02, 0, 'y', head);                              // рулевой стакан
+  const steer = new THREE.Group(); head.add(steer);                               // вращается руль + вилка
+  [-1, 1].forEach(s => tube([s * 0.095, -0.46, 0], [s * 0.095, 0.1, 0], 0.024, M.chrome, steer));
+  box(0.28, 0.045, 0.085, M.frame, 0, 0.075, 0, steer);
+  box(0.25, 0.04, 0.08, M.frame, 0, -0.115, 0, steer);
+  const forkLower = new THREE.Group(); steer.add(forkLower);                      // нижние перья (идут вверх при сжатии)
+  [-1, 1].forEach(s => tube([s * 0.095, -0.78, 0], [s * 0.095, -0.36, 0], 0.034, M.engineHi, forkLower));
+  const wheelF = makeWheel(); wheelF.position.set(0, -0.72, 0); forkLower.add(wheelF);
+  cyl(0.014, 0.3, M.chrome, 0, -0.72, 0, 'x', forkLower, 8);
+  const ff = arcBand(0.385, 0.4, 0.45, 2.7, 0.13, M.tank); ff.position.set(0, -0.72, 0); forkLower.add(ff); // переднее крыло
+  box(0.035, 0.08, 0.07, M.gold, 0.065, -0.58, -0.03, forkLower);                 // тормозной суппорт
+
+  // Руль
+  const barL = [-0.12, 0.17, -0.0], barR = [0.12, 0.17, -0.0];
+  tube(barL, [-0.38, 0.2, 0.08], 0.014, M.chrome, steer);
+  tube(barR, [0.38, 0.2, 0.08], 0.014, M.chrome, steer);
+  tube(barL, barR, 0.014, M.chrome, steer);
+  box(0.12, 0.03, 0.06, M.frame, 0, 0.14, 0, steer);
+  const gripL = new THREE.Object3D(), gripR = new THREE.Object3D();
+  gripL.position.set(-0.4, 0.2, 0.09); gripR.position.set(0.4, 0.2, 0.09); steer.add(gripL, gripR);
+  [-1, 1].forEach(s => {
+    cyl(0.019, 0.13, M.black, s * 0.4, 0.2, 0.09, 'x', steer);                    // рукоятки
+    box(0.012, 0.012, 0.12, M.chrome, s * 0.35, 0.215, 0.0, steer);               // рычаги
+    tube([s * 0.33, 0.22, 0.06], [s * 0.36, 0.42, 0.08], 0.006, M.chrome, steer, 5);
+    cyl(0.05, 0.012, M.mirror, s * 0.36, 0.45, 0.08, 'z', steer, 12);            // зеркала
+  });
+  // Фара и приборка
+  cyl(0.115, 0.13, M.chrome, 0, 0.0, -0.19, 'z', steer, 14);
+  const lens = cyl(0.098, 0.008, M.lens, 0, 0.0, -0.257, 'z', steer, 14);
+  tube([-0.1, 0.07, -0.08], [-0.095, 0.1, -0.15], 0.01, M.frame, steer, 5);
+  tube([0.1, 0.07, -0.08], [0.095, 0.1, -0.15], 0.01, M.frame, steer, 5);
+  cyl(0.048, 0.03, M.black, 0, 0.21, -0.03, 'z', steer, 12);
+  cyl(0.04, 0.006, M.cream, 0, 0.21, -0.047, 'z', steer, 12);
+  const headlight = new THREE.SpotLight(0xfff2d0, 0, 45, 0.5, 0.5, 1);
+  headlight.position.set(0, 0.0, -0.24); steer.add(headlight);
+  const hlTarget = new THREE.Object3D(); hlTarget.position.set(0, -4.3, -7); steer.add(hlTarget);
+  headlight.target = hlTarget;
+
+  // ===== Подставка =====
+  const stand = new THREE.Group(); stand.position.set(-0.14, 0.4, 0.12); tilt.add(stand);
+  tube([0, 0, 0], [-0.14, -0.3, 0.02], 0.014, M.frame, stand, 6);
+  box(0.07, 0.015, 0.08, M.frame, -0.15, -0.31, 0.02, stand);
+
+  // ===== Гонщик =====
+  const rider = new THREE.Group(); tilt.add(rider);
+  const body = new THREE.Group(); rider.add(body);   // то, что скрывается в виде от первого лица
+  const torso = box(0.4, 0.52, 0.24, M.jacket, 0, 1.28, 0.105, body); torso.rotation.x = -0.38;
+  box(0.34, 0.1, 0.2, M.pants, 0, 1.06, 0.2, body);
+  const helmet = new THREE.Mesh(new THREE.SphereGeometry(0.135, 10, 8), M.helmet); helmet.position.set(0, 1.74, -0.04); body.add(helmet);
+  box(0.2, 0.065, 0.1, M.visor, 0, 1.745, -0.14, body);
+  box(0.16, 0.06, 0.1, M.helmet, 0, 1.66, -0.1, body);
+  [-1, 1].forEach(s => {
+    const hip = [s * 0.13, 1.04, 0.2], knee = [s * 0.27, 0.86, -0.06], foot = [s * 0.2, 0.42, 0.1];
+    tube(hip, knee, 0.07, M.pants, body, 8); tube(knee, foot, 0.06, M.pants, body, 8);
+    box(0.1, 0.09, 0.26, M.boot, foot[0], 0.4, 0.04, body);
+  });
+  // Руки считаются каждый кадр (следуют за рулём)
+  const armParts = [];
+  [-1, 1].forEach(s => {
+    const upper = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 1, 8), M.jacket);
+    const fore = new THREE.Mesh(new THREE.CylinderGeometry(0.042, 0.042, 1, 8), M.jacket);
+    const hand = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.09, 0.11), M.glove);
+    rider.add(upper, fore, hand);
+    armParts.push({ s, upper, fore, hand });
+  });
+  const _a = new THREE.Vector3(), _b = new THREE.Vector3(), _up = new THREE.Vector3(0, 1, 0);
+  function place(mesh, p, q) { // растянуть цилиндр между двумя точками
+    const d = _b.copy(q).sub(p), len = d.length();
+    mesh.position.copy(p).addScaledVector(d, 0.5);
+    mesh.quaternion.setFromUnitVectors(_up, d.normalize());
+    mesh.scale.set(1, len, 1);
+  }
+  const shoulderL = new THREE.Vector3(-0.22, 1.5, 0.0), shoulderR = new THREE.Vector3(0.22, 1.5, 0.0);
+  const _elb = new THREE.Vector3(), _hand = new THREE.Vector3();
+  function updateRider() {
+    root.updateMatrixWorld(true);
+    armParts.forEach(a => {
+      (a.s < 0 ? gripL : gripR).getWorldPosition(_hand);
+      tilt.worldToLocal(_hand);                       // рука в системе мотоцикла
+      const sh = a.s < 0 ? shoulderL : shoulderR;
+      _elb.copy(sh).add(_hand).multiplyScalar(0.5).add(new THREE.Vector3(a.s * 0.1, -0.07, 0.08));
+      place(a.upper, sh, _elb);
+      place(a.fore, _elb, _hand);
+      a.hand.position.copy(_hand);
+    });
+  }
+  const eye = new THREE.Object3D(); eye.position.set(0, 1.64, -0.08); tilt.add(eye);   // глаза гонщика (вид от первого лица)
+
+  updateRider();
+  return {
+    root, tilt, steer, forkLower, wheelF, wheelR, stand, headlight, lens, tailLamp, exhaustPos, eye,
+    body, rider, updateRider, M,
+  };
+}
+
+let bike = null, riding = false, camView = 'fp';
+let lookedBike = false;
+const puffs = [];
+const smokeMat = new THREE.MeshBasicMaterial({ color: 0x9a9a9a, transparent: true, opacity: 0.3, depthWrite: false });
+const dustMat = new THREE.MeshBasicMaterial({ color: 0xb59b72, transparent: true, opacity: 0.35, depthWrite: false });
+const puffGeo = new THREE.BoxGeometry(0.14, 0.14, 0.14);
+const _p = new THREE.Vector3(), _eye = new THREE.Vector3();
+function addPuff(pos, vel, mat, life, size) { // дым из выхлопа и пыль из-под колеса
+  if (puffs.length > 60) return;
+  const m = new THREE.Mesh(puffGeo, mat);
+  m.position.copy(pos); scene.add(m);
+  puffs.push({ m, v: vel, life, max: life, size });
+}
+function updatePuffs(dt) {
+  for (let i = puffs.length - 1; i >= 0; i--) {
+    const p = puffs[i];
+    p.life -= dt;
+    if (p.life <= 0) { scene.remove(p.m); puffs.splice(i, 1); continue; }
+    p.m.position.addScaledVector(p.v, dt);
+    const k = 1 - p.life / p.max, fade = p.life / p.max < 0.3 ? p.life / p.max / 0.3 : 1;
+    p.m.scale.setScalar(Math.max(0.01, p.size * (1 + k * 2.5) * fade));
+  }
+}
+
+// Звук двигателя (простой синтез)
+let bActx = null, bEng = null;
+function bikeSound(active, rpm, thr) {
+  if (!bActx) return;
+  if (!bEng) {
+    const o1 = bActx.createOscillator(), o2 = bActx.createOscillator();
+    o1.type = 'sawtooth'; o2.type = 'square';
+    const f = bActx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 500;
+    const g = bActx.createGain(); g.gain.value = 0;
+    o1.connect(f); o2.connect(f); f.connect(g); g.connect(bActx.destination);
+    o1.start(); o2.start();
+    bEng = { o1, o2, f, g };
+  }
+  const t = bActx.currentTime;
+  bEng.o1.frequency.setTargetAtTime(rpm / 60 * 2 + 18, t, 0.04);
+  bEng.o2.frequency.setTargetAtTime(rpm / 60 + 9, t, 0.04);
+  bEng.f.frequency.setTargetAtTime(350 + thr * 900 + rpm * 0.12, t, 0.05);
+  bEng.g.gain.setTargetAtTime(active ? 0.035 + thr * 0.06 : 0, t, 0.08);
+}
+
+function parkBikeCollider() {
+  const p = bike.rig.root.position;
+  bike.collider = { minX: p.x - 0.55, maxX: p.x + 0.55, minZ: p.z - 0.55, maxZ: p.z + 0.55 };
+  colliders.push(bike.collider);
+}
+function spawnBike(x, z, heading) {
+  const rig = createMotorcycle();
+  rig.root.position.set(x, 0, z);
+  rig.root.rotation.y = heading;
+  rig.rider.visible = false;
+  scene.add(rig.root);
+  bike = { rig, heading, v: 0, steer: 0, lean: 0.12, leanT: 0, pitch: 0, comp: 0, standA: 0, fuel: 40, on: false, light: false, collider: null, rpm: 0, accel: 0, gas: 0, puffT: 0, dustT: 0 };
+  parkBikeCollider();
+}
+function mountBike() {
+  if (!bike || riding || health <= 0) return;
+  riding = true;
+  if (bike.collider) { colliders.splice(colliders.indexOf(bike.collider), 1); bike.collider = null; }
+  bike.rig.rider.visible = true;
+  bike.on = bike.fuel > 0;
+  yaw = bike.heading; pitch = -0.15;
+  try { bActx = bActx || new (window.AudioContext || window.webkitAudioContext)(); if (bActx.state === 'suspended') bActx.resume(); } catch (err) { bActx = null; }
+  notify(bike.on ? 'W - газ, S - тормоз, A/D - поворот, Пробел - ручник. E - слезть' : 'Нет бензина! Найди канистру и заправь (слоты 1-5)');
+}
+function dismountBike() {
+  if (!riding) return;
+  if (Math.abs(bike.v) > 5) return notify('Сначала остановись');
+  riding = false;
+  const r = bike.rig.root, h = bike.heading;
+  camera.position.set(r.position.x + Math.cos(h) * 1.1, 1.7, r.position.z - Math.sin(h) * 1.1);
+  resolveCollisions(camera.position, 0.4);
+  yaw = h; pitch = 0; camera.rotation.z = 0;
+  bike.rig.rider.visible = false; bike.on = false; bike.v = 0; bike.gas = 0;
+  parkBikeCollider();
+}
+
+function updateBike(dt) { // физика: газ, тормоз, поворот, столкновения
+  const b = bike, root = b.rig.root;
+  if (b.fuel <= 0 && b.on) { b.on = false; notify('Бензин кончился!'); }
+  const fuelOk = b.fuel > 0 && b.on;
+  const gas = keys.KeyW && fuelOk ? 1 : 0, brk = keys.KeyS ? 1 : 0, hand = keys.Space ? 1 : 0;
+  const steerIn = (keys.KeyA ? 1 : 0) - (keys.KeyD ? 1 : 0);
+  const VMAX = 30;
+  let v = b.v;
+  if (gas) v += 8.5 * (1 - Math.max(0, v) / VMAX) * dt;
+  if (brk) { if (v > 0.3) v -= 18 * dt; else if (fuelOk) v = Math.max(-4, v - 3.5 * dt); }
+  if (hand) v -= Math.sign(v) * Math.min(Math.abs(v), 24 * dt);
+  if (!gas && !brk && !hand) v -= Math.sign(v) * Math.min(Math.abs(v), (1.3 + 0.012 * v * v) * dt);
+  v = clamp(v, -4, VMAX);
+  b.accel = dt > 0 ? (v - b.v) / dt : 0;
+  b.v = v; b.gas = gas;
+  const target = steerIn * 0.62 / (1 + Math.abs(v) / 9);
+  b.steer += (target - b.steer) * Math.min(1, 7 * dt);
+  const w = v / 1.42 * Math.tan(b.steer);          // скорость поворота
+  const oldH = b.heading;
+  b.heading += w * dt;
+  yaw += b.heading - oldH;                          // взгляд поворачивается вместе с мотоциклом
+  const ix = root.position.x - Math.sin(b.heading) * v * dt, iz = root.position.z - Math.cos(b.heading) * v * dt;
+  root.position.x = ix; root.position.z = iz;
+  resolveCollisions(root.position, 0.65);
+  if (Math.hypot(root.position.x - ix, root.position.z - iz) > 0.02 && Math.abs(v) > 2) { // удар о препятствие
+    if (Math.abs(v) > 12) health -= (Math.abs(v) - 12) * 1.6;
+    b.v *= 0.3; notify('Столкновение!');
+  }
+  root.position.x = clamp(root.position.x, -190, 190); root.position.z = clamp(root.position.z, -190, 190);
+  for (const z of zombies) { // сбиваем зомби
+    const dx = z.mesh.position.x - root.position.x, dz = z.mesh.position.z - root.position.z;
+    if (dx * dx + dz * dz < 1.5 && Math.abs(b.v) > 4) { z.hp -= 3; b.v *= 0.85; }
+  }
+  b.leanT = clamp(w * v * 0.045, -0.6, 0.6);
+  b.pitch += (clamp(b.accel * 0.012, -0.12, 0.2) - b.pitch) * Math.min(1, 6 * dt);
+  b.comp = clamp(Math.max(0, -b.accel) * 0.004, 0, 0.07);
+  if (b.on) b.fuel = Math.max(0, b.fuel - (0.04 + gas * 0.2) * dt);
+  const G = [0, 6, 12, 19, 26, 34], av = Math.abs(v);
+  let gear = 1; while (gear < 5 && av > G[gear]) gear++;
+  b.rpm = b.on ? 1100 + clamp((av - G[gear - 1]) / (G[gear] - G[gear - 1]), 0, 1) * 5000 + gas * 500 : 0;
+}
+
+function updateBikeVisuals(dt) { // положение, крен, колёса, свет, дым
+  const b = bike, rig = b.rig;
+  b.lean += ((riding ? b.leanT : 0.12) - b.lean) * Math.min(1, 6 * dt);
+  b.standA += ((riding ? 1.4 : 0) - b.standA) * Math.min(1, 5 * dt);
+  if (!riding) { const k = Math.exp(-dt * 6); b.pitch *= k; b.steer *= k; b.comp *= k; }
+  rig.root.rotation.y = b.heading;
+  rig.tilt.rotation.set(b.pitch, 0, b.lean);
+  if (riding && b.on) rig.tilt.position.set(Math.sin(gunT * 70) * 0.0012, Math.sin(gunT * 83) * 0.0012, 0);
+  else rig.tilt.position.set(0, 0, 0);
+  rig.steer.rotation.y = b.steer;
+  rig.forkLower.position.y = b.comp;
+  rig.stand.rotation.z = b.standA;
+  rig.wheelF.rotation.x -= b.v / 0.365 * dt;
+  rig.wheelR.rotation.x -= b.v / 0.365 * dt;
+  rig.headlight.intensity = b.light ? 45 : 0;
+  rig.lens.material.emissiveIntensity = b.light ? 1.8 : 0;
+  rig.M.tail.emissiveIntensity = riding && (keys.KeyS || keys.Space) && b.v > 0.5 ? 1.8 : 0.35;
+  rig.body.visible = !(riding && camView === 'fp');
+  rig.root.updateMatrixWorld(true);
+  if (riding) rig.updateRider();
+  if (riding && b.on && dt > 0) {
+    b.puffT -= dt; b.dustT -= dt;
+    if (b.puffT <= 0) {
+      b.puffT = 0.09 - b.gas * 0.04;
+      rig.exhaustPos.getWorldPosition(_p);
+      addPuff(_p, new THREE.Vector3(Math.sin(b.heading) * 0.8 + (Math.random() - 0.5) * 0.3, 0.5, Math.cos(b.heading) * 0.8 + (Math.random() - 0.5) * 0.3), smokeMat, 0.9, 0.7);
+    }
+    if (Math.abs(b.v) > 6 && b.dustT <= 0) {
+      b.dustT = 0.06;
+      _p.set(rig.root.position.x + Math.sin(b.heading) * 0.7, 0.08, rig.root.position.z + Math.cos(b.heading) * 0.7);
+      addPuff(_p, new THREE.Vector3((Math.random() - 0.5) * 0.8, 0.8, (Math.random() - 0.5) * 0.8), dustMat, 0.8, 1.1);
+    }
+  }
+}
+function updateBikeCamera() { // вид от первого лица (C - сменить на вид сзади)
+  if (!riding) return;
+  const rig = bike.rig;
+  if (camView === 'fp') {
+    rig.eye.getWorldPosition(_eye);
+    camera.position.copy(_eye);
+    camera.rotation.z = bike.lean * 0.5;
+  } else {
+    const h = bike.heading, p = rig.root.position;
+    camera.position.set(p.x + Math.sin(h) * 4.2, 2.1, p.z + Math.cos(h) * 4.2);
+    camera.lookAt(p.x - Math.sin(h) * 2, 1.0, p.z - Math.cos(h) * 2);
+  }
+}
+
 // --- Кучи ресурсов: брёвна (дерево) и куча железа (лом). Подойди, смотри на кучу, жми E: берётся по 1 ---
 const piles = [];
 const barkMat = new THREE.MeshStandardMaterial({ color: 0x6b4423, roughness: 1, flatShading: true });
@@ -867,6 +1324,19 @@ function makeScrap() { // 3 детали: ржавая труба, балка, �
   return { group, parts: [pipe, beam, plate] };
 }
 
+function makeTires(n) { // стопка старых покрышек (резина)
+  const group = new THREE.Group(), parts = [];
+  const mat = new THREE.MeshStandardMaterial({ color: 0x151515, roughness: 1, flatShading: true });
+  for (let i = 0; i < n; i++) {
+    const geo = new THREE.TorusGeometry(0.27, 0.1, 6, 12); geo.rotateX(Math.PI / 2);
+    const t = new THREE.Mesh(geo, mat);
+    t.position.set((Math.random() - 0.5) * 0.06, 0.1 + i * 0.19, (Math.random() - 0.5) * 0.06);
+    t.rotation.y = Math.random() * 6;
+    group.add(t); parts.unshift(t); // верхняя покрышка забирается первой
+  }
+  return { group, parts };
+}
+
 function spawnPile(type, x, z, n) {
   if (n === undefined) n = type === 'wood' ? 2 + Math.floor(Math.random() * 4) : 3; // дерево: от 2 до 5
   if (x === undefined) { // случайное место, не внутри деревьев и домов
@@ -876,7 +1346,7 @@ function spawnPile(type, x, z, n) {
       if (!colliders.some(c => x > c.minX - 0.8 && x < c.maxX + 0.8 && z > c.minZ - 0.8 && z < c.maxZ + 0.8)) break;
     }
   }
-  const model = type === 'wood' ? makeLogs(n) : makeScrap();
+  const model = type === 'wood' ? makeLogs(n) : type === 'rubber' ? makeTires(n) : makeScrap();
   model.group.position.set(x, 0, z);
   model.group.rotation.y = Math.random() * Math.PI * 2;
   scene.add(model.group);
@@ -884,6 +1354,7 @@ function spawnPile(type, x, z, n) {
 }
 for (let i = 0; i < 16; i++) spawnPile('wood');
 for (let i = 0; i < 18; i++) spawnPile('scrap');
+for (let i = 0; i < 12; i++) spawnPile('rubber'); // старые покрышки
 
 function takeFromPile(p) { // берём одну штуку, модель уменьшается
   if (chopCd > 0) return;
@@ -896,14 +1367,14 @@ function takeFromPile(p) { // берём одну штуку, модель ум�
 }
 
 // Подсказка «[E] ...» и поиск кучи или ящика, на которые смотрит игрок
-let lookedPile = null, lookedCase = null;
+let lookedPile = null, lookedCase = null, lookedBench = null;
 const promptEl = document.createElement('div');
 promptEl.style.cssText = 'position:fixed;top:58%;left:50%;transform:translateX(-50%);color:#fff;font:20px monospace;text-shadow:1px 1px 3px #000;background:rgba(0,0,0,.35);padding:4px 12px;border-radius:6px;display:none';
 document.body.appendChild(promptEl);
 const _fwd = new THREE.Vector3(), _to = new THREE.Vector3();
 function updatePrompt() {
-  lookedPile = null; lookedCase = null;
-  if (!menuOpen && !buildMode && health > 0) {
+  lookedPile = null; lookedCase = null; lookedBench = null; lookedBike = false;
+  if (!menuOpen && !buildMode && !riding && health > 0) {
     _fwd.set(0, 0, -1).applyQuaternion(camera.quaternion);
     let best = 0.88; // конус примерно 28 градусов
     for (const p of piles) {
@@ -921,17 +1392,41 @@ function updatePrompt() {
       const c = _to.normalize().dot(_fwd);
       if (c > best) { best = c; lookedCase = k; lookedPile = null; }
     }
-    const tx = lookedCase ? lookedCase.x : lookedPile ? lookedPile.group.position.x : null;
-    const tz = lookedCase ? lookedCase.z : lookedPile ? lookedPile.group.position.z : null;
+    for (const b of built) { // верстак
+      if (b.type !== 'bench') continue;
+      _to.set(b.mesh.position.x - camera.position.x, 0.6 - camera.position.y, b.mesh.position.z - camera.position.z);
+      if (_to.length() > 3.8) continue;
+      const c = _to.normalize().dot(_fwd);
+      if (c > best) { best = c; lookedBench = b; lookedCase = null; lookedPile = null; }
+    }
+    if (bike) { // мотоцикл
+      const rp = bike.rig.root.position;
+      _to.set(rp.x - camera.position.x, 0.6 - camera.position.y, rp.z - camera.position.z);
+      if (_to.length() <= 3.8) {
+        const c = _to.normalize().dot(_fwd);
+        if (c > best) { best = c; lookedBike = true; lookedBench = null; lookedCase = null; lookedPile = null; }
+      }
+    }
+    const tx = lookedBike ? bike.rig.root.position.x : lookedBench ? lookedBench.mesh.position.x : lookedCase ? lookedCase.x : lookedPile ? lookedPile.group.position.x : null;
+    const tz = lookedBike ? bike.rig.root.position.z : lookedBench ? lookedBench.mesh.position.z : lookedCase ? lookedCase.z : lookedPile ? lookedPile.group.position.z : null;
     if (tx !== null) { // через стену не берём
       _to.set(tx - camera.position.x, 0.25 - camera.position.y, tz - camera.position.z);
       const d = _to.length();
       raycaster.set(camera.position, _to.normalize());
       const wall = raycaster.intersectObjects(blockers, false)[0];
-      if (wall && wall.distance < d) { lookedPile = null; lookedCase = null; }
+      if (wall && wall.distance < d) { lookedPile = null; lookedCase = null; lookedBench = null; lookedBike = false; }
     }
   }
-  if (lookedCase) {
+  if (riding) {
+    promptEl.textContent = '[E] Слезть с мотоцикла';
+    promptEl.style.display = 'block';
+  } else if (lookedBike) {
+    promptEl.textContent = `[E] Сесть на мотоцикл (бензин ${Math.ceil(bike.fuel)}%)`;
+    promptEl.style.display = 'block';
+  } else if (lookedBench) {
+    promptEl.textContent = '[E] Верстак: делать детали и собирать мотоцикл';
+    promptEl.style.display = 'block';
+  } else if (lookedCase) {
     promptEl.textContent = lookedCase.state === 'closed' ? '[E] Открыть военный ящик' : '[E] Взять: дробовик (5 патронов) + 20 патронов в запас';
     promptEl.style.display = 'block';
   } else if (lookedPile) {
@@ -944,7 +1439,10 @@ function treeHint() { // E у дерева: подсказка, рубить н�
   const hit = raycaster.intersectObjects(trees.map(t => t.trunk), false)[0];
   if (hit && hit.distance < 3.5) notify(hasAxe ? 'Достань топор клавишей Q и бей левой кнопкой мыши' : 'Нужен топор: Tab, вкладка Крафт');
 }
-function interact() { // клавиша E: ящик или куча рядом - открываем/берём, иначе рубим дерево
+function interact() { // клавиша E: слезть/сесть, верстак, ящик, куча, иначе подсказка про дерево
+  if (riding) return dismountBike();
+  if (lookedBike) return mountBike();
+  if (lookedBench) { menuTab = 'bench'; return toggleMenu(true); }
   if (lookedCase) caseInteract(lookedCase);
   else if (lookedPile) takeFromPile(lookedPile);
   else treeHint();
@@ -1065,6 +1563,15 @@ function makeItemModel(type) {
       g.add(b);
     };
     bottle(-0.08, 0, false); bottle(0.04, 0.2, true);
+  } else if (type === 'fuel') { // канистра с бензином
+    const red = mat(0xa83222, 0.55, 0.15), dark = mat(0x5a1a12, 0.7, 0.1), yellow = mat(0xe0b020, 0.5, 0.2);
+    add(box(0.32, 0.42, 0.15), red, 0, 0.21, 0);
+    add(box(0.34, 0.03, 0.17), dark, 0, 0.05, 0); add(box(0.34, 0.03, 0.17), dark, 0, 0.37, 0);
+    add(box(0.14, 0.06, 0.05), dark, -0.06, 0.45, 0);
+    add(box(0.04, 0.1, 0.04), dark, -0.12, 0.43, 0); add(box(0.04, 0.1, 0.04), dark, 0.0, 0.43, 0);
+    add(cyl(0.025, 0.025, 0.06, 8), yellow, 0.1, 0.45, 0);
+    add(box(0.18, 0.12, 0.012), mat(0xe8e0c8, 0.8, 0), 0, 0.2, 0.082);
+    add(box(0.05, 0.05, 0.014), dark, 0, 0.2, 0.084);
   }
   return g;
 }
@@ -1077,6 +1584,7 @@ function spawnItem(type, x, z) {
 }
 for (let i = 0; i < 10; i++) { spawnItem('food'); spawnItem('water'); }
 for (let i = 0; i < 5; i++) spawnItem('medkit');
+for (let i = 0; i < 8; i++) spawnItem('fuel'); // канистры с бензином
 
 // Лут внутри каждого дома
 for (const h of housePositions) {
@@ -1087,6 +1595,8 @@ for (const h of housePositions) {
   spawnPile('scrap', h.x - 2.5, h.z + 1);
   spawnPile('scrap', h.x + 2.5, h.z - 1);
   spawnPile('wood', h.x + 6, h.z + 5); // дрова у входа
+  spawnPile('rubber', h.x - 6, h.z + 5); // покрышки
+  spawnItem('fuel', h.x - 2.8, h.z + 2.6);
 }
 
 // Военные ящики: по одному в первых трёх домах и ещё три снаружи
@@ -1180,8 +1690,10 @@ const pieces = {
   wall: { name: 'Стена', cost: 4, color: 0x8b6b3e },
   roof: { name: 'Крыша', cost: 3, color: 0x6b4f2e },
   fire: { name: 'Костёр', cost: 5, color: 0xff7a2a },
+  bench: { name: 'Верстак', cost: 6, color: 0x8b6b3e },
 };
-const pieceKeys = ['wall', 'roof', 'fire'];
+const pieceKeys = ['wall', 'roof', 'fire', 'bench'];
+const MAX_BENCHES = 2;
 const MAX_FIRES = 4;
 let buildMode = false, selPiece = 'wall', rot = 0, chopCd = 0;
 const built = [];        // все постройки игрока
@@ -1199,6 +1711,7 @@ scene.add(ghost);
 function pieceGeometry(type, r) {
   if (type === 'wall') return r === 0 ? [2, 3, 0.3, 1.5] : [0.3, 3, 2, 1.5];
   if (type === 'roof') return [2, 0.2, 2, 3.1];
+  if (type === 'bench') return r === 0 ? [1.6, 0.9, 0.7, 0.45] : [0.7, 0.9, 1.6, 0.45];
   return [0.8, 0.4, 0.8, 0.2];
 }
 
@@ -1220,13 +1733,14 @@ function placePiece() {
   const p = pieces[selPiece];
   const [x, z] = targetPos();
   const [w, h, d, y] = pieceGeometry(selPiece, rot);
-  const key = `${selPiece}:${selPiece === 'wall' ? rot : 0}:${x}:${z}`;
+  const key = `${selPiece}:${selPiece === 'wall' || selPiece === 'bench' ? rot : 0}:${x}:${z}`;
   if (built.some(b => b.key === key)) return notify('Тут уже занято');
   if (countOf('wood') < p.cost) return notify(`Нужно дерева: ${p.cost}`);
   if (selPiece === 'fire' && built.filter(b => b.type === 'fire').length >= MAX_FIRES) return notify('Костров не больше 4');
+  if (selPiece === 'bench' && built.filter(b => b.type === 'bench').length >= MAX_BENCHES) return notify('Верстаков не больше 2');
   takeItem('wood', p.cost);
 
-  const mat = selPiece === 'fire'
+  const mat = (selPiece === 'fire' || selPiece === 'bench')
     ? new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false }) // невидимая зона костра (для V)
     : new THREE.MeshStandardMaterial({ color: p.color });
   const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
@@ -1246,8 +1760,39 @@ function placePiece() {
     b.light.position.set(x, 1, z);
     scene.add(b.light);
   }
+  if (selPiece === 'bench') {
+    b.collider = { minX: x - w / 2, maxX: x + w / 2, minZ: z - d / 2, maxZ: z + d / 2 };
+    colliders.push(b.collider);
+    blockers.push(mesh);
+    b.vis = makeWorkbench(); b.vis.position.set(x, 0, z); b.vis.rotation.y = rot === 0 ? 0 : Math.PI / 2; scene.add(b.vis);
+  }
   built.push(b);
   builtMeshes.push(mesh);
+}
+
+function makeWorkbench() { // верстак: столешница, тиски, инструменты, доска с инструментами, запчасти
+  const g = new THREE.Group();
+  const mat = (c, r, m) => new THREE.MeshStandardMaterial({ color: c, roughness: r, metalness: m, flatShading: true });
+  const wood = mat(0x8b6b3e, 0.9, 0), wood2 = mat(0x7a5c34, 0.9, 0), woodD = mat(0x5e4528, 0.95, 0);
+  const iron = mat(0x4a4f55, 0.45, 0.7), steel = mat(0x9aa0a8, 0.35, 0.8);
+  const B = (w, h, d) => new THREE.BoxGeometry(w, h, d);
+  const add = (geo, m, x, y, z, rx, ry, rz) => { const o = new THREE.Mesh(geo, m); o.position.set(x, y, z); o.rotation.set(rx || 0, ry || 0, rz || 0); g.add(o); return o; };
+  for (let i = 0; i < 5; i++) add(B(1.6, 0.07, 0.136), i % 2 ? wood : wood2, 0, 0.865, -0.28 + i * 0.14);   // доски столешницы
+  [-1, 1].forEach(sx => [-1, 1].forEach(sz => add(B(0.09, 0.83, 0.09), woodD, sx * 0.72, 0.415, sz * 0.27))); // ножки
+  add(B(1.5, 0.045, 0.56), woodD, 0, 0.28, 0);                                                                 // нижняя полка
+  add(B(1.5, 0.06, 0.05), woodD, 0, 0.7, 0.3); add(B(1.5, 0.06, 0.05), woodD, 0, 0.7, -0.3);                  // царги
+  add(B(0.16, 0.12, 0.18), iron, 0.62, 0.96, 0.3); add(B(0.04, 0.1, 0.12), steel, 0.62, 1.02, 0.43);          // тиски
+  add(new THREE.CylinderGeometry(0.012, 0.012, 0.22, 6), steel, 0.62, 0.96, 0.52, Math.PI / 2, 0, 0);
+  add(B(0.12, 0.025, 0.025), steel, 0.62, 0.96, 0.63);
+  add(B(0.03, 0.03, 0.3), woodD, -0.5, 0.92, -0.05, 0, 0.4, 0); add(B(0.12, 0.06, 0.05), iron, -0.54, 0.95, -0.17, 0, 0.4, 0); // молоток
+  add(B(0.4, 0.06, 0.012), steel, -0.1, 0.915, 0.15, 0, -0.15, 0); add(B(0.12, 0.06, 0.04), woodD, -0.28, 0.935, 0.1, 0, -0.15, 0); // пила
+  add(B(0.08, 0.75, 0.05), woodD, -0.7, 1.22, -0.3); add(B(0.08, 0.75, 0.05), woodD, 0.7, 1.22, -0.3);        // стойки
+  add(B(1.48, 0.06, 0.05), woodD, 0, 1.6, -0.3);
+  add(B(1.4, 0.45, 0.03), mat(0x6b4f2e, 0.95, 0), 0, 1.25, -0.31);                                             // доска для инструментов
+  [-0.5, -0.2, 0.1, 0.4].forEach((x, i) => add(B(0.04, 0.2 + (i % 2) * 0.08, 0.03), i % 2 ? steel : iron, x, 1.2, -0.28));
+  add(B(0.4, 0.2, 0.3), mat(0x4a5230, 0.85, 0.1), -0.4, 0.4, 0);                                               // ящик с запчастями
+  add(new THREE.TorusGeometry(0.17, 0.05, 6, 12), mat(0x151515, 1, 0), 0.35, 0.34, 0);                         // покрышка на полке
+  return g;
 }
 
 // Убрать постройку (V) - возвращается половина дерева
@@ -1312,14 +1857,44 @@ function craft(type) {
   }
 }
 
+// --- Верстак: детали мотоцикла и сборка ---
+const BENCH_RECIPES = [
+  { id: 'wheel', name: 'Колесо', need: { rubber: 2, scrap: 3 }, give: 'wheel' },
+  { id: 'tank', name: 'Бензобак', need: { scrap: 6 }, give: 'tank' },
+  { id: 'bars', name: 'Руль', need: { scrap: 3, rubber: 1 }, give: 'bars' },
+  { id: 'bike', name: 'Мотоцикл (сборка)', need: { tank: 1, wheel: 2, bars: 1, scrap: 8, wood: 2 }, give: null },
+];
+function nearBench() {
+  return built.some(b => b.type === 'bench' && Math.hypot(b.mesh.position.x - camera.position.x, b.mesh.position.z - camera.position.z) < 4.5);
+}
+function benchCraft(id) {
+  const r = BENCH_RECIPES.find(x => x.id === id);
+  if (!r || health <= 0) return;
+  if (!nearBench()) return notify('Подойди к верстаку');
+  for (const k in r.need) if (countOf(k) < r.need[k]) return notify('Не хватает: ' + ITEMS[k].name);
+  if (id === 'bike') {
+    if (bike) return notify('Мотоцикл уже собран');
+    for (const k in r.need) takeItem(k, r.need[k]);
+    const sp = { x: camera.position.x - Math.sin(yaw) * 2.6, z: camera.position.z - Math.cos(yaw) * 2.6 };
+    resolveCollisions(sp, 0.9);
+    spawnBike(sp.x, sp.z, yaw);
+    toggleMenu(false);
+    return notify('Мотоцикл собран! Подойди, смотри на него и нажми E');
+  }
+  if (freeRoom(r.give) < 1) return notify('Инвентарь полон');
+  for (const k in r.need) takeItem(k, r.need[k]);
+  addItem(r.give, 1);
+  notify('Сделано: ' + r.name);
+}
+
 // Обновление каждый кадр: призрак, костры, подсказки
 function updateBuild(dt) {
   noticeT -= dt;
   if (noticeT <= 0) notice.textContent = '';
   chopCd -= dt;
-  gun.visible = !buildMode && weapon === 'pistol';
-  sgun.visible = !buildMode && weapon === 'shotgun';
-  axeRig.visible = !buildMode && weapon === 'axe';
+  gun.visible = !buildMode && !riding && weapon === 'pistol';
+  sgun.visible = !buildMode && !riding && weapon === 'shotgun';
+  axeRig.visible = !buildMode && !riding && weapon === 'axe';
   ghost.visible = buildMode && health > 0;
   if (ghost.visible) {
     const [x, z] = targetPos();
@@ -1352,7 +1927,7 @@ const bar = (label, v, color) =>
   `<div style="margin:4px 0">${label}: ${Math.ceil(v)}<div style="height:10px;background:#111;border-radius:5px"><div style="height:10px;width:${Math.max(0, Math.min(100, v))}%;background:${color};border-radius:5px"></div></div></div>`;
 
 function renderMenu() {
-  const tabs = [['inv', 'Инвентарь'], ['craft', 'Крафт'], ['build', 'Стройка']];
+  const tabs = [['inv', 'Инвентарь'], ['craft', 'Крафт'], ['bench', 'Верстак'], ['build', 'Стройка']];
   let body = '';
   if (menuTab === 'inv') {
     body += bar('Здоровье', health, '#d64040') + bar('Еда', hunger, '#d19a3a') + bar('Вода', thirst, '#3a8fd6');
@@ -1374,6 +1949,18 @@ function renderMenu() {
     body += row('Топор <small>(3 дерева + 2 лома)</small>', hasAxe ? '<span style="opacity:.7">есть</span>' : btn('Создать', 'craft:axe', countOf('wood') >= 3 && countOf('scrap') >= 2));
     body += row('Аптечка <small>(4 лома)</small>', btn('Создать', 'craft:medkit', countOf('scrap') >= 4));
     body += `<div style="margin-top:12px;opacity:.8">У тебя: лом x${countOf('scrap')}. Лом лежит на земле и в домах.</div>`;
+  }
+  if (menuTab === 'bench') {
+    const near = nearBench();
+    body += near ? '<div style="margin-bottom:8px;color:#9fd36a">Ты у верстака</div>'
+      : '<div style="margin-bottom:8px;color:#e07a6a">Подойди к верстаку. Построить: B, затем 4 (Верстак, 6 дерева)</div>';
+    for (const r of BENCH_RECIPES) {
+      const req = Object.keys(r.need).map(k => `<span style="color:${countOf(k) >= r.need[k] ? '#9fd36a' : '#e07a6a'}">${ITEMS[k].name} ${countOf(k)}/${r.need[k]}</span>`).join(' · ');
+      const done = r.id === 'bike' && bike;
+      const can = near && !done && Object.keys(r.need).every(k => countOf(k) >= r.need[k]);
+      body += row(`${r.name}<br><small>${req}</small>`, done ? '<span style="opacity:.7">собран</span>' : btn('Создать', 'bench:' + r.id, can));
+    }
+    body += `<div style="margin-top:12px;opacity:.8;font-size:14px">Резина: кучи старых покрышек (E). Лом: железные кучи. Бензин: канистры, заправка - слот 1-5 рядом с мотоциклом.</div>`;
   }
   if (menuTab === 'build') {
     for (const k of pieceKeys) {
@@ -1424,6 +2011,7 @@ menu.addEventListener('click', e => {
     if (!slots[pick]) pick = null;
   }
   if (act === 'craft') craft(arg);
+  if (act === 'bench') benchCraft(arg);
   if (act === 'build') { selPiece = arg; buildMode = true; toggleMenu(false); return; }
   renderMenu();
 });
@@ -1434,11 +2022,13 @@ addEventListener('keydown', e => {
   if (menuOpen) { if (e.code === 'Escape') toggleMenu(false); return; }
   keys[e.code] = true;
   if (e.code === 'KeyR') startReload();
-  if (e.code === 'KeyB') buildMode = !buildMode;
+  if (e.code === 'KeyB' && !riding) buildMode = !buildMode;
+  if (e.code === 'KeyC' && riding) camView = camView === 'fp' ? 'chase' : 'fp';
   if (buildMode) {
     if (e.code === 'Digit1') selPiece = 'wall';
     if (e.code === 'Digit2') selPiece = 'roof';
     if (e.code === 'Digit3') selPiece = 'fire';
+    if (e.code === 'Digit4') selPiece = 'bench';
     if (e.code === 'KeyQ') rot = 1 - rot;
     if (e.code === 'KeyV') removePiece();
   } else {
@@ -1448,7 +2038,10 @@ addEventListener('keydown', e => {
     if (e.code === 'KeyQ') switchWeapon();
   }
   if (e.code === 'KeyE') interact();
-  if (e.code === 'KeyF') { flashOn = !flashOn; flash.intensity = flashOn ? 25 : 0; }
+  if (e.code === 'KeyF') {
+    if (riding) bike.light = !bike.light; // фара мотоцикла
+    else { flashOn = !flashOn; flash.intensity = flashOn ? 25 : 0; }
+  }
 });
 addEventListener('keyup', e => keys[e.code] = false);
 renderer.domElement.addEventListener('click', () => {
@@ -1465,6 +2058,7 @@ addEventListener('mousemove', e => {
 // Стрельба (пули останавливаются о стены и деревья)
 const raycaster = new THREE.Raycaster();
 function switchWeapon() { // клавиша Q
+  if (riding) return;
   const owned = ['pistol'];
   if (hasShotgun) owned.push('shotgun');
   if (hasAxe) owned.push('axe');
@@ -1474,7 +2068,7 @@ function switchWeapon() { // клавиша Q
 }
 
 function startReload() { // клавиша R
-  if (health <= 0 || menuOpen || weapon === 'axe') return;
+  if (health <= 0 || menuOpen || riding || weapon === 'axe') return;
   if (weapon === 'shotgun') { // дробовик заряжается по одному патрону
     if (sgReloading || sgRacking || sgAmmo >= SG_MAG) return;
     if (sgReserve <= 0) return notify('Нет патронов для дробовика');
@@ -1520,7 +2114,7 @@ function attackShotgun() { // 6 дробинок с разбросом
 }
 
 function attack() {
-  if (health <= 0 || cool > 0 || drawT < 0.7) return;
+  if (health <= 0 || riding || cool > 0 || drawT < 0.7) return;
   if (weapon === 'shotgun') return attackShotgun();
   if (weapon === 'axe') return startSwing();
   if (reloading) return;
@@ -1557,14 +2151,16 @@ function loop() {
   scene.fog.far = 35 + 45 * daylight;
 
   if (health > 0) {
-    const speed = (keys.ShiftLeft ? 8 : 4.5) * dt;
-    const fwd = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw));
-    const right = new THREE.Vector3(Math.cos(yaw), 0, -Math.sin(yaw));
-    if (keys.KeyW) camera.position.addScaledVector(fwd, speed);
-    if (keys.KeyS) camera.position.addScaledVector(fwd, -speed);
-    if (keys.KeyD) camera.position.addScaledVector(right, speed);
-    if (keys.KeyA) camera.position.addScaledVector(right, -speed);
-    resolveCollisions(camera.position, 0.4);
+    if (!riding) {
+      const speed = (keys.ShiftLeft ? 8 : 4.5) * dt;
+      const fwd = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw));
+      const right = new THREE.Vector3(Math.cos(yaw), 0, -Math.sin(yaw));
+      if (keys.KeyW) camera.position.addScaledVector(fwd, speed);
+      if (keys.KeyS) camera.position.addScaledVector(fwd, -speed);
+      if (keys.KeyD) camera.position.addScaledVector(right, speed);
+      if (keys.KeyA) camera.position.addScaledVector(right, -speed);
+      resolveCollisions(camera.position, 0.4);
+    }
 
     // Голод и жажда
     hunger = Math.max(0, hunger - 0.4 * dt);
@@ -1572,7 +2168,11 @@ function loop() {
     if (hunger <= 0 || thirst <= 0) health -= 2 * dt;          // урон от голода/жажды
     else if (hunger > 70 && thirst > 70) health = Math.min(100, health + 0.5 * dt); // медленное лечение
   }
+  if (bike && riding && health > 0) updateBike(dt);
   camera.rotation.set(pitch + kick, yaw, 0);
+  if (bike) { updateBikeVisuals(dt); bikeSound(riding && bike.on && health > 0, bike.rpm, bike.gas); }
+  updatePuffs(dt);
+  updateBikeCamera();
   updateBuild(dt);
   updatePrompt();
 
@@ -1773,7 +2373,7 @@ function loop() {
   } else {
     hud.textContent =
       `Здоровье: ${Math.ceil(health)}   Еда: ${Math.ceil(hunger)}   Вода: ${Math.ceil(thirst)}\n` +
-      `Убито: ${kills}   ` + (weapon === 'pistol' ? `Пистолет: ${reloading ? 'перезарядка...' : ammo} / ${reserve}` : weapon === 'shotgun' ? `Дробовик: ${sgReloading ? 'заряжаю... ' : ''}${sgAmmo} / ${sgReserve}` : 'Топор: ЛКМ - рубить и бить');
+      `Убито: ${kills}   ` + (riding ? `Мотоцикл: ${Math.round(Math.abs(bike.v) * 3.6)} км/ч   Бензин: ${Math.ceil(bike.fuel)}%   [E] Слезть  [F] Фара  [C] Вид` : weapon === 'pistol' ? `Пистолет: ${reloading ? 'перезарядка...' : ammo} / ${reserve}` : weapon === 'shotgun' ? `Дробовик: ${sgReloading ? 'заряжаю... ' : ''}${sgAmmo} / ${sgReserve}` : 'Топор: ЛКМ - рубить и бить');
   }
   const hh = String(Math.floor(gameHour)).padStart(2, '0');
   const mm = String(Math.floor((gameHour % 1) * 60)).padStart(2, '0');
