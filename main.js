@@ -386,7 +386,7 @@ for (let i = 0; i < 8; i++) {
 
 // --- Зомби ---
 const zombies = [];
-function spawnZombie() {
+function spawnZombie(ax, az) {
   const g = new THREE.Group();
   const M = (c, r) => new THREE.MeshStandardMaterial({ color: c, roughness: r || 0.9, flatShading: true });
   const part = (w, h, d, mat, x, y, z, parent) => { const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat); m.position.set(x, y, z); (parent || g).add(m); return m; };
@@ -414,7 +414,7 @@ function spawnZombie() {
   const parts = { body, head, armL: arm(-1), armR: arm(1), legL: leg(-1), legR: leg(1) };
   parts.armL.rotation.x = parts.armR.rotation.x = -1.35;
   const a = Math.random() * Math.PI * 2, r = 25 + Math.random() * 40;
-  g.position.set(Math.cos(a) * r, 0, Math.sin(a) * r);
+  if (ax !== undefined) g.position.set(ax, 0, az); else g.position.set(Math.cos(a) * r, 0, Math.sin(a) * r);
   resolveCollisions(g.position, 0.6);
   scene.add(g);
   zombies.push({ mesh: g, hp: 3, cooldown: 0, parts, phase: Math.random() * 6 });
@@ -1114,6 +1114,7 @@ function makeHole() { // проём с лестницей (после того �
 }
 function hitHatch(w) { // удар топором по люку
   if (w.state !== 'closed') return false;
+  if (adm('fastChop')) w.hp = 1;
   w.hp--;
   w.hatch.position.x = w.hx + (Math.random() - 0.5) * 0.08; w.hatch.position.z = w.hz + (Math.random() - 0.5) * 0.08;
   for (let i = 0; i < 4; i++) {
@@ -1616,9 +1617,9 @@ function updateBike(dt) { // физика: газ, тормоз, поворот,
   const fuelOk = b.fuel > 0 && b.on;
   const gas = keys.KeyW && fuelOk ? 1 : 0, brk = keys.KeyS ? 1 : 0, hand = keys.Space ? 1 : 0;
   const steerIn = (keys.KeyA ? 1 : 0) - (keys.KeyD ? 1 : 0);
-  const VMAX = 30;
+  const VMAX = adm('turbo') ? 60 : 30;
   let v = b.v;
-  if (gas) v += 8.5 * (1 - Math.max(0, v) / VMAX) * dt;
+  if (gas) v += 8.5 * (adm('turbo') ? 2.2 : 1) * (1 - Math.max(0, v) / VMAX) * dt;
   if (brk) { if (v > 0.3) v -= 18 * dt; else if (fuelOk) v = Math.max(-4, v - 3.5 * dt); }
   if (hand) v -= Math.sign(v) * Math.min(Math.abs(v), 24 * dt);
   if (!gas && !brk && !hand) v -= Math.sign(v) * Math.min(Math.abs(v), (1.3 + 0.012 * v * v) * dt);
@@ -1647,6 +1648,7 @@ function updateBike(dt) { // физика: газ, тормоз, поворот,
   b.pitch += (clamp(b.accel * 0.012, -0.12, 0.2) - b.pitch) * Math.min(1, 6 * dt);
   b.comp = clamp(Math.max(0, -b.accel) * 0.004, 0, 0.07);
   if (b.on) b.fuel = Math.max(0, b.fuel - (0.04 + gas * 0.2) * dt);
+  if (adm('infFuel')) b.fuel = 100;
   const G = [0, 6, 12, 19, 26, 34], av = Math.abs(v);
   let gear = 1; while (gear < 5 && av > G[gear]) gear++;
   b.rpm = b.on ? 1100 + clamp((av - G[gear - 1]) / (G[gear] - G[gear - 1]), 0, 1) * 5000 + gas * 500 : 0;
@@ -2170,10 +2172,10 @@ function placePiece() {
   const [w, h, d, y] = pieceGeometry(selPiece, rot);
   const key = `${selPiece}:${selPiece === 'wall' || selPiece === 'bench' ? rot : 0}:${x}:${z}`;
   if (built.some(b => b.key === key)) return notify('Тут уже занято');
-  if (countOf('wood') < p.cost) return notify(`Нужно дерева: ${p.cost}`);
+  if (!adm('freeBuild') && countOf('wood') < p.cost) return notify(`Нужно дерева: ${p.cost}`);
   if (selPiece === 'fire' && built.filter(b => b.type === 'fire').length >= MAX_FIRES) return notify('Костров не больше 4');
   if (selPiece === 'bench' && built.filter(b => b.type === 'bench').length >= MAX_BENCHES) return notify('Верстаков не больше 2');
-  takeItem('wood', p.cost);
+  if (!adm('freeBuild')) takeItem('wood', p.cost);
 
   const mat = (selPiece === 'fire' || selPiece === 'bench')
     ? new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false }) // невидимая зона костра (для V)
@@ -2258,6 +2260,7 @@ function chop(quiet) {
   chopCd = 0.4;
   const ti = trees.findIndex(t => t.trunk === hit.object);
   const t = trees[ti];
+  if (adm('fastChop')) t.hp = 1;
   t.hp--;
   if (t.hp > 0) notify('Рублю... осталось ударов: ' + t.hp);
   if (t.hp <= 0) {
@@ -2275,6 +2278,11 @@ function chop(quiet) {
 // Крафт из лома
 function craft(type) {
   if (health <= 0) return;
+  if (adm('freeCraft')) {
+    if (type === 'ammo') { reserve += 7; return notify('Сделано (админ): +7 патронов'); }
+    if (type === 'axe') { hasAxe = true; weapon = 'axe'; drawT = 0; return notify('Топор выдан (админ)'); }
+    if (type === 'medkit') { addItem('medkit', 1); return notify('Сделано (админ): +1 аптечка'); }
+  }
   if (type === 'ammo') {
     if (countOf('scrap') < 2) return notify('Нужно 2 лома');
     takeItem('scrap', 2); reserve += 7; notify('Сделано: +7 патронов');
@@ -2305,11 +2313,11 @@ function nearBench() {
 function benchCraft(id) {
   const r = BENCH_RECIPES.find(x => x.id === id);
   if (!r || health <= 0) return;
-  if (!nearBench()) return notify('Подойди к верстаку');
-  for (const k in r.need) if (countOf(k) < r.need[k]) return notify('Не хватает: ' + ITEMS[k].name);
+  if (!nearBench() && !adm('freeCraft')) return notify('Подойди к верстаку');
+  if (!adm('freeCraft')) for (const k in r.need) if (countOf(k) < r.need[k]) return notify('Не хватает: ' + ITEMS[k].name);
   if (id === 'bike') {
     if (bike) return notify('Мотоцикл уже собран');
-    for (const k in r.need) takeItem(k, r.need[k]);
+    if (!adm('freeCraft')) for (const k in r.need) takeItem(k, r.need[k]);
     const sp = { x: camera.position.x - Math.sin(yaw) * 2.6, z: camera.position.z - Math.cos(yaw) * 2.6 };
     resolveCollisions(sp, 0.9);
     spawnBike(sp.x, sp.z, yaw);
@@ -2317,7 +2325,7 @@ function benchCraft(id) {
     return notify('Мотоцикл собран! Подойди, смотри на него и нажми E');
   }
   if (freeRoom(r.give) < 1) return notify('Инвентарь полон');
-  for (const k in r.need) takeItem(k, r.need[k]);
+  if (!adm('freeCraft')) for (const k in r.need) takeItem(k, r.need[k]);
   addItem(r.give, 1);
   notify('Сделано: ' + r.name);
 }
@@ -2336,7 +2344,7 @@ function updateBuild(dt) {
     const [w, h, d, y] = pieceGeometry(selPiece, rot);
     ghost.scale.set(w, h, d);
     ghost.position.set(x, y, z);
-    ghost.material.color.set(countOf('wood') >= pieces[selPiece].cost ? 0x44ff44 : 0xff4444);
+    ghost.material.color.set(adm('freeBuild') || countOf('wood') >= pieces[selPiece].cost ? 0x44ff44 : 0xff4444);
   }
   for (const b of built) {
     if (b.type !== 'fire') continue;
@@ -2363,6 +2371,7 @@ const bar = (label, v, color) =>
 
 function renderMenu() {
   const tabs = [['inv', 'Инвентарь'], ['craft', 'Крафт'], ['bench', 'Верстак'], ['build', 'Стройка'], ['settings', '⚙ Настройки']];
+  if (admin.on) tabs.push(['admin', '🛠 Админ']);
   let body = '';
   if (menuTab === 'inv') {
     body += bar('Здоровье', health, '#d64040') + bar('Еда', hunger, '#d19a3a') + bar('Вода', thirst, '#3a8fd6');
@@ -2386,13 +2395,13 @@ function renderMenu() {
     body += `<div style="margin-top:12px;opacity:.8">У тебя: лом x${countOf('scrap')}. Лом лежит на земле и в домах.</div>`;
   }
   if (menuTab === 'bench') {
-    const near = nearBench();
+    const near = nearBench() || adm('freeCraft');
     body += near ? '<div style="margin-bottom:8px;color:#9fd36a">Ты у верстака</div>'
       : '<div style="margin-bottom:8px;color:#e07a6a">Подойди к верстаку. Построить: B, затем 4 (Верстак, 6 дерева)</div>';
     for (const r of BENCH_RECIPES) {
       const req = Object.keys(r.need).map(k => `<span style="color:${countOf(k) >= r.need[k] ? '#9fd36a' : '#e07a6a'}">${ITEMS[k].name} ${countOf(k)}/${r.need[k]}</span>`).join(' · ');
       const done = r.id === 'bike' && bike;
-      const can = near && !done && Object.keys(r.need).every(k => countOf(k) >= r.need[k]);
+      const can = near && !done && (adm('freeCraft') || Object.keys(r.need).every(k => countOf(k) >= r.need[k]));
       body += row(`${r.name}<br><small>${req}</small>`, done ? '<span style="opacity:.7">собран</span>' : btn('Создать', 'bench:' + r.id, can));
     }
     body += `<div style="margin-top:12px;opacity:.8;font-size:14px">Резина: кучи старых покрышек (E). Лом: железные кучи. Бензин: канистры, заправка - слот 1-5 рядом с мотоциклом.</div>`;
@@ -2404,7 +2413,28 @@ function renderMenu() {
     body += sl('volume', 'Громкость', 0, 1, 0.05) + sl('fog', 'Дальность видимости', 0.6, 1.6, 0.05) + sl('res', 'Разрешение картинки', 0.5, 2, 0.25);
     body += row('Окно', btn('Полный экран', 'fs') + btn('Сбросить настройки', 'resetset'));
     body += row('Игра', btn('Выйти из игры', 'quit'));
+    if (admin.on) body += row('Админ-панель', btn('Открыть', 'admopen') + btn('Выйти из админки', 'admlogout'));
+    else {
+      body += row('Админ-панель', `<input id="admpass" type="password" placeholder="пароль" autocomplete="off" style="font:inherit;padding:6px 8px;width:120px;background:#111;color:#fff;border:2px solid #5a6b45;border-radius:6px"> ` + btn('Войти', 'admlogin'));
+      if (adminMsg) body += `<div style="color:#e07a6a;font-size:14px">${adminMsg}</div>`;
+    }
     body += `<div style="margin-top:10px;opacity:.7;font-size:14px">Настройки сохраняются сами. Esc открывает это меню (игра на паузе).</div>`;
+  }
+  if (menuTab === 'admin' && admin.on) {
+    const sec = t => `<div style="margin:14px 0 6px;color:#c8e07a;font-weight:bold">${t}</div>`;
+    const wrap = html => `<div style="display:flex;flex-wrap:wrap;gap:2px">${html}</div>`;
+    const sl = (k, label, min, max, step, val) => `<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;padding:5px 0;border-bottom:1px solid #3a4530"><span>${label}: <b id="va-${k}">${ADM_FMT[k](val)}</b></span><input type="range" data-adm="${k}" min="${min}" max="${max}" step="${step}" value="${val}" style="width:240px;max-width:50%"></div>`;
+    body += sec('Режимы') + wrap(Object.keys(ADM_LABELS).map(k => btn(ADM_LABELS[k] + ': ' + (admin[k] ? 'ВКЛ' : 'выкл'), 'admtog:' + k, true, admin[k])).join(''));
+    body += `<div style="opacity:.7;font-size:13px;margin-top:4px">Полёт: W/A/S/D по взгляду, Пробел вверх, C вниз, Shift быстрее. Сквозь стены: проходишь любые препятствия.</div>`;
+    body += sl('speedMul', 'Скорость ходьбы', 1, 5, 0.25, admin.speedMul) + sl('flySpeed', 'Скорость полёта', 0.5, 10, 0.5, admin.flySpeed) + sl('hour', 'Время суток', 0, 24, 0.25, gameHour);
+    body += sec('Выдать предметы') + Object.keys(ITEMS).map(t => row(`<img src="${ICONS[t]}" style="width:22px;height:22px;image-rendering:pixelated;vertical-align:middle"> ${ITEMS[t].name}`, btn('+1', `admgive:${t}:1`) + btn('+стак', `admgive:${t}:max`))).join('');
+    body += sec('Оружие и патроны') + wrap(btn('Дробовик', 'admweapon:shotgun') + btn('Топор', 'admweapon:axe') + btn('Всё оружие', 'admweapon:all') + btn('+50 патр. пистолета', 'admammo:pistol') + btn('+50 патр. дробовика', 'admammo:shotgun'));
+    body += sec('Игрок') + wrap(btn('Вылечить и накормить', 'admheal') + btn('Очистить инвентарь', 'admclear'));
+    body += sec('Транспорт') + wrap(btn('Мотоцикл рядом', 'admbike:spawn') + btn('Притянуть мотоцикл', 'admbike:come') + btn('Заправить', 'admbike:fuel') + btn('Убрать мотоцикл', 'admbike:remove'));
+    body += sec('Зомби') + wrap(btn('+1', 'admzombie:1') + btn('+5', 'admzombie:5') + btn('+10', 'admzombie:10') + btn('Убить всех', 'admzombie:kill'));
+    body += sec('Мир') + wrap(btn('Открыть все ящики', 'admworld:cases') + btn('Ящик рядом', 'admworld:case') + btn('Рассыпать ресурсы', 'admworld:resources') + btn('Верстак рядом', 'admworld:bench') + btn('Костёр рядом', 'admworld:fire'));
+    body += sec('Время') + wrap(btn('Утро 06:00', 'admtime:6') + btn('День 12:00', 'admtime:12') + btn('Вечер 19:00', 'admtime:19') + btn('Ночь 00:00', 'admtime:0'));
+    body += sec('Телепорт') + wrap(btn('На старт', 'admtp:home') + btn('Склад 1', 'admtp:w1') + btn('Склад 2', 'admtp:w2') + btn('Подвал 1', 'admtp:b1') + btn('Подвал 2', 'admtp:b2') + btn('Ближайший ящик', 'admtp:case') + btn('К мотоциклу', 'admtp:bike'));
   }
   if (menuTab === 'build') {
     for (const k of pieceKeys) {
@@ -2436,12 +2466,23 @@ function toggleMenu(open) {
 }
 
 menu.addEventListener('input', e => { // ползунки настроек
+  const ak = e.target.dataset && e.target.dataset.adm;
+  if (ak) { // ползунки админки
+    admin[ak] = parseFloat(e.target.value);
+    if (ak === 'hour') gameHour = admin[ak];
+    const alab = document.getElementById('va-' + ak);
+    if (alab) alab.textContent = ADM_FMT[ak](admin[ak]);
+    return;
+  }
   const k = e.target.dataset && e.target.dataset.set;
   if (!k) return;
   SETTINGS[k] = parseFloat(e.target.value);
   const lab = document.getElementById('v-' + k);
   if (lab) lab.textContent = SET_FMT[k](SETTINGS[k]);
   applySettings(); saveSettings();
+});
+menu.addEventListener('keydown', e => { // Enter в поле пароля
+  if (e.target && e.target.id === 'admpass' && e.key === 'Enter') { adminAction('admlogin'); renderMenu(); }
 });
 // Esc (или потеря курсора) ставит игру на паузу и открывает настройки
 document.addEventListener('pointerlockchange', () => {
@@ -2459,7 +2500,8 @@ menu.addEventListener('click', e => {
   }
   const t = e.target.closest('[data-act]');
   if (!t) return;
-  const [act, arg] = t.dataset.act.split(':');
+  const [act, arg, arg2] = t.dataset.act.split(':');
+  if (act.startsWith('adm')) adminAction(act, arg, arg2);
   if (act === 'tab') menuTab = arg;
   if (act === 'use' && pick !== null) { useSlot(pick); if (!slots[pick]) pick = null; }
   if (act === 'drop' && pick !== null && slots[pick]) {
@@ -2475,6 +2517,120 @@ menu.addEventListener('click', e => {
   if (act === 'build') { selPiece = arg; buildMode = true; toggleMenu(false); return; }
   renderMenu();
 });
+
+// --- Админ-панель: Настройки -> Админ-панель, пароль 1234 (это замок от случайного входа, а не настоящая защита) ---
+const ADMIN_PASSWORD = '1234';
+const admin = { on: false, fly: false, noclip: false, god: false, infAmmo: false, infFuel: false, turbo: false, fastChop: false, freeBuild: false, freeCraft: false, noZombies: false, freezeTime: false, debug: false, speedMul: 1, flySpeed: 1 };
+const ADM_LABELS = { fly: 'Полёт', noclip: 'Сквозь стены', god: 'Бессмертие', infAmmo: 'Бесконечные патроны', infFuel: 'Бесконечный бензин', turbo: 'Турбо мотоцикла', fastChop: 'Мгновенная рубка', freeBuild: 'Бесплатная стройка', freeCraft: 'Бесплатный крафт', noZombies: 'Без зомби', freezeTime: 'Заморозить время', debug: 'Отладка (координаты, FPS)' };
+const ADM_FMT = {
+  speedMul: v => v.toFixed(2) + 'x', flySpeed: v => v.toFixed(1) + 'x',
+  hour: v => String(Math.floor(v)).padStart(2, '0') + ':' + String(Math.floor((v % 1) * 60)).padStart(2, '0'),
+};
+let adminMsg = '', fpsSmooth = 60;
+const adm = k => admin.on && admin[k];
+const dbgEl = document.createElement('div'); // отладочная строка внизу слева
+dbgEl.style.cssText = 'position:fixed;left:10px;bottom:10px;color:#9fe870;font:14px monospace;text-shadow:1px 1px 2px #000;background:rgba(0,0,0,.45);padding:3px 8px;border-radius:4px;display:none';
+document.body.appendChild(dbgEl);
+const front = d => ({ x: camera.position.x - Math.sin(yaw) * d, z: camera.position.z - Math.cos(yaw) * d });
+
+function adminAction(act, arg, arg2) {
+  if (act === 'admlogin') {
+    const el = document.getElementById('admpass');
+    if (el && el.value === ADMIN_PASSWORD) { admin.on = true; adminMsg = ''; menuTab = 'admin'; notify('Админ-панель открыта'); }
+    else adminMsg = 'Неверный пароль';
+    return;
+  }
+  if (!admin.on) return;
+  if (act === 'admlogout') {
+    Object.keys(admin).forEach(k => { if (typeof admin[k] === 'boolean') admin[k] = false; });
+    admin.speedMul = 1; admin.flySpeed = 1; menuTab = 'settings'; return;
+  }
+  if (act === 'admopen') { menuTab = 'admin'; return; }
+  if (act === 'admtog') {
+    admin[arg] = !admin[arg];
+    if (arg === 'noZombies') {
+      if (admin.noZombies) zombies.forEach(z => { z.hp = 0; });
+      else for (let i = zombies.length; i < 12; i++) spawnZombie();
+    }
+    return;
+  }
+  if (act === 'admgive') {
+    const n = arg2 === 'max' ? ITEMS[arg].stack : parseInt(arg2);
+    const left = addItem(arg, n);
+    notify(left ? 'Инвентарь полон' : 'Выдано: ' + ITEMS[arg].name + ' x' + n);
+    return;
+  }
+  if (act === 'admweapon') {
+    if (arg === 'shotgun' || arg === 'all') { hasShotgun = true; sgReserve += 20; weapon = 'shotgun'; drawT = 0; }
+    if (arg === 'axe' || arg === 'all') { hasAxe = true; if (arg === 'axe') { weapon = 'axe'; drawT = 0; } }
+    notify('Оружие выдано');
+    return;
+  }
+  if (act === 'admammo') {
+    if (arg === 'pistol') reserve += 50; else { hasShotgun = true; sgReserve += 50; }
+    notify('+50 патронов');
+    return;
+  }
+  if (act === 'admheal') { health = 100; hunger = 100; thirst = 100; notify('Здоровье, еда и вода восстановлены'); return; }
+  if (act === 'admclear') { slots.fill(null); notify('Инвентарь очищен'); return; }
+  if (act === 'admtime') { gameHour = parseFloat(arg); return; }
+  if (act === 'admzombie') {
+    if (arg === 'kill') { zombies.forEach(z => { z.hp = 0; }); return notify('Зомби убиты'); }
+    if (inBasement) return notify('В подвале зомби не нужны');
+    for (let i = 0; i < parseInt(arg); i++) {
+      const a = Math.random() * 6.283, r = 8 + Math.random() * 8;
+      spawnZombie(camera.position.x + Math.cos(a) * r, camera.position.z + Math.sin(a) * r);
+    }
+    notify('Зомби добавлены рядом');
+    return;
+  }
+  if (act === 'admbike') {
+    if (arg === 'spawn' || arg === 'come') {
+      if (riding) return notify('Ты уже на мотоцикле');
+      const p = front(2.6); resolveCollisions(p, 0.9);
+      if (!bike) { spawnBike(p.x, p.z, yaw); bike.fuel = 100; }
+      else {
+        if (bike.collider) { colliders.splice(colliders.indexOf(bike.collider), 1); bike.collider = null; }
+        bike.rig.root.position.set(p.x, 0, p.z); bike.heading = yaw; bike.v = 0;
+        parkBikeCollider();
+      }
+      notify('Мотоцикл рядом (E - сесть)');
+    } else if (!bike) return notify('Мотоцикла нет');
+    else if (arg === 'fuel') { bike.fuel = 100; notify('Бак полный'); }
+    else if (arg === 'remove') {
+      if (riding) dismountBike();
+      if (bike.collider) colliders.splice(colliders.indexOf(bike.collider), 1);
+      scene.remove(bike.rig.root); bike = null; notify('Мотоцикл убран');
+    }
+    return;
+  }
+  if (act === 'admworld') {
+    if (arg === 'cases') { cases.forEach(c => { if (c.state === 'closed') { c.state = 'opening'; c.t = 0; } }); notify('Все ящики открываются'); }
+    else if (arg === 'case') { const p = front(4); spawnCase(p.x, p.z, 0, true); notify('Ящик поставлен впереди'); }
+    else if (arg === 'resources') {
+      const kinds = [['wood', 5], ['wood', 5], ['scrap', 3], ['scrap', 3], ['rubber', 3], ['rubber', 3]];
+      kinds.forEach(([t, n], i) => { const a = i / kinds.length * 6.283; spawnPile(t, camera.position.x + Math.cos(a) * 5, camera.position.z + Math.sin(a) * 5, n, true); });
+      ['food', 'water', 'medkit', 'fuel'].forEach((t, i) => { const a = i / 4 * 6.283 + 0.4; spawnItem(t, camera.position.x + Math.cos(a) * 3, camera.position.z + Math.sin(a) * 3, true); });
+      notify('Ресурсы рассыпаны вокруг');
+    } else if (arg === 'bench' || arg === 'fire') {
+      const keep = admin.freeBuild; admin.freeBuild = true; selPiece = arg; placePiece(); admin.freeBuild = keep;
+    }
+    return;
+  }
+  if (act === 'admtp') {
+    if (riding) return notify('Сначала слезь с мотоцикла');
+    const tp = (x, z) => teleport(x, z, null, false, yaw);
+    if (arg === 'home') tp(0, 6);
+    else if (arg === 'w1' || arg === 'w2') { const w = warehouses[arg === 'w1' ? 0 : 1]; if (w) tp(w.x, w.z + 9); else notify('Такого склада нет'); }
+    else if (arg === 'b1' || arg === 'b2') { const w = warehouses[arg === 'b1' ? 0 : 1]; if (w) teleport(w.ladderX - 1.4, w.ladderZ, w, true, Math.PI / 2); else notify('Такого склада нет'); }
+    else if (arg === 'case') {
+      let best = null, bd = 1e9;
+      cases.forEach(c => { const d = Math.hypot(c.x - camera.position.x, c.z - camera.position.z); if (c.state !== 'empty' && d < bd) { bd = d; best = c; } });
+      if (best) tp(best.x, best.z + 3); else notify('Ящиков нет');
+    } else if (arg === 'bike') { if (bike) tp(bike.rig.root.position.x + 2, bike.rig.root.position.z + 2); else notify('Мотоцикла нет'); }
+    return;
+  }
+}
 
 // Управление
 addEventListener('keydown', e => {
@@ -2603,9 +2759,12 @@ const clock = new THREE.Clock();
 function loop() {
   const rawDt = clock.getDelta();
   const dt = menuOpen ? 0 : Math.min(rawDt, 0.1); // в меню игра на паузе
+  if (rawDt > 0) fpsSmooth = fpsSmooth * 0.95 + (1 / rawDt) * 0.05;
+  if (adm('god')) { health = 100; hunger = 100; thirst = 100; }
+  if (adm('infAmmo')) { ammo = MAG; sgAmmo = SG_MAG; reserve = Math.max(reserve, 30); if (hasShotgun) sgReserve = Math.max(sgReserve, 30); }
 
   // День и ночь
-  gameHour = (gameHour + dt * 0.1) % 24;
+  if (!adm('freezeTime')) gameHour = (gameHour + dt * 0.1) % 24;
   const ang = (gameHour - 6) / 24 * Math.PI * 2;
   daylight = Math.max(0, Math.min(1, (Math.sin(ang) + 0.2) / 0.6));
   {
@@ -2638,14 +2797,23 @@ function loop() {
 
   if (health > 0) {
     if (!riding) {
-      const speed = (keys.ShiftLeft ? 8 : 4.5) * dt;
-      const fwd = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw));
+      const flying = adm('fly');
+      const speed = flying ? (keys.ShiftLeft ? 18 : 9) * dt * admin.flySpeed : (keys.ShiftLeft ? 8 : 4.5) * dt * (adm('speedMul') ? admin.speedMul : 1);
+      const fwd = flying
+        ? new THREE.Vector3(-Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), -Math.cos(yaw) * Math.cos(pitch))
+        : new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw));
       const right = new THREE.Vector3(Math.cos(yaw), 0, -Math.sin(yaw));
       if (keys.KeyW) camera.position.addScaledVector(fwd, speed);
       if (keys.KeyS) camera.position.addScaledVector(fwd, -speed);
       if (keys.KeyD) camera.position.addScaledVector(right, speed);
       if (keys.KeyA) camera.position.addScaledVector(right, -speed);
-      resolveCollisions(camera.position, 0.4);
+      if (flying) { // Пробел - вверх, C - вниз
+        if (keys.Space) camera.position.y += speed;
+        if (keys.KeyC) camera.position.y -= speed;
+        if (camera.position.y < 0.5) camera.position.y = 0.5;
+      } else if (Math.abs(camera.position.y - 1.7) > 0.01) camera.position.y += (1.7 - camera.position.y) * Math.min(1, 8 * dt);
+      else camera.position.y = 1.7;
+      if (!adm('noclip') && !(flying && camera.position.y > 8)) resolveCollisions(camera.position, 0.4);
     }
 
     // Голод и жажда
@@ -2841,7 +3009,7 @@ function loop() {
   // Зомби
   for (let i = zombies.length - 1; i >= 0; i--) {
     const z = zombies[i];
-    if (z.hp <= 0) { scene.remove(z.mesh); zombies.splice(i, 1); kills++; spawnZombie(); continue; }
+    if (z.hp <= 0) { scene.remove(z.mesh); zombies.splice(i, 1); kills++; if (!adm('noZombies')) spawnZombie(); continue; }
     const to = camera.position.clone().sub(z.mesh.position).setY(0);
     const dist = to.length();
     if (dist < 35 && dist > 1.2) {
@@ -2872,6 +3040,10 @@ function loop() {
   const hotHtml = slotsRow + `<div style="margin-top:6px;font-size:16px">${info}</div>`;
   if (hotHtml !== lastHot) { hotbar.innerHTML = hotHtml; lastHot = hotHtml; }
 
+  if (adm('debug')) {
+    dbgEl.style.display = 'block';
+    dbgEl.textContent = `X ${camera.position.x.toFixed(1)}  Y ${camera.position.y.toFixed(1)}  Z ${camera.position.z.toFixed(1)}   FPS ${Math.round(fpsSmooth)}   зомби ${zombies.length}  кучи ${piles.length}  объектов ${scene.children.length}`;
+  } else dbgEl.style.display = 'none';
   renderer.render(scene, camera);
   requestAnimationFrame(loop);
 }
