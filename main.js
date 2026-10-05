@@ -1,5 +1,21 @@
 import * as THREE from 'three';
 
+// --- Сохранения: мир строится от числа (зерна), поэтому его можно воссоздать точно таким же ---
+let bootInfo = null;
+try { bootInfo = JSON.parse(localStorage.getItem('dz_boot') || 'null'); localStorage.removeItem('dz_boot'); } catch (e) { /* первый запуск */ }
+const WORLD_SEED = bootInfo && bootInfo.seed ? bootInfo.seed : Math.floor(Math.random() * 4294967295);
+const _realRandom = Math.random;
+{
+  let a = WORLD_SEED;
+  Math.random = function () { // воспроизводимый генератор на время создания мира
+    a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+let uidCounter = 0, initDone = false, gameStarted = false, currentSlot = 0, day = 1;
+
 // --- Сцена ---
 const scene = new THREE.Scene();
 
@@ -209,7 +225,7 @@ for (let i = 0; i < 150; i++) {
   const trunk = box(0.6, 3, 0.6, 0x5b3a1e, x, 1.5, z, true);
   const collider = colliders[colliders.length - 1];
   const crown = makeCrown(x, z);
-  trees.push({ trunk, crown, collider, hp: 4 });
+  trees.push({ trunk, crown, collider, hp: 4, id: uidCounter++ });
 }
 
 // --- Дома: стены с окнами, дверь с южной стороны (+Z), двускатная крыша, крыльцо, мебель ---
@@ -2442,7 +2458,7 @@ function spawnPile(type, x, z, n, stash) {
   model.group.position.set(x, 0, z);
   model.group.rotation.y = Math.random() * Math.PI * 2;
   scene.add(model.group);
-  piles.push({ type, n, stash, group: model.group, parts: model.parts });
+  piles.push({ type, n, stash, id: uidCounter++, dyn: initDone, x, z, group: model.group, parts: model.parts });
 }
 for (let i = 0; i < 16; i++) spawnPile('wood');
 for (let i = 0; i < 18; i++) spawnPile('scrap');
@@ -2544,7 +2560,7 @@ function updatePrompt() {
     promptEl.textContent = drive === 'car' ? '[E] Выйти из джипа' : '[E] Слезть с мотоцикла';
     promptEl.style.display = 'block';
   } else if (lookedBuilt) {
-    promptEl.textContent = lookedBuilt.type === 'bed' ? '[E] Лечь спать (с 19:30 до 05:30)' : lookedBuilt.type === 'gate' ? (lookedBuilt.open ? '[E] Закрыть ворота' : '[E] Открыть ворота') : (lookedBuilt.open ? '[E] Закрыть дверь' : '[E] Открыть дверь');
+    promptEl.textContent = lookedBuilt.type === 'bed' ? '[E] Кровать: сохранить игру или лечь спать' : lookedBuilt.type === 'gate' ? (lookedBuilt.open ? '[E] Закрыть ворота' : '[E] Открыть ворота') : (lookedBuilt.open ? '[E] Закрыть дверь' : '[E] Открыть дверь');
     promptEl.style.display = 'block';
   } else if (lookedCar) {
     promptEl.textContent = `[E] Сесть в джип (бензин ${Math.ceil(lookedCar.fuel)}%)`;
@@ -2582,7 +2598,7 @@ function interact() {
   if (riding) return drive === 'car' ? dismountCar() : dismountBike();
   if (lookedCar) return mountCar(lookedCar);
   if (lookedPump) return usePump(lookedPump);
-  if (lookedBuilt) return lookedBuilt.type === 'bed' ? sleepInBed(lookedBuilt) : toggleDoor(lookedBuilt);
+  if (lookedBuilt) return lookedBuilt.type === 'bed' ? openBedMenu(lookedBuilt) : toggleDoor(lookedBuilt);
   if (lookedPortal) return useBasementPortal(lookedPortal);
   if (lookedBike) return mountBike();
   if (lookedBench) { menuTab = 'bench'; return toggleMenu(true); }
@@ -2618,7 +2634,7 @@ function spawnCase(x, z, rotY, stash, kind) {
   const hw = along ? mc.L / 2 : mc.D / 2, hd = along ? mc.D / 2 : mc.L / 2;
   const collider = { minX: x - hw, maxX: x + hw, minZ: z - hd, maxZ: z + hd };
   colliders.push(collider);
-  cases.push({ root: mc.root, lid: mc.lid, loot: mc.loot, latches: mc.latches, x, z, state: 'closed', t: 0, collider, stash, kind });
+  cases.push({ root: mc.root, lid: mc.lid, loot: mc.loot, latches: mc.latches, x, z, state: 'closed', t: 0, collider, stash, kind, id: uidCounter++, dyn: initDone, rotY });
 }
 function caseInteract(c) {
   if (c.state === 'closed') { c.state = 'opening'; c.t = 0; }
@@ -2664,9 +2680,10 @@ function updateCases(dt) {
 const ammoBoxes = [];
 function spawnAmmoBox(x, z, stash) {
   const m = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.3, 0.35), new THREE.MeshStandardMaterial({ color: 0xd4a017 }));
-  m.position.set(x ?? (Math.random() - 0.5) * 200, 0.15, z ?? (Math.random() - 0.5) * 200);
+  const px = x ?? (Math.random() - 0.5) * 200, pz = z ?? (Math.random() - 0.5) * 200;
+  m.position.set(px, 0.15, pz);
   scene.add(m);
-  m.userData.stash = stash;
+  m.userData.stash = stash; m.userData.id = uidCounter++; m.userData.dyn = initDone; m.userData.px = px; m.userData.pz = pz;
   ammoBoxes.push(m);
 }
 for (let i = 0; i < 15; i++) spawnAmmoBox();
@@ -2731,10 +2748,11 @@ function makeItemModel(type) {
 }
 function spawnItem(type, x, z, stash) {
   const m = makeItemModel(type);
-  m.position.set(x ?? (Math.random() - 0.5) * 200, 0, z ?? (Math.random() - 0.5) * 200);
+  const px = x ?? (Math.random() - 0.5) * 200, pz = z ?? (Math.random() - 0.5) * 200;
+  m.position.set(px, 0, pz);
   m.rotation.y = Math.random() * Math.PI * 2;
   scene.add(m);
-  items.push({ mesh: m, type, stash });
+  items.push({ mesh: m, type, stash, id: uidCounter++, dyn: initDone, x: px, z: pz });
 }
 for (let i = 0; i < 10; i++) { spawnItem('food'); spawnItem('water'); }
 for (let i = 0; i < 5; i++) spawnItem('medkit');
@@ -2909,21 +2927,20 @@ function aabbSeg(x, z, a, lo, hi, thick) { // отрезок стены вдол
     : { minX: x - thick / 2, maxX: x + thick / 2, minZ: z + lo, maxZ: z + hi };
 }
 
-function placePiece() {
-  if (health <= 0) return;
-  const p = pieces[selPiece];
-  const [x, z] = targetPos();
-  const [w, h, d, y] = pieceGeometry(selPiece, rot);
-  const a = rot % 2;
-  const usesRot = ['wall', 'door', 'gate', 'bench', 'bed'].includes(selPiece);
-  const key = `${selPiece}:${selPiece === 'stairs' ? rot : usesRot ? a : 0}:${x}:${z}`;
+function placePieceAt(type, rotv, x, z, free) {
+  if (health <= 0) return null;
+  const p = pieces[type];
+  const [w, h, d, y] = pieceGeometry(type, rotv);
+  const a = rotv % 2;
+  const usesRot = ['wall', 'door', 'gate', 'bench', 'bed'].includes(type);
+  const key = `${type}:${type === 'stairs' ? rotv : usesRot ? a : 0}:${x}:${z}`;
   if (built.some(b => b.key === key)) return notify('Тут уже занято');
-  if (!adm('freeBuild') && countOf('wood') < p.cost) return notify(`Нужно дерева: ${p.cost}`);
-  if (selPiece === 'fire' && built.filter(b => b.type === 'fire').length >= MAX_FIRES) return notify('Костров не больше 4');
-  if (selPiece === 'bench' && built.filter(b => b.type === 'bench').length >= MAX_BENCHES) return notify('Верстаков не больше 2');
-  if (!adm('freeBuild')) takeItem('wood', p.cost);
+  if (!free && !adm('freeBuild') && countOf('wood') < p.cost) return notify(`Нужно дерева: ${p.cost}`);
+  if (!free && type === 'fire' && built.filter(b => b.type === 'fire').length >= MAX_FIRES) return notify('Костров не больше 4');
+  if (!free && type === 'bench' && built.filter(b => b.type === 'bench').length >= MAX_BENCHES) return notify('Верстаков не больше 2');
+  if (!free && !adm('freeBuild')) takeItem('wood', p.cost);
 
-  const invisible = ['fire', 'bench', 'door', 'gate', 'bed', 'stairs'].includes(selPiece); // у них своя модель, а коробка нужна для прицела (V)
+  const invisible = ['fire', 'bench', 'door', 'gate', 'bed', 'stairs'].includes(type); // у них своя модель, а коробка нужна для прицела (V)
   const mat = invisible
     ? new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false })
     : new THREE.MeshStandardMaterial({ color: p.color });
@@ -2931,52 +2948,52 @@ function placePiece() {
   mesh.position.set(x, y, z);
   scene.add(mesh);
 
-  const b = { key, type: selPiece, mesh, collider: null, light: null, colliders: [], open: false, ang: 0 };
+  const b = { key, type: type, mesh, collider: null, light: null, colliders: [], open: false, ang: 0, px: x, pz: z, prot: rotv };
   const addCol = (c, top) => { c.top = top; colliders.push(c); b.colliders.push(c); return c; };
-  if (selPiece === 'wall') {
+  if (type === 'wall') {
     b.collider = { minX: x - w / 2, maxX: x + w / 2, minZ: z - d / 2, maxZ: z + d / 2, top: 3.0 };
     colliders.push(b.collider);
     blockers.push(mesh);
   }
-  if (selPiece === 'roof') { // крышу можно использовать как пол второго этажа
+  if (type === 'roof') { // крышу можно использовать как пол второго этажа
     blockers.push(mesh);
     b.floor = { minX: x - 1, maxX: x + 1, minZ: z - 1, maxZ: z + 1, y: 3.2 };
     floors.push(b.floor);
   }
-  if (selPiece === 'fire') {
+  if (type === 'fire') {
     b.vis = makeCampfire(); b.vis.position.set(x, 0, z); scene.add(b.vis);
     b.light = new THREE.PointLight(0xff8a3a, 8, 20, 1);
     b.light.position.set(x, 1, z);
     scene.add(b.light);
   }
-  if (selPiece === 'bench') {
+  if (type === 'bench') {
     b.collider = { minX: x - w / 2, maxX: x + w / 2, minZ: z - d / 2, maxZ: z + d / 2 };
     colliders.push(b.collider);
     blockers.push(mesh);
     b.vis = makeWorkbench(); b.vis.position.set(x, 0, z); b.vis.rotation.y = a === 0 ? 0 : Math.PI / 2; scene.add(b.vis);
   }
-  if (selPiece === 'door') {
+  if (type === 'door') {
     b.vis = makeDoor(); b.vis.position.set(x, 0, z); b.vis.rotation.y = a === 0 ? 0 : Math.PI / 2; scene.add(b.vis);
     b.leaf = b.vis.userData.leaf;
     addCol(aabbSeg(x, z, a, -1, -0.55, 0.3), 3.0); addCol(aabbSeg(x, z, a, 0.55, 1, 0.3), 3.0);
     b.doorCol = addCol(aabbSeg(x, z, a, -0.55, 0.55, 0.3), 2.4);
     blockers.push(mesh);
   }
-  if (selPiece === 'gate') {
+  if (type === 'gate') {
     b.vis = makeGate(); b.vis.position.set(x, 0, z); b.vis.rotation.y = a === 0 ? 0 : Math.PI / 2; scene.add(b.vis);
     b.leaves = b.vis.userData.leaves;
     addCol(aabbSeg(x, z, a, -2, -1.7, 0.3), 2.8); addCol(aabbSeg(x, z, a, 1.7, 2, 0.3), 2.8);
     b.doorCol = addCol(aabbSeg(x, z, a, -1.7, 1.7, 0.3), 2.6);
     blockers.push(mesh);
   }
-  if (selPiece === 'bed') {
+  if (type === 'bed') {
     b.collider = { minX: x - w / 2, maxX: x + w / 2, minZ: z - d / 2, maxZ: z + d / 2, top: 0.55 };
     colliders.push(b.collider);
     b.vis = makeBed(); b.vis.position.set(x, 0, z); b.vis.rotation.y = a === 0 ? 0 : Math.PI / 2; scene.add(b.vis);
   }
-  if (selPiece === 'stairs') { // 16 ступеней по 0,2 м: по ним можно подняться на крышу-пол
-    b.vis = makeStairs(); b.vis.position.set(x, 0, z); b.vis.rotation.y = -rot * Math.PI / 2; scene.add(b.vis);
-    const th = -rot * Math.PI / 2, cs = Math.round(Math.cos(th)), sn = Math.round(Math.sin(th));
+  if (type === 'stairs') { // 16 ступеней по 0,2 м: по ним можно подняться на крышу-пол
+    b.vis = makeStairs(); b.vis.position.set(x, 0, z); b.vis.rotation.y = -rotv * Math.PI / 2; scene.add(b.vis);
+    const th = -rotv * Math.PI / 2, cs = Math.round(Math.cos(th)), sn = Math.round(Math.sin(th));
     b.floorEntries = [];
     for (let i = 0; i < 16; i++) {
       const lz = 2 - 0.125 - i * 0.25;
@@ -2989,6 +3006,12 @@ function placePiece() {
   }
   built.push(b);
   builtMeshes.push(mesh);
+  return b;
+}
+
+function placePiece() { // ставит деталь перед игроком
+  const [x, z] = targetPos();
+  return placePieceAt(selPiece, rot, x, z, false);
 }
 
 // Модели новых деталей
@@ -3069,9 +3092,14 @@ function sleepInBed(b) {
   sleeping = true;
   fadeEl.style.transition = 'opacity 0.9s'; fadeEl.style.opacity = '1';
   setTimeout(() => {
+    if (gameHour >= 19.5) day++;
     gameHour = 7; health = Math.min(100, health + 50); hunger = Math.max(0, hunger - 15); thirst = Math.max(0, thirst - 20);
     fadeEl.style.opacity = '0';
-    setTimeout(() => { sleeping = false; notify('Ты выспался: утро, 07:00. Здоровье +50'); }, 900);
+    setTimeout(() => {
+      sleeping = false;
+      if (currentSlot) { saveGame(currentSlot, true); notify('Ты выспался: утро, 07:00. Здоровье +50. Сохранение обновлено'); }
+      else notify('Ты выспался: утро, 07:00. Здоровье +50');
+    }, 900);
   }, 1300);
 }
 
@@ -3248,8 +3276,10 @@ const bar = (label, v, color) =>
   `<div style="margin:4px 0">${label}: ${Math.ceil(v)}<div style="height:10px;background:#111;border-radius:5px"><div style="height:10px;width:${Math.max(0, Math.min(100, v))}%;background:${color};border-radius:5px"></div></div></div>`;
 
 function renderMenu() {
+  if (menuTab === 'bed') { renderBedMenu(); return; }
   const tabs = [['inv', 'Инвентарь'], ['craft', 'Крафт'], ['bench', 'Верстак'], ['build', 'Стройка'], ['settings', '⚙ Настройки']];
   if (admin.on) tabs.push(['admin', '🛠 Админ']);
+  if (!gameStarted) { tabs.length = 0; tabs.push(['settings', '⚙ Настройки']); } // из главного меню доступны только настройки
   let body = '';
   if (menuTab === 'inv') {
     body += bar('Здоровье', health, '#d64040') + bar('Еда', hunger, '#d19a3a') + bar('Вода', thirst, '#3a8fd6');
@@ -3291,6 +3321,7 @@ function renderMenu() {
     body += sl('volume', 'Громкость', 0, 1, 0.05) + sl('fog', 'Дальность видимости', 0.6, 1.6, 0.05) + sl('res', 'Разрешение картинки', 0.5, 2, 0.25);
     body += row('Окно', btn('Полный экран', 'fs') + btn('Сбросить настройки', 'resetset'));
     body += row('Игра', btn('Выйти из игры', 'quit'));
+    body += gameStarted ? row('Главное меню', btn('Выйти в главное меню', 'tomenu')) : row('Меню', btn('Назад', 'mmback'));
     if (admin.on) body += row('Админ-панель', btn('Открыть', 'admopen') + btn('Выйти из админки', 'admlogout'));
     else {
       body += row('Админ-панель', `<input id="admpass" type="password" placeholder="пароль" autocomplete="off" style="font:inherit;padding:6px 8px;width:120px;background:#111;color:#fff;border:2px solid #5a6b45;border-radius:6px"> ` + btn('Войти', 'admlogin'));
@@ -3329,7 +3360,7 @@ function renderMenu() {
 
 function toggleMenu(open) {
   if (health <= 0) return;
-  if (!open) pick = null;
+  if (!open) { pick = null; if (menuTab === 'bed') menuTab = 'inv'; }
   menuOpen = open;
   menu.style.display = open ? 'flex' : 'none';
   if (open) {
@@ -3364,7 +3395,7 @@ menu.addEventListener('keydown', e => { // Enter в поле пароля
 });
 // Esc (или потеря курсора) ставит игру на паузу и открывает настройки
 document.addEventListener('pointerlockchange', () => {
-  if (document.pointerLockElement !== renderer.domElement && !menuOpen && health > 0) { menuTab = 'settings'; toggleMenu(true); }
+  if (gameStarted && document.pointerLockElement !== renderer.domElement && !menuOpen && health > 0) { menuTab = 'settings'; toggleMenu(true); }
 });
 menu.addEventListener('click', e => {
   const sl = e.target.closest('[data-slot]');
@@ -3392,9 +3423,180 @@ menu.addEventListener('click', e => {
   if (act === 'fs') { try { if (document.fullscreenElement) document.exitFullscreen(); else document.documentElement.requestFullscreen(); } catch (err) { /* не поддерживается */ } }
   if (act === 'resetset') { Object.assign(SETTINGS, DEFAULT_SETTINGS); applySettings(); saveSettings(); }
   if (act === 'quit') window.close();
+  if (act === 'save') { saveGame(+arg); renderMenu(); return; }
+  if (act === 'sleep') { toggleMenu(false); if (bedMenuBed) sleepInBed(bedMenuBed); return; }
+  if (act === 'closebed') { toggleMenu(false); return; }
+  if (act === 'tomenu') { if (confirm('Выйти в главное меню? Несохранённый прогресс будет потерян.')) location.reload(); return; }
+  if (act === 'mmback') { menuOpen = false; menu.style.display = 'none'; mainMenu.style.display = 'flex'; renderMainMenu('main'); return; }
   if (act === 'build') { selPiece = arg; buildMode = true; toggleMenu(false); return; }
   renderMenu();
 });
+
+// --- Сохранения и главное меню ---
+function readSaves() { try { return JSON.parse(localStorage.getItem('dz_saves') || '{}'); } catch (e) { return {}; } }
+const fmtH = h => String(Math.floor(h)).padStart(2, '0') + ':' + String(Math.floor((h % 1) * 60)).padStart(2, '0');
+function slotInfo(d) {
+  const when = new Date(d.time).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+  return `День ${d.day}, ${fmtH(d.hour)} · здоровье ${Math.ceil(d.player.health)} · ${when}`;
+}
+function makeSave() { // всё, что нужно, чтобы вернуть игру точно такой же
+  const here = { items: new Set(items.map(i => i.id)), ammo: new Set(ammoBoxes.map(m => m.userData.id)), trees: new Set(trees.map(t => t.id)), piles: new Map(piles.map(p => [p.id, p])), cases: new Map(cases.map(c => [c.id, c])) };
+  return {
+    v: 1, seed: WORLD_SEED, time: Date.now(), day, hour: gameHour,
+    player: { x: camera.position.x, y: camera.position.y, z: camera.position.z, yaw, health, hunger, thirst, kills },
+    inv: slots.map(sl => sl ? [sl.type, sl.n] : null),
+    w: { weapon, hasShotgun, hasAxe, hasAK, ammo, reserve, lock, sgAmmo, sgReserve, akAmmo, akReserve },
+    basement: curW ? curW.id : -1,
+    takenItems: [...initSnap.items].filter(id => !here.items.has(id)),
+    takenAmmo: [...initSnap.ammo].filter(id => !here.ammo.has(id)),
+    felled: [...initSnap.trees].filter(id => !here.trees.has(id)),
+    pileDiff: [...initSnap.piles].map(([id, n0]) => [id, here.piles.has(id) ? here.piles.get(id).n : 0, n0]).filter(([id, n, n0]) => n !== n0).map(([id, n]) => [id, n]),
+    caseState: [...initSnap.cases].map(id => { const c = here.cases.get(id); return [id, !c ? 'gone' : c.state === 'empty' ? 'empty' : (c.state === 'open' || c.state === 'taking') ? 'open' : 'closed']; }).filter(([id, st]) => st !== 'closed'),
+    dyn: {
+      piles: piles.filter(p => p.dyn).map(p => [p.type, p.x, p.z, p.n, p.stash ? 1 : 0]),
+      items: items.filter(i => i.dyn).map(i => [i.type, i.x, i.z, i.stash ? 1 : 0]),
+      ammo: ammoBoxes.filter(m => m.userData.dyn).map(m => [m.userData.px, m.userData.pz, m.userData.stash ? 1 : 0]),
+      cases: cases.filter(c => c.dyn).map(c => [c.x, c.z, c.rotY, c.stash ? 1 : 0, c.kind || '', c.state === 'empty' ? 2 : (c.state === 'closed' ? 0 : 1)]),
+    },
+    built: built.filter(b => b.key !== 'garage').map(b => [b.type, b.px, b.pz, b.prot, b.open ? 1 : 0]),
+    bike: bike ? [bike.rig.root.position.x, bike.rig.root.position.z, bike.heading, bike.fuel] : null,
+    cars: cars.map(c => [c.rig.root.position.x, c.rig.root.position.z, c.heading, c.fuel]),
+    wh: warehouses.map(w => [w.state, w.hp]),
+    pumps: stations.map(st => st.pumps.map(p => p.fuel)),
+  };
+}
+function saveGame(slot, quiet) {
+  try {
+    const all = readSaves();
+    all[slot] = makeSave();
+    localStorage.setItem('dz_saves', JSON.stringify(all));
+    localStorage.setItem('dz_lastSlot', String(slot));
+    currentSlot = slot;
+    if (!quiet) notify(`Игра сохранена в слот ${slot}`);
+    return true;
+  } catch (e) { notify('Не удалось сохранить игру'); return false; }
+}
+function setCaseOpen(c, empty) { // ящик сразу открыт (после загрузки)
+  c.lid.rotation.x = -1.95; c.latches.forEach(l => { l.rotation.x = -1.2; });
+  c.state = empty ? 'empty' : 'open'; c.t = 0;
+  if (empty) c.loot.visible = false;
+}
+function applySave(sv) { // накладываем сохранение на только что созданный мир с тем же зерном
+  const P = sv.player;
+  camera.position.set(P.x, P.y, P.z); yaw = P.yaw; pitch = 0;
+  health = P.health; hunger = P.hunger; thirst = P.thirst; kills = P.kills; day = sv.day; gameHour = sv.hour;
+  slots.fill(null); sv.inv.forEach((sl, i) => { slots[i] = sl ? { type: sl[0], n: sl[1] } : null; });
+  const W = sv.w;
+  weapon = W.weapon; hasShotgun = W.hasShotgun; hasAxe = W.hasAxe; hasAK = W.hasAK;
+  ammo = W.ammo; reserve = W.reserve; lock = W.lock; sgAmmo = W.sgAmmo; sgReserve = W.sgReserve; akAmmo = W.akAmmo; akReserve = W.akReserve;
+  drawT = 0;
+  // собранный лут и срубленные деревья
+  const tI = new Set(sv.takenItems); for (let i = items.length - 1; i >= 0; i--) if (tI.has(items[i].id)) { scene.remove(items[i].mesh); items.splice(i, 1); }
+  const tA = new Set(sv.takenAmmo); for (let i = ammoBoxes.length - 1; i >= 0; i--) if (tA.has(ammoBoxes[i].userData.id)) { scene.remove(ammoBoxes[i]); ammoBoxes.splice(i, 1); }
+  const fe = new Set(sv.felled);
+  for (let i = trees.length - 1; i >= 0; i--) {
+    const t = trees[i]; if (!fe.has(t.id)) continue;
+    scene.remove(t.trunk); scene.remove(t.crown); colliders.splice(colliders.indexOf(t.collider), 1); blockers.splice(blockers.indexOf(t.trunk), 1); trees.splice(i, 1);
+  }
+  sv.pileDiff.forEach(([id, n]) => {
+    const p = piles.find(q => q.id === id); if (!p) return;
+    while (p.n > n && p.parts.length) { p.group.remove(p.parts.shift()); p.n--; }
+    if (n <= 0) { scene.remove(p.group); piles.splice(piles.indexOf(p), 1); }
+  });
+  sv.caseState.forEach(([id, st]) => {
+    const c = cases.find(q => q.id === id); if (!c) return;
+    if (st === 'gone') { scene.remove(c.root); const ci = colliders.indexOf(c.collider); if (ci >= 0) colliders.splice(ci, 1); cases.splice(cases.indexOf(c), 1); }
+    else setCaseOpen(c, st === 'empty');
+  });
+  // объекты, появившиеся уже во время игры
+  sv.dyn.piles.forEach(([t, x, z, n, st]) => spawnPile(t, x, z, n, !!st));
+  sv.dyn.items.forEach(([t, x, z, st]) => spawnItem(t, x, z, !!st));
+  sv.dyn.ammo.forEach(([x, z, st]) => spawnAmmoBox(x, z, !!st));
+  sv.dyn.cases.forEach(([x, z, r, st, kind, state]) => { spawnCase(x, z, r, !!st, kind || undefined); const c = cases[cases.length - 1]; if (state === 1) setCaseOpen(c, false); else if (state === 2) setCaseOpen(c, true); });
+  // транспорт
+  cars.slice().forEach(c => { if (c.collider) colliders.splice(colliders.indexOf(c.collider), 1); scene.remove(c.rig.root); }); cars.length = 0;
+  sv.cars.forEach(([x, z, h, f]) => spawnCar(x, z, h, f));
+  if (sv.bike) { spawnBike(sv.bike[0], sv.bike[1], sv.bike[2]); bike.fuel = sv.bike[3]; }
+  // постройки игрока
+  sv.built.forEach(([type, x, z, r, open]) => { const b = placePieceAt(type, r, x, z, true); if (b && open) { toggleDoor(b); b.ang = 1; } });
+  // склады, колонки, подвал
+  sv.wh.forEach(([state, hp], i) => { const w = warehouses[i]; if (!w) return; w.hp = hp; if (state === 'open') { w.state = 'open'; scene.remove(w.hatch); w.hole.visible = true; } });
+  sv.pumps.forEach((arr, i) => { const st = stations[i]; if (st) arr.forEach((f, j) => { if (st.pumps[j]) st.pumps[j].fuel = f; }); });
+  if (sv.basement >= 0 && warehouses[sv.basement]) { inBasement = true; curW = warehouses[sv.basement]; }
+}
+
+const mainMenu = document.createElement('div');
+mainMenu.style.cssText = 'position:fixed;inset:0;display:none;align-items:center;justify-content:center;font:18px monospace;color:#fff;z-index:20;background:radial-gradient(ellipse at center, rgba(0,0,0,.15), rgba(0,0,0,.7))';
+document.body.appendChild(mainMenu);
+function renderMainMenu(view) {
+  const sv = readSaves(), last = parseInt(localStorage.getItem('dz_lastSlot') || '0', 10);
+  const B = (label, act, on = true) => `<button ${on ? `data-mm="${act}"` : 'disabled'} style="font:inherit;font-size:20px;color:#fff;width:300px;padding:12px;margin:6px;border:2px solid #5a6b45;border-radius:8px;background:#2a3324;cursor:${on ? 'pointer' : 'not-allowed'};opacity:${on ? 1 : 0.4}">${label}</button>`;
+  const Bs = (label, act) => `<button data-mm="${act}" style="font:inherit;color:#fff;padding:10px 14px;border:2px solid #5a6b45;border-radius:8px;background:#2a3324;cursor:pointer">${label}</button>`;
+  let body = '';
+  if (view === 'main') {
+    const hasLast = last && sv[last];
+    body = B('Продолжить' + (hasLast ? ` (слот ${last})` : ''), 'continue', !!hasLast) + B('Новая игра', 'new') + B('Загрузить игру', 'load', Object.keys(sv).length > 0) + B('Настройки', 'settings') + B('Выйти', 'quit');
+  } else {
+    body = [1, 2, 3].map(i => {
+      const d = sv[i];
+      return `<div style="display:flex;align-items:center;justify-content:center;gap:8px;margin:6px"><div style="width:520px;max-width:55vw;padding:10px 14px;border:2px solid #4a5a3a;border-radius:8px;background:rgba(20,26,18,.85);text-align:left">Слот ${i}: ${d ? slotInfo(d) : '<span style="opacity:.6">пусто</span>'}</div>${d ? Bs('Загрузить', 'slot:' + i) + Bs('Удалить', 'del:' + i) : ''}</div>`;
+    }).join('') + B('Назад', 'back');
+  }
+  mainMenu.innerHTML = `<div style="text-align:center"><div style="font-size:72px;letter-spacing:10px;color:#c8e07a;text-shadow:0 4px 12px #000">DEADZONE</div><div style="opacity:.8;margin-bottom:24px">Постапокалиптическое выживание</div>${body}</div><div style="position:absolute;right:14px;bottom:10px;opacity:.6;font-size:14px">версия 1.1.5 · сохраняться можно на кровати</div>`;
+}
+function startGame(isNew, lock) {
+  gameStarted = true; mainMenu.style.display = 'none';
+  Object.keys(keys).forEach(k => { keys[k] = false; });
+  if (isNew) { gameHour = 8; day = 1; camera.position.set(0, 1.7, 0); yaw = 0; pitch = 0; }
+  if (lock) { try { const p = renderer.domElement.requestPointerLock(); if (p && p.catch) p.catch(() => {}); } catch (e) { /* клик по экрану захватит мышь */ } }
+  notify(isNew ? 'Выживи. Построй кровать (B, 8), чтобы сохраняться' : 'Игра загружена' + (lock ? '' : '. Кликни по экрану, чтобы управлять'));
+}
+function loadSlot(slot) {
+  const sv = readSaves()[slot];
+  if (!sv) return;
+  if (sv.seed === WORLD_SEED) { applySave(sv); currentSlot = slot; startGame(false, true); }
+  else { try { localStorage.setItem('dz_boot', JSON.stringify({ seed: sv.seed, slot })); location.reload(); } catch (e) { notify('Не удалось загрузить'); } }
+}
+mainMenu.addEventListener('click', e => {
+  const t = e.target.closest('[data-mm]'); if (!t) return;
+  const [act, arg] = t.dataset.mm.split(':');
+  if (act === 'new') startGame(true, true);
+  else if (act === 'continue') loadSlot(parseInt(localStorage.getItem('dz_lastSlot') || '0', 10));
+  else if (act === 'load') renderMainMenu('load');
+  else if (act === 'back') renderMainMenu('main');
+  else if (act === 'slot') loadSlot(+arg);
+  else if (act === 'del') {
+    const all = readSaves(); delete all[arg];
+    try { localStorage.setItem('dz_saves', JSON.stringify(all)); } catch (err) { /* нет доступа */ }
+    renderMainMenu(Object.keys(all).length ? 'load' : 'main');
+  }
+  else if (act === 'settings') { menuTab = 'settings'; mainMenu.style.display = 'none'; menuOpen = true; menu.style.display = 'flex'; renderMenu(); }
+  else if (act === 'quit') window.close();
+});
+
+let bedMenuBed = null;
+function openBedMenu(b) { if (sleeping) return; bedMenuBed = b; menuTab = 'bed'; toggleMenu(true); }
+function renderBedMenu() { // кровать: сохранить игру (3 слота) или лечь спать
+  const sv = readSaves();
+  const night = gameHour >= 19.5 || gameHour < 5.5;
+  let rows = '';
+  for (let i = 1; i <= 3; i++) {
+    const d = sv[i];
+    rows += row(`Слот ${i}: ${d ? slotInfo(d) : '<span style="opacity:.6">пусто</span>'}${currentSlot === i ? ' <b style="color:#c8e07a">(текущий)</b>' : ''}`, btn(d ? 'Перезаписать' : 'Сохранить', 'save:' + i));
+  }
+  menu.innerHTML = `<div style="width:min(720px,94vw);max-height:92vh;overflow:auto;background:#1d231c;border:2px solid #5a6b45;border-radius:10px;padding:18px">` +
+    `<div style="font-size:24px;margin-bottom:6px">Кровать</div><div style="opacity:.75;font-size:14px;margin-bottom:8px">Здесь можно сохранить игру. Спать можно с 19:30 до 05:30, после сна сохранение текущего слота обновляется само.</div>` +
+    rows + row('Спать до утра' + (night ? '' : ' <small>(сейчас не ночь)</small>'), btn('Лечь спать', 'sleep', night || admin.on)) +
+    `<div style="margin-top:14px">${btn('Закрыть', 'closebed')}</div></div>`;
+}
+function bootGame() { // автозапуск после перезагрузки из-за загрузки сохранения, иначе главное меню
+  if (bootInfo && bootInfo.slot) {
+    const sv = readSaves()[bootInfo.slot];
+    if (sv && sv.seed === WORLD_SEED) { applySave(sv); currentSlot = bootInfo.slot; startGame(false, false); return; }
+  }
+  gameHour = 9; // красивый фон для меню
+  mainMenu.style.display = 'flex'; renderMainMenu('main');
+}
 
 // --- Админ-панель: Настройки -> Админ-панель, пароль 1234 (это замок от случайного входа, а не настоящая защита) ---
 const ADMIN_PASSWORD = '1234';
@@ -3536,6 +3738,7 @@ function adminAction(act, arg, arg2) {
 
 // Управление
 addEventListener('keydown', e => {
+  if (!gameStarted) return;
   if (e.code === 'Tab') { e.preventDefault(); toggleMenu(!menuOpen); return; }
   if (menuOpen) { if (e.code === 'Escape') toggleMenu(false); return; }
   keys[e.code] = true;
@@ -3560,6 +3763,7 @@ addEventListener('keydown', e => {
 });
 addEventListener('keyup', e => keys[e.code] = false);
 renderer.domElement.addEventListener('click', () => {
+  if (!gameStarted) return;
   if (document.pointerLockElement !== renderer.domElement) renderer.domElement.requestPointerLock();
   else if (buildMode) placePiece();
   else if (weapon !== 'ak') attack();
@@ -3681,13 +3885,13 @@ function attack() {
 const clock = new THREE.Clock();
 function loop() {
   const rawDt = clock.getDelta();
-  const dt = (menuOpen || sleeping) ? 0 : Math.min(rawDt, 0.1); // в меню и во сне игра на паузе
+  const dt = (menuOpen || sleeping || !gameStarted) ? 0 : Math.min(rawDt, 0.1); // в меню и во сне игра на паузе
   if (rawDt > 0) fpsSmooth = fpsSmooth * 0.95 + (1 / rawDt) * 0.05;
   if (adm('god')) { health = 100; hunger = 100; thirst = 100; }
   if (adm('infAmmo')) { ammo = MAG; sgAmmo = SG_MAG; reserve = Math.max(reserve, 30); if (hasShotgun) sgReserve = Math.max(sgReserve, 30); akAmmo = AK_MAG; if (hasAK) akReserve = Math.max(akReserve, 60); }
 
   // День и ночь
-  if (!adm('freezeTime')) gameHour = (gameHour + dt * 0.1) % 24;
+  if (!adm('freezeTime')) { const prevH = gameHour; gameHour = (gameHour + dt * 0.1) % 24; if (gameHour < prevH) day++; }
   const ang = (gameHour - 6) / 24 * Math.PI * 2;
   daylight = Math.max(0, Math.min(1, (Math.sin(ang) + 0.2) / 0.6));
   {
@@ -4002,7 +4206,7 @@ function loop() {
     hud.textContent = `Ты умер. Убито: ${kills}. Нажми F5, чтобы начать заново`;
   } else {
     hud.textContent =
-      `Здоровье: ${Math.ceil(health)}   Еда: ${Math.ceil(hunger)}   Вода: ${Math.ceil(thirst)}\n` +
+      `День ${day}   Здоровье: ${Math.ceil(health)}   Еда: ${Math.ceil(hunger)}   Вода: ${Math.ceil(thirst)}\n` +
       `Убито: ${kills}   ` + (riding ? vehicleHud() : weapon === 'pistol' ? `Пистолет: ${reloading ? 'перезарядка...' : ammo} / ${reserve}` : weapon === 'shotgun' ? `Дробовик: ${sgReloading ? 'заряжаю... ' : ''}${sgAmmo} / ${sgReserve}` : weapon === 'ak' ? `АК-47: ${akReloading ? 'перезарядка... ' : ''}${akAmmo} / ${akReserve}` : 'Топор: ЛКМ - рубить и бить');
   }
   const hh = String(Math.floor(gameHour)).padStart(2, '0');
@@ -4018,8 +4222,23 @@ function loop() {
     dbgEl.style.display = 'block';
     dbgEl.textContent = `X ${camera.position.x.toFixed(1)}  Y ${camera.position.y.toFixed(1)}  Z ${camera.position.z.toFixed(1)}   FPS ${Math.round(fpsSmooth)}   зомби ${zombies.length}  кучи ${piles.length}  объектов ${scene.children.length}`;
   } else dbgEl.style.display = 'none';
+  const uiShow = gameStarted ? '' : 'none'; // в главном меню игровой интерфейс скрыт, камера облетает базу
+  hud.style.display = uiShow; hotbar.style.display = uiShow; avatar.style.display = uiShow; cross.style.display = uiShow;
+  if (!gameStarted) {
+    gun.visible = false; sgun.visible = false; axeRig.visible = false; akRig.visible = false;
+    promptEl.style.display = 'none'; notice.textContent = '';
+    const tt = performance.now() / 1000 * 0.07;
+    camera.position.set(Math.cos(tt) * 34, 13, Math.sin(tt) * 34); camera.rotation.set(0, 0, 0); camera.lookAt(0, 3, 0);
+  }
   renderer.render(scene, camera);
   requestAnimationFrame(loop);
 }
 stockExtras();
+initDone = true;                 // дальше всё, что появляется, считается «новым» и сохраняется отдельно
+Math.random = _realRandom;       // обычная случайность для игры
+const initSnap = {               // что было в мире с самого начала
+  items: new Set(items.map(i => i.id)), ammo: new Set(ammoBoxes.map(m => m.userData.id)),
+  piles: new Map(piles.map(p => [p.id, p.n])), cases: new Set(cases.map(c => c.id)), trees: new Set(trees.map(t => t.id)),
+};
+bootGame();
 loop();
