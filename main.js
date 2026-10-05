@@ -166,7 +166,9 @@ const box = (w, h, d, color, x, y, z, solid = false) => {
 
 // Выталкивает позицию из всех препятствий (r - радиус тела)
 function resolveCollisions(pos, r) {
+  const feet = pos.y !== undefined ? pos.y - 1.7 : 0; // высота ног: стоя на крыше стены ниже ног не мешают
   for (const c of colliders) {
+    if (c.top !== undefined && feet > c.top - 0.3) continue;
     const px = Math.max(c.minX, Math.min(pos.x, c.maxX));
     const pz = Math.max(c.minZ, Math.min(pos.z, c.maxZ));
     const dx = pos.x - px, dz = pos.z - pz;
@@ -2457,13 +2459,13 @@ function takeFromPile(p) { // берём одну штуку, модель ум�
 }
 
 // Подсказка «[E] ...» и поиск кучи или ящика, на которые смотрит игрок
-let lookedPile = null, lookedCase = null, lookedBench = null, lookedPortal = null, lookedCar = null, lookedPump = null;
+let lookedPile = null, lookedCase = null, lookedBench = null, lookedPortal = null, lookedCar = null, lookedPump = null, lookedBuilt = null;
 const promptEl = document.createElement('div');
 promptEl.style.cssText = 'position:fixed;top:58%;left:50%;transform:translateX(-50%);color:#fff;font:20px monospace;text-shadow:1px 1px 3px #000;background:rgba(0,0,0,.35);padding:4px 12px;border-radius:6px;display:none';
 document.body.appendChild(promptEl);
 const _fwd = new THREE.Vector3(), _to = new THREE.Vector3();
 function updatePrompt() {
-  lookedPile = null; lookedCase = null; lookedBench = null; lookedBike = false; lookedPortal = null; lookedCar = null; lookedPump = null;
+  lookedPile = null; lookedCase = null; lookedBench = null; lookedBike = false; lookedPortal = null; lookedCar = null; lookedPump = null; lookedBuilt = null;
   if (!menuOpen && !buildMode && !riding && health > 0) {
     _fwd.set(0, 0, -1).applyQuaternion(camera.quaternion);
     let best = 0.88; // конус примерно 28 градусов
@@ -2520,18 +2522,29 @@ function updatePrompt() {
       const cs = _to.normalize().dot(_fwd);
       if (cs > best) { best = cs; lookedPump = p; lookedCar = null; lookedPortal = null; lookedBike = false; lookedBench = null; lookedCase = null; lookedPile = null; }
     }
-    const tx = lookedCar ? lookedCar.rig.root.position.x : lookedPump ? lookedPump.x : lookedPortal ? (lookedPortal.kind === 'up' ? lookedPortal.w.ladderX : lookedPortal.w.hx) : lookedBike ? bike.rig.root.position.x : lookedBench ? lookedBench.mesh.position.x : lookedCase ? lookedCase.x : lookedPile ? lookedPile.group.position.x : null;
-    const tz = lookedCar ? lookedCar.rig.root.position.z : lookedPump ? lookedPump.z : lookedPortal ? (lookedPortal.kind === 'up' ? lookedPortal.w.ladderZ : lookedPortal.w.hz) : lookedBike ? bike.rig.root.position.z : lookedBench ? lookedBench.mesh.position.z : lookedCase ? lookedCase.z : lookedPile ? lookedPile.group.position.z : null;
+    for (const b of built) { // двери, ворота и кровати
+      if (b.type !== 'door' && b.type !== 'gate' && b.type !== 'bed') continue;
+      _to.set(b.mesh.position.x - camera.position.x, b.mesh.position.y - camera.position.y, b.mesh.position.z - camera.position.z);
+      if (_to.length() > 4.2) continue;
+      const cs = _to.normalize().dot(_fwd);
+      if (cs > best) { best = cs; lookedBuilt = b; lookedCar = null; lookedPump = null; lookedPortal = null; lookedBike = false; lookedBench = null; lookedCase = null; lookedPile = null; }
+    }
+    const tx = lookedBuilt ? lookedBuilt.mesh.position.x : lookedCar ? lookedCar.rig.root.position.x : lookedPump ? lookedPump.x : lookedPortal ? (lookedPortal.kind === 'up' ? lookedPortal.w.ladderX : lookedPortal.w.hx) : lookedBike ? bike.rig.root.position.x : lookedBench ? lookedBench.mesh.position.x : lookedCase ? lookedCase.x : lookedPile ? lookedPile.group.position.x : null;
+    const tz = lookedBuilt ? lookedBuilt.mesh.position.z : lookedCar ? lookedCar.rig.root.position.z : lookedPump ? lookedPump.z : lookedPortal ? (lookedPortal.kind === 'up' ? lookedPortal.w.ladderZ : lookedPortal.w.hz) : lookedBike ? bike.rig.root.position.z : lookedBench ? lookedBench.mesh.position.z : lookedCase ? lookedCase.z : lookedPile ? lookedPile.group.position.z : null;
     if (tx !== null) { // через стену не берём
       _to.set(tx - camera.position.x, 0.25 - camera.position.y, tz - camera.position.z);
       const d = _to.length();
       raycaster.set(camera.position, _to.normalize());
-      const wall = raycaster.intersectObjects(blockers, false)[0];
-      if (wall && wall.distance < d) { lookedPile = null; lookedCase = null; lookedBench = null; lookedBike = false; lookedPortal = null; lookedCar = null; lookedPump = null; }
+      const selfMesh = lookedBench ? lookedBench.mesh : lookedBuilt ? lookedBuilt.mesh : null; // свою же коробку (верстак, дверь) за стену не считаем
+      const wall = raycaster.intersectObjects(blockers, false).find(h => h.object !== selfMesh);
+      if (wall && wall.distance < d) { lookedBuilt = null; lookedPile = null; lookedCase = null; lookedBench = null; lookedBike = false; lookedPortal = null; lookedCar = null; lookedPump = null; }
     }
   }
   if (riding) {
     promptEl.textContent = drive === 'car' ? '[E] Выйти из джипа' : '[E] Слезть с мотоцикла';
+    promptEl.style.display = 'block';
+  } else if (lookedBuilt) {
+    promptEl.textContent = lookedBuilt.type === 'bed' ? '[E] Лечь спать (с 19:30 до 05:30)' : lookedBuilt.type === 'gate' ? (lookedBuilt.open ? '[E] Закрыть ворота' : '[E] Открыть ворота') : (lookedBuilt.open ? '[E] Закрыть дверь' : '[E] Открыть дверь');
     promptEl.style.display = 'block';
   } else if (lookedCar) {
     promptEl.textContent = `[E] Сесть в джип (бензин ${Math.ceil(lookedCar.fuel)}%)`;
@@ -2564,10 +2577,12 @@ function treeHint() { // E у дерева: подсказка, рубить н�
   const hit = raycaster.intersectObjects(trees.map(t => t.trunk), false)[0];
   if (hit && hit.distance < 3.5) notify(hasAxe ? 'Достань топор клавишей Q и бей левой кнопкой мыши' : 'Нужен топор: Tab, вкладка Крафт');
 }
-function interact() { // клавиша E: слезть/сесть, верстак, ящик, куча, иначе подсказка про дерево
+function interact() {
+  if (sleeping) return; // клавиша E: слезть/сесть, верстак, ящик, куча, иначе подсказка про дерево
   if (riding) return drive === 'car' ? dismountCar() : dismountBike();
   if (lookedCar) return mountCar(lookedCar);
   if (lookedPump) return usePump(lookedPump);
+  if (lookedBuilt) return lookedBuilt.type === 'bed' ? sleepInBed(lookedBuilt) : toggleDoor(lookedBuilt);
   if (lookedPortal) return useBasementPortal(lookedPortal);
   if (lookedBike) return mountBike();
   if (lookedBench) { menuTab = 'bench'; return toggleMenu(true); }
@@ -2752,7 +2767,7 @@ avatar.src = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHe
 avatar.style.cssText = 'position:fixed;top:10px;left:10px;width:64px;height:64px;image-rendering:pixelated;border:2px solid #5a6b45;border-radius:8px;background:#181c18';
 document.body.appendChild(avatar);
 const hotbar = document.createElement('div');
-hotbar.style.cssText = 'position:fixed;bottom:15px;left:50%;transform:translateX(-50%);color:#fff;font:20px monospace;text-shadow:1px 1px 3px #000;background:rgba(0,0,0,0.4);padding:8px 16px;border-radius:6px;white-space:pre;text-align:center';
+hotbar.style.cssText = 'position:fixed;bottom:15px;left:50%;transform:translateX(-50%);color:#fff;font:20px monospace;text-shadow:1px 1px 3px #000;background:rgba(0,0,0,0.4);padding:8px 16px;border-radius:6px;white-space:normal;max-width:94vw;text-align:center';
 document.body.appendChild(hotbar);
 let lastHot = '';
 const cross = document.createElement('div');
@@ -2828,12 +2843,26 @@ function notify(t) { notice.textContent = t; noticeT = 2; }
 
 const pieces = {
   wall: { name: 'Стена', cost: 4, color: 0x8b6b3e },
-  roof: { name: 'Крыша', cost: 3, color: 0x6b4f2e },
+  door: { name: 'Дверь', cost: 5, color: 0x8b6b3e },
+  gate: { name: 'Ворота', cost: 8, color: 0x7a5c34 },
+  roof: { name: 'Крыша/пол', cost: 3, color: 0x6b4f2e },
+  stairs: { name: 'Лестница', cost: 8, color: 0x7a5c34 },
   fire: { name: 'Костёр', cost: 5, color: 0xff7a2a },
   bench: { name: 'Верстак', cost: 6, color: 0x8b6b3e },
+  bed: { name: 'Кровать', cost: 6, color: 0x8b6b3e },
 };
-const pieceKeys = ['wall', 'roof', 'fire', 'bench'];
+const pieceKeys = ['wall', 'door', 'gate', 'roof', 'stairs', 'fire', 'bench', 'bed'];
+const floors = [];        // поверхности, по которым можно ходить: крыши-полы и ступени лестниц
+let fallV = 0, sleeping = false;
 const MAX_BENCHES = 2;
+function surfaceAt(x, z, feet) { // на какой высоте стоять в этой точке
+  let best = 0;
+  for (const f of floors) {
+    if (x < f.minX || x > f.maxX || z < f.minZ || z > f.maxZ) continue;
+    if (f.y <= feet + 0.6 && f.y > best) best = f.y; // ступенька не выше 0,6 м
+  }
+  return best;
+}
 const MAX_FIRES = 4;
 let buildMode = false, selPiece = 'wall', rot = 0, chopCd = 0;
 const built = [];        // все постройки игрока
@@ -2849,23 +2878,35 @@ scene.add(ghost);
 
 // Размеры детали: ширина, высота, глубина, высота центра
 function pieceGeometry(type, r) {
-  if (type === 'wall') return r === 0 ? [2, 3, 0.3, 1.5] : [0.3, 3, 2, 1.5];
+  const a = r % 2;
+  if (type === 'wall' || type === 'door') return a === 0 ? [2, 3, 0.3, 1.5] : [0.3, 3, 2, 1.5];
+  if (type === 'gate') return a === 0 ? [4, 2.7, 0.3, 1.35] : [0.3, 2.7, 4, 1.35];
   if (type === 'roof') return [2, 0.2, 2, 3.1];
-  if (type === 'bench') return r === 0 ? [1.6, 0.9, 0.7, 0.45] : [0.7, 0.9, 1.6, 0.45];
+  if (type === 'stairs') return a === 0 ? [1.8, 3.2, 4, 1.6] : [4, 3.2, 1.8, 1.6];
+  if (type === 'bench') return a === 0 ? [1.6, 0.9, 0.7, 0.45] : [0.7, 0.9, 1.6, 0.45];
+  if (type === 'bed') return a === 0 ? [1.0, 0.5, 2.0, 0.25] : [2.0, 0.5, 1.0, 0.25];
   return [0.8, 0.4, 0.8, 0.2];
 }
 
-// Привязка к сетке, чтобы стены стыковались
+// Привязка к сетке, чтобы детали стыковались
 function targetPos() {
   const px = camera.position.x - Math.sin(yaw) * 4;
   const pz = camera.position.z - Math.cos(yaw) * 4;
-  if (selPiece === 'wall') {
-    return rot === 0
+  const a = rot % 2;
+  if (selPiece === 'wall' || selPiece === 'door' || selPiece === 'stairs') {
+    return a === 0
       ? [2 * Math.floor(px / 2) + 1, 2 * Math.round(pz / 2)]
       : [2 * Math.round(px / 2), 2 * Math.floor(pz / 2) + 1];
   }
+  if (selPiece === 'gate') return [2 * Math.round(px / 2), 2 * Math.round(pz / 2)];
   if (selPiece === 'roof') return [2 * Math.floor(px / 2) + 1, 2 * Math.floor(pz / 2) + 1];
   return [Math.round(px * 2) / 2, Math.round(pz * 2) / 2];
+}
+
+function aabbSeg(x, z, a, lo, hi, thick) { // отрезок стены вдоль её оси
+  return a === 0
+    ? { minX: x + lo, maxX: x + hi, minZ: z - thick / 2, maxZ: z + thick / 2 }
+    : { minX: x - thick / 2, maxX: x + thick / 2, minZ: z + lo, maxZ: z + hi };
 }
 
 function placePiece() {
@@ -2873,27 +2914,35 @@ function placePiece() {
   const p = pieces[selPiece];
   const [x, z] = targetPos();
   const [w, h, d, y] = pieceGeometry(selPiece, rot);
-  const key = `${selPiece}:${selPiece === 'wall' || selPiece === 'bench' ? rot : 0}:${x}:${z}`;
+  const a = rot % 2;
+  const usesRot = ['wall', 'door', 'gate', 'bench', 'bed'].includes(selPiece);
+  const key = `${selPiece}:${selPiece === 'stairs' ? rot : usesRot ? a : 0}:${x}:${z}`;
   if (built.some(b => b.key === key)) return notify('Тут уже занято');
   if (!adm('freeBuild') && countOf('wood') < p.cost) return notify(`Нужно дерева: ${p.cost}`);
   if (selPiece === 'fire' && built.filter(b => b.type === 'fire').length >= MAX_FIRES) return notify('Костров не больше 4');
   if (selPiece === 'bench' && built.filter(b => b.type === 'bench').length >= MAX_BENCHES) return notify('Верстаков не больше 2');
   if (!adm('freeBuild')) takeItem('wood', p.cost);
 
-  const mat = (selPiece === 'fire' || selPiece === 'bench')
-    ? new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false }) // невидимая зона костра (для V)
+  const invisible = ['fire', 'bench', 'door', 'gate', 'bed', 'stairs'].includes(selPiece); // у них своя модель, а коробка нужна для прицела (V)
+  const mat = invisible
+    ? new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false })
     : new THREE.MeshStandardMaterial({ color: p.color });
   const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
   mesh.position.set(x, y, z);
   scene.add(mesh);
 
-  const b = { key, type: selPiece, mesh, collider: null, light: null };
+  const b = { key, type: selPiece, mesh, collider: null, light: null, colliders: [], open: false, ang: 0 };
+  const addCol = (c, top) => { c.top = top; colliders.push(c); b.colliders.push(c); return c; };
   if (selPiece === 'wall') {
-    b.collider = { minX: x - w / 2, maxX: x + w / 2, minZ: z - d / 2, maxZ: z + d / 2 };
+    b.collider = { minX: x - w / 2, maxX: x + w / 2, minZ: z - d / 2, maxZ: z + d / 2, top: 3.0 };
     colliders.push(b.collider);
     blockers.push(mesh);
   }
-  if (selPiece === 'roof') blockers.push(mesh);
+  if (selPiece === 'roof') { // крышу можно использовать как пол второго этажа
+    blockers.push(mesh);
+    b.floor = { minX: x - 1, maxX: x + 1, minZ: z - 1, maxZ: z + 1, y: 3.2 };
+    floors.push(b.floor);
+  }
   if (selPiece === 'fire') {
     b.vis = makeCampfire(); b.vis.position.set(x, 0, z); scene.add(b.vis);
     b.light = new THREE.PointLight(0xff8a3a, 8, 20, 1);
@@ -2904,10 +2953,126 @@ function placePiece() {
     b.collider = { minX: x - w / 2, maxX: x + w / 2, minZ: z - d / 2, maxZ: z + d / 2 };
     colliders.push(b.collider);
     blockers.push(mesh);
-    b.vis = makeWorkbench(); b.vis.position.set(x, 0, z); b.vis.rotation.y = rot === 0 ? 0 : Math.PI / 2; scene.add(b.vis);
+    b.vis = makeWorkbench(); b.vis.position.set(x, 0, z); b.vis.rotation.y = a === 0 ? 0 : Math.PI / 2; scene.add(b.vis);
+  }
+  if (selPiece === 'door') {
+    b.vis = makeDoor(); b.vis.position.set(x, 0, z); b.vis.rotation.y = a === 0 ? 0 : Math.PI / 2; scene.add(b.vis);
+    b.leaf = b.vis.userData.leaf;
+    addCol(aabbSeg(x, z, a, -1, -0.55, 0.3), 3.0); addCol(aabbSeg(x, z, a, 0.55, 1, 0.3), 3.0);
+    b.doorCol = addCol(aabbSeg(x, z, a, -0.55, 0.55, 0.3), 2.4);
+    blockers.push(mesh);
+  }
+  if (selPiece === 'gate') {
+    b.vis = makeGate(); b.vis.position.set(x, 0, z); b.vis.rotation.y = a === 0 ? 0 : Math.PI / 2; scene.add(b.vis);
+    b.leaves = b.vis.userData.leaves;
+    addCol(aabbSeg(x, z, a, -2, -1.7, 0.3), 2.8); addCol(aabbSeg(x, z, a, 1.7, 2, 0.3), 2.8);
+    b.doorCol = addCol(aabbSeg(x, z, a, -1.7, 1.7, 0.3), 2.6);
+    blockers.push(mesh);
+  }
+  if (selPiece === 'bed') {
+    b.collider = { minX: x - w / 2, maxX: x + w / 2, minZ: z - d / 2, maxZ: z + d / 2, top: 0.55 };
+    colliders.push(b.collider);
+    b.vis = makeBed(); b.vis.position.set(x, 0, z); b.vis.rotation.y = a === 0 ? 0 : Math.PI / 2; scene.add(b.vis);
+  }
+  if (selPiece === 'stairs') { // 16 ступеней по 0,2 м: по ним можно подняться на крышу-пол
+    b.vis = makeStairs(); b.vis.position.set(x, 0, z); b.vis.rotation.y = -rot * Math.PI / 2; scene.add(b.vis);
+    const th = -rot * Math.PI / 2, cs = Math.round(Math.cos(th)), sn = Math.round(Math.sin(th));
+    b.floorEntries = [];
+    for (let i = 0; i < 16; i++) {
+      const lz = 2 - 0.125 - i * 0.25;
+      const wx = x + lz * sn, wz = z + lz * cs;
+      const hx = a === 0 ? 0.9 : 0.125, hz = a === 0 ? 0.125 : 0.9, top = (i + 1) * 0.2;
+      const box2 = { minX: wx - hx, maxX: wx + hx, minZ: wz - hz, maxZ: wz + hz };
+      addCol(Object.assign({}, box2), top);
+      const fl = Object.assign({ y: top }, box2); floors.push(fl); b.floorEntries.push(fl);
+    }
   }
   built.push(b);
   builtMeshes.push(mesh);
+}
+
+// Модели новых деталей
+function makeDoor() { // дверь на петлях: рама и полотно
+  const g = new THREE.Group();
+  const wood = std(0x8b6b3e, 0.9), woodD = std(0x5e4528, 0.95), iron = std(0x2f3236, 0.5, 0.7);
+  const add = (w2, h2, d2, m, x2, y2, z2, parent) => { const o = new THREE.Mesh(new THREE.BoxGeometry(w2, h2, d2), m); o.position.set(x2, y2, z2); (parent || g).add(o); return o; };
+  add(0.45, 3, 0.3, wood, -0.775, 1.5, 0); add(0.45, 3, 0.3, wood, 0.775, 1.5, 0);
+  add(1.1, 0.8, 0.3, wood, 0, 2.6, 0);
+  add(1.2, 0.06, 0.34, woodD, 0, 0.03, 0);
+  const pivot = new THREE.Group(); pivot.position.set(-0.55, 0, 0); g.add(pivot);
+  add(1.06, 2.2, 0.08, std(0x7a5c34), 0.55, 1.1, 0, pivot);
+  [0.4, 1.1, 1.8].forEach(y2 => add(1.0, 0.1, 0.1, woodD, 0.55, y2, 0.05, pivot));
+  add(0.06, 0.06, 0.12, iron, 1.0, 1.05, 0.06, pivot);
+  [0.4, 1.8].forEach(y2 => add(0.12, 0.08, 0.12, iron, 0.04, y2, 0.02, pivot));
+  g.userData.leaf = pivot;
+  return g;
+}
+function makeGate() { // двустворчатые ворота
+  const g = new THREE.Group();
+  const wood = std(0x7a5c34, 0.9), woodD = std(0x4e3825, 0.95), iron = std(0x2f3236, 0.5, 0.7);
+  const add = (w2, h2, d2, m, x2, y2, z2, parent, rz) => { const o = new THREE.Mesh(new THREE.BoxGeometry(w2, h2, d2), m); o.position.set(x2, y2, z2); if (rz) o.rotation.z = rz; (parent || g).add(o); return o; };
+  add(0.3, 2.8, 0.3, woodD, -1.85, 1.4, 0); add(0.3, 2.8, 0.3, woodD, 1.85, 1.4, 0);
+  add(4, 0.2, 0.22, woodD, 0, 2.7, 0);
+  const leaves = [];
+  [-1, 1].forEach(s => {
+    const pivot = new THREE.Group(); pivot.position.set(s * 1.7, 0, 0); g.add(pivot);
+    const cx = -s * 0.85;
+    add(1.7, 2.4, 0.08, wood, cx, 1.25, 0, pivot);
+    [0.35, 1.2, 2.05].forEach(y2 => add(1.7, 0.12, 0.1, woodD, cx, y2, 0.06, pivot));
+    add(2.1, 0.1, 0.1, woodD, cx, 1.25, 0.07, pivot, s * 0.7);
+    add(0.1, 0.4, 0.12, iron, -s * 1.6, 1.25, 0.08, pivot);
+    leaves.push(pivot);
+  });
+  g.userData.leaves = leaves;
+  return g;
+}
+function makeBed() { // кровать: рама, матрас, подушка, одеяло
+  const g = new THREE.Group();
+  const wood = std(0x6b4f2e, 0.9), mat = std(0xd8d4c8, 1), pillow = std(0xf0eee6, 1), blanket = std(0x4a5a3a, 1), stripe = std(0x7a8a5a, 1);
+  const add = (w2, h2, d2, m, x2, y2, z2) => { const o = new THREE.Mesh(new THREE.BoxGeometry(w2, h2, d2), m); o.position.set(x2, y2, z2); g.add(o); return o; };
+  [-1, 1].forEach(sx => [-1, 1].forEach(sz => add(0.08, 0.28, 0.08, wood, sx * 0.46, 0.14, sz * 0.96)));
+  add(1.0, 0.1, 2.0, wood, 0, 0.3, 0);
+  add(1.0, 0.55, 0.08, wood, 0, 0.58, -1.0); add(1.0, 0.3, 0.07, wood, 0, 0.45, 1.0);
+  add(0.9, 0.16, 1.86, mat, 0, 0.43, 0);
+  add(0.6, 0.1, 0.32, pillow, 0, 0.56, -0.72);
+  add(0.92, 0.06, 1.1, blanket, 0, 0.54, 0.36);
+  add(0.92, 0.065, 0.1, stripe, 0, 0.54, 0.0);
+  return g;
+}
+function makeStairs() { // 16 ступеней, подъём к -Z, перила
+  const g = new THREE.Group();
+  const wood = std(0x7a5c34, 0.9), woodD = std(0x5e4528, 0.95);
+  for (let i = 0; i < 16; i++) {
+    const top = (i + 1) * 0.2;
+    const st = new THREE.Mesh(new THREE.BoxGeometry(1.8, top, 0.25), i % 2 ? wood : std(0x84643a, 0.9));
+    st.position.set(0, top / 2, 2 - 0.125 - i * 0.25); g.add(st);
+  }
+  [-1, 1].forEach(sx => {
+    const rail = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.06, 5.12), woodD);
+    rail.position.set(sx * 0.9, 2.5, 0); rail.rotation.x = 0.675; g.add(rail);
+    [-1.9, 0, 1.9].forEach(zz => { const post = new THREE.Mesh(new THREE.BoxGeometry(0.06, 1.0, 0.06), woodD); post.position.set(sx * 0.9, (1.6 - zz * 0.8) + 0.5, zz); g.add(post); });
+  });
+  return g;
+}
+
+// Дверь и ворота открываются на E; кровать - сон ночью
+function toggleDoor(b) {
+  b.open = !b.open;
+  const i = colliders.indexOf(b.doorCol);
+  if (b.open) { if (i >= 0) colliders.splice(i, 1); } else if (i < 0) colliders.push(b.doorCol);
+}
+function sleepInBed(b) {
+  if (sleeping) return;
+  const night = gameHour >= 19.5 || gameHour < 5.5;
+  if (!night && !admin.on) return notify('Не хочется спать. Спать можно с 19:30 до 05:30');
+  if (zombies.some(z => Math.hypot(z.mesh.position.x - camera.position.x, z.mesh.position.z - camera.position.z) < 25)) return notify('Рядом зомби: уснуть не получится');
+  sleeping = true;
+  fadeEl.style.transition = 'opacity 0.9s'; fadeEl.style.opacity = '1';
+  setTimeout(() => {
+    gameHour = 7; health = Math.min(100, health + 50); hunger = Math.max(0, hunger - 15); thirst = Math.max(0, thirst - 20);
+    fadeEl.style.opacity = '0';
+    setTimeout(() => { sleeping = false; notify('Ты выспался: утро, 07:00. Здоровье +50'); }, 900);
+  }, 1300);
 }
 
 function makeWorkbench() { // верстак: столешница, тиски, инструменты, доска с инструментами, запчасти
@@ -2947,6 +3112,9 @@ function removePiece() {
   if (b.light) scene.remove(b.light);
   if (b.vis) scene.remove(b.vis);
   if (b.collider) colliders.splice(colliders.indexOf(b.collider), 1);
+  if (b.colliders) b.colliders.forEach(c => { const ci = colliders.indexOf(c); if (ci >= 0) colliders.splice(ci, 1); });
+  if (b.floor) floors.splice(floors.indexOf(b.floor), 1);
+  if (b.floorEntries) b.floorEntries.forEach(f => { const fi = floors.indexOf(f); if (fi >= 0) floors.splice(fi, 1); });
   const bi = blockers.indexOf(b.mesh);
   if (bi >= 0) blockers.splice(bi, 1);
   builtMeshes.splice(builtMeshes.indexOf(b.mesh), 1);
@@ -3049,6 +3217,12 @@ function updateBuild(dt) {
     ghost.scale.set(w, h, d);
     ghost.position.set(x, y, z);
     ghost.material.color.set(adm('freeBuild') || countOf('wood') >= pieces[selPiece].cost ? 0x44ff44 : 0xff4444);
+  }
+  for (const b of built) { // створки дверей и ворот плавно открываются
+    if (b.type !== 'door' && b.type !== 'gate') continue;
+    b.ang += ((b.open ? 1 : 0) - b.ang) * Math.min(1, 9 * dt);
+    if (b.type === 'door') b.leaf.rotation.y = b.ang * 1.6;
+    else { b.leaves[0].rotation.y = b.ang * 1.5; b.leaves[1].rotation.y = -b.ang * 1.5; }
   }
   for (const b of built) {
     if (b.type !== 'fire') continue;
@@ -3369,11 +3543,8 @@ addEventListener('keydown', e => {
   if (e.code === 'KeyB' && !riding) buildMode = !buildMode;
   if (e.code === 'KeyC' && riding) camView = camView === 'fp' ? 'chase' : 'fp';
   if (buildMode) {
-    if (e.code === 'Digit1') selPiece = 'wall';
-    if (e.code === 'Digit2') selPiece = 'roof';
-    if (e.code === 'Digit3') selPiece = 'fire';
-    if (e.code === 'Digit4') selPiece = 'bench';
-    if (e.code === 'KeyQ') rot = 1 - rot;
+    if (e.code >= 'Digit1' && e.code <= 'Digit8') selPiece = pieceKeys[+e.code.slice(5) - 1];
+    if (e.code === 'KeyQ') rot = (rot + 1) % 4;
     if (e.code === 'KeyV') removePiece();
   } else {
     if (e.code >= 'Digit1' && e.code <= 'Digit5') useSlot(+e.code.slice(5) - 1); // быстрые слоты
@@ -3486,7 +3657,7 @@ function attackAK() { // автомат: очередь при зажатой к
 }
 
 function attack() {
-  if (health <= 0 || riding || cool > 0 || drawT < 0.7) return;
+  if (health <= 0 || riding || sleeping || cool > 0 || drawT < 0.7) return;
   if (weapon === 'shotgun') return attackShotgun();
   if (weapon === 'axe') return startSwing();
   if (weapon === 'ak') return attackAK();
@@ -3510,7 +3681,7 @@ function attack() {
 const clock = new THREE.Clock();
 function loop() {
   const rawDt = clock.getDelta();
-  const dt = menuOpen ? 0 : Math.min(rawDt, 0.1); // в меню игра на паузе
+  const dt = (menuOpen || sleeping) ? 0 : Math.min(rawDt, 0.1); // в меню и во сне игра на паузе
   if (rawDt > 0) fpsSmooth = fpsSmooth * 0.95 + (1 / rawDt) * 0.05;
   if (adm('god')) { health = 100; hunger = 100; thirst = 100; }
   if (adm('infAmmo')) { ammo = MAG; sgAmmo = SG_MAG; reserve = Math.max(reserve, 30); if (hasShotgun) sgReserve = Math.max(sgReserve, 30); akAmmo = AK_MAG; if (hasAK) akReserve = Math.max(akReserve, 60); }
@@ -3563,8 +3734,11 @@ function loop() {
         if (keys.Space) camera.position.y += speed;
         if (keys.KeyC) camera.position.y -= speed;
         if (camera.position.y < 0.5) camera.position.y = 0.5;
-      } else if (Math.abs(camera.position.y - 1.7) > 0.01) camera.position.y += (1.7 - camera.position.y) * Math.min(1, 8 * dt);
-      else camera.position.y = 1.7;
+      } else { // ходьба по земле, ступеням и крышам-полам; падение вниз
+        const ty = 1.7 + surfaceAt(camera.position.x, camera.position.z, camera.position.y - 1.7);
+        if (ty > camera.position.y) { camera.position.y += Math.min(ty - camera.position.y, 14 * dt); fallV = 0; }
+        else { fallV = Math.min(fallV + 22 * dt, 25); camera.position.y = Math.max(ty, camera.position.y - fallV * dt); if (camera.position.y <= ty + 0.0001) fallV = 0; }
+      }
       if (!adm('noclip') && !(flying && camera.position.y > 8)) resolveCollisions(camera.position, 0.4);
     }
 
@@ -3820,7 +3994,7 @@ function loop() {
     }
     animateZombie(z, dist < 35 && dist > 1.2, dt);
     z.cooldown -= dt;
-    if (dist <= 1.5 && z.cooldown <= 0 && health > 0 && !menuOpen) { health -= 10; z.cooldown = 1; }
+    if (dist <= 1.5 && z.cooldown <= 0 && health > 0 && !menuOpen && camera.position.y < 2.9) { health -= 10; z.cooldown = 1; }
   }
 
   if (health <= 0) {
