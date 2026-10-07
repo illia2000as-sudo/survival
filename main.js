@@ -14,6 +14,7 @@ const _realRandom = Math.random;
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
 }
+let zombieUid = 0;
 let uidCounter = 0, initDone = false, gameStarted = false, currentSlot = 0, day = 1;
 
 // --- Сцена ---
@@ -435,7 +436,9 @@ function spawnZombie(ax, az) {
   if (ax !== undefined) g.position.set(ax, 0, az); else g.position.set(Math.cos(a) * r, 0, Math.sin(a) * r);
   resolveCollisions(g.position, 0.6);
   scene.add(g);
-  zombies.push({ mesh: g, hp: 3, cooldown: 0, parts, phase: Math.random() * 6 });
+  const zo = { mesh: g, hp: 3, cooldown: 0, parts, phase: Math.random() * 6, id: zombieUid++, mv: 0 };
+  zombies.push(zo);
+  return zo;
 }
 function animateZombie(z, moving, dt) { // походка: ноги шагают, руки качаются
   const p = z.parts;
@@ -2069,7 +2072,7 @@ function updateBike(dt) { // физика: газ, тормоз, поворот,
   root.position.x = clamp(root.position.x, -190, 190); root.position.z = clamp(root.position.z, -190, 190);
   for (const z of zombies) { // сбиваем зомби
     const dx = z.mesh.position.x - root.position.x, dz = z.mesh.position.z - root.position.z;
-    if (dx * dx + dz * dz < 1.5 && Math.abs(b.v) > 4) { z.hp -= 3; b.v *= 0.85; }
+    if (dx * dx + dz * dz < 1.5 && Math.abs(b.v) > 4) { damageZombie(z, 3); b.v *= 0.85; }
   }
   b.leanT = clamp(w * v * 0.045, -0.6, 0.6);
   b.pitch += (clamp(b.accel * 0.012, -0.12, 0.2) - b.pitch) * Math.min(1, 6 * dt);
@@ -2315,7 +2318,7 @@ function updateCar(dt) { // физика джипа
   root.position.x = clamp(root.position.x, -190, 190); root.position.z = clamp(root.position.z, -190, 190);
   for (const z of zombies) { // сбиваем зомби
     const dx = z.mesh.position.x - root.position.x, dz = z.mesh.position.z - root.position.z;
-    if (dx * dx + dz * dz < 3.6 && Math.abs(c.v) > 4) { z.hp -= 3; c.v *= 0.9; }
+    if (dx * dx + dz * dz < 3.6 && Math.abs(c.v) > 4) { damageZombie(z, 3); c.v *= 0.9; }
   }
   c.leanT = clamp(-w * v * 0.012, -0.12, 0.12);
   c.pitch += (clamp(c.accel * 0.006, -0.05, 0.05) - c.pitch) * Math.min(1, 6 * dt);
@@ -3086,6 +3089,7 @@ function toggleDoor(b) {
 }
 function sleepInBed(b) {
   if (sleeping) return;
+  if (net.active) return notify('В мультиплеере спать нельзя');
   const night = gameHour >= 19.5 || gameHour < 5.5;
   if (!night && !admin.on) return notify('Не хочется спать. Спать можно с 19:30 до 05:30');
   if (zombies.some(z => Math.hypot(z.mesh.position.x - camera.position.x, z.mesh.position.z - camera.position.z) < 25)) return notify('Рядом зомби: уснуть не получится');
@@ -3362,6 +3366,7 @@ function toggleMenu(open) {
   if (health <= 0) return;
   if (!open) { pick = null; if (menuTab === 'bed') menuTab = 'inv'; }
   menuOpen = open;
+  if (open && net.active) Object.keys(keys).forEach(k => { keys[k] = false; }); // мир идёт дальше, персонаж стоит
   menu.style.display = open ? 'flex' : 'none';
   if (open) {
     document.exitPointerLock();
@@ -3395,7 +3400,7 @@ menu.addEventListener('keydown', e => { // Enter в поле пароля
 });
 // Esc (или потеря курсора) ставит игру на паузу и открывает настройки
 document.addEventListener('pointerlockchange', () => {
-  if (gameStarted && document.pointerLockElement !== renderer.domElement && !menuOpen && health > 0) { menuTab = 'settings'; toggleMenu(true); }
+  if (gameStarted && !chatOpen && document.pointerLockElement !== renderer.domElement && !menuOpen && health > 0) { menuTab = 'settings'; toggleMenu(true); }
 });
 menu.addEventListener('click', e => {
   const sl = e.target.closest('[data-slot]');
@@ -3466,6 +3471,7 @@ function makeSave() { // всё, что нужно, чтобы вернуть и
   };
 }
 function saveGame(slot, quiet) {
+  if (net.active) { notify('В мультиплеере сохранения отключены'); return false; }
   try {
     const all = readSaves();
     all[slot] = makeSave();
@@ -3535,7 +3541,12 @@ function renderMainMenu(view) {
   let body = '';
   if (view === 'main') {
     const hasLast = last && sv[last];
-    body = B('Продолжить' + (hasLast ? ` (слот ${last})` : ''), 'continue', !!hasLast) + B('Новая игра', 'new') + B('Загрузить игру', 'load', Object.keys(sv).length > 0) + B('Настройки', 'settings') + B('Выйти', 'quit');
+    body = B('Продолжить' + (hasLast ? ` (слот ${last})` : ''), 'continue', !!hasLast) + B('Новая игра', 'new') + B('Загрузить игру', 'load', Object.keys(sv).length > 0) + B('Мультиплеер', 'mp') + B('Настройки', 'settings') + B('Выйти', 'quit');
+  } else if (view === 'mp') {
+    const inp = 'font:inherit;font-size:18px;color:#fff;background:#111;border:2px solid #5a6b45;border-radius:6px;padding:8px 10px;width:220px;text-align:center';
+    body = `<div style="margin:6px">Твоё имя: <input id="mpName" value="${mpNameVal}" maxlength="12" style="${inp}"></div>` + B('Создать комнату', 'mp-host') +
+      `<div style="margin:16px 6px 4px">Код комнаты друга: <input id="mpCode" value="${mpCodeVal}" maxlength="8" style="${inp};text-transform:uppercase"></div>` + B('Подключиться', 'mp-join') +
+      `<div id="mpStatus" style="min-height:26px;margin:8px;color:#e0d28a">${net.status}</div>` + B('Назад', 'back');
   } else {
     body = [1, 2, 3].map(i => {
       const d = sv[i];
@@ -3571,11 +3582,19 @@ mainMenu.addEventListener('click', e => {
     renderMainMenu(Object.keys(all).length ? 'load' : 'main');
   }
   else if (act === 'settings') { menuTab = 'settings'; mainMenu.style.display = 'none'; menuOpen = true; menu.style.display = 'flex'; renderMenu(); }
+  else if (act === 'mp') renderMainMenu('mp');
+  else if (act === 'mp-host') hostCreate(document.getElementById('mpName').value);
+  else if (act === 'mp-join') peekRoom(document.getElementById('mpCode').value, document.getElementById('mpName').value);
   else if (act === 'quit') window.close();
+});
+mainMenu.addEventListener('input', e => {
+  if (e.target.id === 'mpName') mpNameVal = e.target.value;
+  if (e.target.id === 'mpCode') mpCodeVal = e.target.value;
 });
 
 let bedMenuBed = null;
-function openBedMenu(b) { if (sleeping) return; bedMenuBed = b; menuTab = 'bed'; toggleMenu(true); }
+function openBedMenu(b) { if (sleeping) return;
+  if (net.active) return notify('В мультиплеере сон и сохранения отключены'); bedMenuBed = b; menuTab = 'bed'; toggleMenu(true); }
 function renderBedMenu() { // кровать: сохранить игру (3 слота) или лечь спать
   const sv = readSaves();
   const night = gameHour >= 19.5 || gameHour < 5.5;
@@ -3589,13 +3608,300 @@ function renderBedMenu() { // кровать: сохранить игру (3 с�
     rows + row('Спать до утра' + (night ? '' : ' <small>(сейчас не ночь)</small>'), btn('Лечь спать', 'sleep', night || admin.on)) +
     `<div style="margin-top:14px">${btn('Закрыть', 'closebed')}</div></div>`;
 }
-function bootGame() { // автозапуск после перезагрузки из-за загрузки сохранения, иначе главное меню
+function bootGame() { // автозапуск после перезагрузки из-за загрузки сохранения или входа в комнату, иначе главное меню
+  if (mpBoot) { // зашли в комнату друга: мир уже создан по его зерну
+    gameHour = 9; mpNameVal = mpBoot.name; mpCodeVal = mpBoot.code;
+    mainMenu.style.display = 'flex'; renderMainMenu('mp'); setMpStatus('Подключаюсь к комнате ' + mpBoot.code + '...');
+    joinRoom(mpBoot.code, mpBoot.name, true);
+    return;
+  }
   if (bootInfo && bootInfo.slot) {
     const sv = readSaves()[bootInfo.slot];
     if (sv && sv.seed === WORLD_SEED) { applySave(sv); currentSlot = bootInfo.slot; startGame(false, false); return; }
   }
   gameHour = 9; // красивый фон для меню
   mainMenu.style.display = 'flex'; renderMainMenu('main');
+}
+
+// --- Мультиплеер: кооператив по коду комнаты (WebRTC через PeerJS, свой сервер не нужен) ---
+const net = { active: false, role: null, peer: null, hostConn: null, conns: new Map(), id: 'p0', name: 'Игрок', code: '', nextId: 1, players: new Map(), tPlayers: 0, tZombies: 0, tTime: 0, tHud: 0, status: '', lastChat: null };
+let mpNameVal = 'Игрок', mpCodeVal = '', chatOpen = false;
+const mpBoot = bootInfo && bootInfo.mp ? bootInfo.mp : null;      // после перезагрузки: куда подключаться
+const sanitizeName = n => (String(n || '').trim().slice(0, 12)) || 'Игрок';
+function setMpStatus(t) { net.status = t; const el = document.getElementById('mpStatus'); if (el) el.textContent = t; }
+function netSendTo(conn, msg) { try { if (conn && conn.open) conn.send(msg); } catch (e) { /* связь оборвалась */ } }
+function netBroadcast(msg, exceptConn) { net.conns.forEach(c => { if (c !== exceptConn) netSendTo(c, msg); }); }
+
+// Чат: Enter открывает строку ввода
+const chatLog = document.createElement('div');
+chatLog.style.cssText = 'position:fixed;left:10px;bottom:110px;max-width:42vw;font:16px monospace;color:#fff;text-shadow:1px 1px 2px #000;pointer-events:none';
+document.body.appendChild(chatLog);
+const chatInput = document.createElement('input');
+chatInput.maxLength = 120; chatInput.placeholder = 'Сообщение (Enter - отправить, Esc - отмена)';
+chatInput.style.cssText = 'position:fixed;left:10px;bottom:76px;width:min(420px,60vw);font:16px monospace;padding:6px 10px;background:rgba(0,0,0,.75);color:#fff;border:2px solid #5a6b45;border-radius:6px;display:none;z-index:8';
+document.body.appendChild(chatInput);
+function addChat(name, text) {
+  net.lastChat = { name, text };
+  const d = document.createElement('div');
+  d.textContent = name ? `${name}: ${text}` : text;
+  d.style.cssText = 'background:rgba(0,0,0,.4);padding:2px 8px;margin-top:2px;border-radius:4px;' + (name ? '' : 'color:#e0d28a');
+  chatLog.appendChild(d);
+  while (chatLog.children.length > 7) chatLog.removeChild(chatLog.firstChild);
+  setTimeout(() => { if (d.parentNode) d.parentNode.removeChild(d); }, 15000);
+}
+function openChat() {
+  chatOpen = true; Object.keys(keys).forEach(k => { keys[k] = false; });
+  chatInput.style.display = 'block'; chatInput.value = ''; document.exitPointerLock(); chatInput.focus();
+}
+function closeChat() {
+  chatOpen = false; chatInput.style.display = 'none'; chatInput.blur();
+  try { const p = renderer.domElement.requestPointerLock(); if (p && p.catch) p.catch(() => {}); } catch (e) { /* клик по экрану вернёт мышь */ }
+}
+function sendChat(text) {
+  text = text.slice(0, 120);
+  if (net.role === 'host') { addChat(net.name, text); netBroadcast({ t: 'chat', name: net.name, text }); }
+  else netSendTo(net.hostConn, { t: 'chat', text });
+}
+chatInput.addEventListener('keydown', e => {
+  e.stopPropagation();
+  if (e.key === 'Enter') { const t = chatInput.value.trim(); if (t) sendChat(t); closeChat(); }
+  else if (e.key === 'Escape') closeChat();
+});
+
+// Список игроков и код комнаты
+const mpHud = document.createElement('div');
+mpHud.style.cssText = 'position:fixed;top:10px;right:10px;color:#fff;font:15px monospace;text-shadow:1px 1px 2px #000;background:rgba(0,0,0,.4);padding:4px 10px;border-radius:6px;display:none;text-align:right;white-space:pre';
+document.body.appendChild(mpHud);
+
+// Аватары других игроков
+function makeAvatar(name, idx) {
+  const g = new THREE.Group();
+  const M = c => new THREE.MeshStandardMaterial({ color: c, roughness: 0.9, flatShading: true });
+  const part = (w, h, d, c, x, y, z, parent) => { const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), M(c)); m.position.set(x, y, z); (parent || g).add(m); return m; };
+  const shirt = [0x2f6fa8, 0xa8442f, 0x3f8a4a, 0x8a6fa8][idx % 4];
+  part(0.62, 0.85, 0.34, shirt, 0, 1.3, 0);
+  part(0.64, 0.14, 0.36, 0x2a2a2a, 0, 0.9, 0);
+  part(0.4, 0.4, 0.4, 0xd9a67a, 0, 1.9, 0); part(0.42, 0.12, 0.42, 0x2b2118, 0, 2.15, 0);
+  part(0.07, 0.06, 0.02, 0x111111, -0.09, 1.93, 0.205); part(0.07, 0.06, 0.02, 0x111111, 0.09, 1.93, 0.205);
+  const arm = side => { const p = new THREE.Group(); p.position.set(side * 0.42, 1.65, 0); part(0.18, 0.7, 0.18, shirt, 0, -0.32, 0, p); part(0.16, 0.14, 0.16, 0xd9a67a, 0, -0.7, 0, p); g.add(p); return p; };
+  const leg = side => { const p = new THREE.Group(); p.position.set(side * 0.16, 0.9, 0); part(0.24, 0.85, 0.26, 0x33363c, 0, -0.42, 0, p); part(0.26, 0.12, 0.34, 0x1a1410, 0, -0.85, 0.04, p); g.add(p); return p; };
+  const parts = { armL: arm(-1), armR: arm(1), legL: leg(-1), legR: leg(1) };
+  parts.gun = part(0.08, 0.1, 0.5, 0x222222, 0, -0.62, 0.3, parts.armR); // оружие в правой руке
+  const c = document.createElement('canvas'); c.width = 256; c.height = 64;
+  const x = c.getContext('2d'); x.font = 'bold 34px monospace'; x.textAlign = 'center'; x.lineWidth = 6; x.strokeStyle = '#000'; x.strokeText(name, 128, 44); x.fillStyle = '#fff'; x.fillText(name, 128, 44);
+  const label = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), transparent: true }));
+  label.scale.set(2.4, 0.6, 1); label.position.set(0, 2.75, 0); g.add(label);
+  scene.add(g);
+  return { g, parts, phase: 0 };
+}
+function upsertPlayer(id, name) {
+  let p = net.players.get(id);
+  if (!p) { p = { id, name: name || '?', x: 0, y: 1.7, z: 0, yaw: 0, w: 'pistol', mv: 0, hp: 100, av: null }; net.players.set(id, p); }
+  if (name) p.name = name;
+  return p;
+}
+function updateAvatars(dt) {
+  net.players.forEach(p => {
+    if (!p.av) { p.av = makeAvatar(p.name, parseInt(String(p.id).slice(1), 10) || 0); p.av.g.position.set(p.x, p.y - 1.7, p.z); }
+    const av = p.av, k = Math.min(1, 12 * dt);
+    av.g.position.x += (p.x - av.g.position.x) * k; av.g.position.z += (p.z - av.g.position.z) * k; av.g.position.y += ((p.y - 1.7) - av.g.position.y) * k;
+    let dr = (p.yaw + Math.PI) - av.g.rotation.y; dr = Math.atan2(Math.sin(dr), Math.cos(dr)); av.g.rotation.y += dr * k;
+    av.phase += dt * (p.mv ? 8 : 1.5);
+    const sw = Math.sin(av.phase), amp = p.mv ? 0.7 : 0.05;
+    av.parts.legL.rotation.x = sw * amp; av.parts.legR.rotation.x = -sw * amp;
+    av.parts.armL.rotation.x = -sw * amp * 0.8;
+    av.parts.armR.rotation.x = p.w === 'axe' || p.w === 'bike' || p.w === 'car' ? -0.4 : -1.3 + sw * amp * 0.1; // с оружием руку поднимает вперёд
+    av.parts.gun.visible = p.w !== 'bike' && p.w !== 'car';
+  });
+}
+function removePlayer(id) {
+  const p = net.players.get(id);
+  if (!p) return;
+  if (p.av) scene.remove(p.av.g);
+  net.players.delete(id); net.conns.delete(id);
+  addChat('', `${p.name} вышел из игры`);
+}
+function ownState() {
+  const v = riding ? (drive === 'car' ? curCar : bike) : null;
+  return {
+    x: +camera.position.x.toFixed(2), y: +camera.position.y.toFixed(2), z: +camera.position.z.toFixed(2), yaw: +yaw.toFixed(2),
+    w: riding ? drive : weapon, hp: Math.ceil(health),
+    mv: (keys.KeyW || keys.KeyA || keys.KeyS || keys.KeyD || (v && Math.abs(v.v) > 1)) ? 1 : 0,
+  };
+}
+// Зомби: хозяин считает, клиенты показывают
+function pickTarget(z) { // ближайший игрок (у хозяина - и удалённые тоже)
+  let best = { x: camera.position.x, z: camera.position.z, y: camera.position.y, remote: null };
+  let bd = Math.hypot(best.x - z.mesh.position.x, best.z - z.mesh.position.z);
+  if (net.role === 'host') net.players.forEach(p => { const d = Math.hypot(p.x - z.mesh.position.x, p.z - z.mesh.position.z); if (d < bd) { bd = d; best = { x: p.x, z: p.z, y: p.y, remote: p }; } });
+  return best;
+}
+function damageZombie(z, dmg) { // у клиента урон идёт хозяину комнаты
+  if (net.role === 'client') { netSendTo(net.hostConn, { t: 'zh', id: z.id, d: dmg }); z.lastHit = performance.now(); return; }
+  z.hp -= dmg;
+}
+function clientZombie(z, dt) {
+  if (z.tx !== undefined) {
+    const k = Math.min(1, 10 * dt);
+    z.mesh.position.x += (z.tx - z.mesh.position.x) * k; z.mesh.position.z += (z.tz - z.mesh.position.z) * k;
+    let dr = z.try - z.mesh.rotation.y; dr = Math.atan2(Math.sin(dr), Math.cos(dr)); z.mesh.rotation.y += dr * k;
+  }
+  animateZombie(z, !!z.mv, dt);
+}
+function applyZombieSnapshot(list) {
+  const seen = new Set();
+  for (const [id, x, zz, ry, hp, mv] of list) {
+    seen.add(id);
+    let z = zombies.find(q => q.id === id);
+    if (!z) { z = spawnZombie(x, zz); z.id = id; }
+    z.tx = x; z.tz = zz; z.try = ry; z.hp = hp; z.mv = mv;
+  }
+  for (let i = zombies.length - 1; i >= 0; i--) {
+    if (seen.has(zombies[i].id)) continue;
+    if (performance.now() - (zombies[i].lastHit || -1e9) < 2500) kills++; // зомби, которого добил ты
+    scene.remove(zombies[i].mesh); zombies.splice(i, 1);
+  }
+}
+
+// Приём сообщений
+function handleHostConn(conn) {
+  conn.on('data', m => handleHostMsg(conn, m));
+  conn.on('close', () => { if (conn.__pid) { removePlayer(conn.__pid); netBroadcast({ t: 'left', id: conn.__pid }); } });
+}
+function handleHostMsg(conn, m) {
+  if (m.t === 'peek') { netSendTo(conn, { t: 'info', seed: WORLD_SEED, name: net.name, count: net.players.size + 1 }); return; }
+  if (m.t === 'hello') {
+    if (net.players.size >= 3) { netSendTo(conn, { t: 'full' }); return; }
+    const id = 'p' + (net.nextId++);
+    conn.__pid = id; net.conns.set(id, conn);
+    const name = sanitizeName(m.name);
+    upsertPlayer(id, name);
+    const list = [{ id: 'p0', name: net.name }]; net.players.forEach(p => list.push({ id: p.id, name: p.name }));
+    netSendTo(conn, { t: 'welcome', id, seed: WORLD_SEED, hour: gameHour, day, players: list });
+    netBroadcast({ t: 'joined', id, name }, conn);
+    addChat('', `${name} зашёл в игру`);
+    return;
+  }
+  const pid = conn.__pid, p = pid ? net.players.get(pid) : null;
+  if (!p) return;
+  if (m.t === 'ps') { p.x = m.x; p.y = m.y; p.z = m.z; p.yaw = m.yaw; p.w = m.w; p.mv = m.mv; p.hp = m.hp; }
+  else if (m.t === 'zh') { const z = zombies.find(q => q.id === m.id); if (z) z.hp -= Math.min(5, m.d || 0); }
+  else if (m.t === 'chat') { const text = String(m.text || '').slice(0, 120); addChat(p.name, text); netBroadcast({ t: 'chat', name: p.name, text }); }
+}
+function handleClientMsg(m) {
+  if (m.t === 'welcome') {
+    if (m.seed !== WORLD_SEED) { setMpStatus('Мир не совпал, попробуй подключиться ещё раз'); return; }
+    net.id = m.id; net.role = 'client'; net.active = true;
+    startGame(true, false);
+    gameHour = m.hour; day = m.day;
+    camera.position.set(1.5 * (parseInt(m.id.slice(1), 10) || 1), 1.7, 0);
+    m.players.forEach(pl => { if (pl.id !== net.id) upsertPlayer(pl.id, pl.name); });
+    notify('Подключено! Enter - чат. Мир общий: зомби и игроки, лут пока у каждого свой');
+  }
+  else if (m.t === 'full') setMpStatus('В комнате нет мест (максимум 4 игрока)');
+  else if (m.t === 'pl') {
+    const ids = new Set();
+    m.list.forEach(e => { if (e.id === net.id) return; ids.add(e.id); const p = upsertPlayer(e.id, e.name); p.x = e.x; p.y = e.y; p.z = e.z; p.yaw = e.yaw; p.w = e.w; p.mv = e.mv; p.hp = e.hp; });
+    [...net.players.keys()].forEach(id => { if (!ids.has(id)) removePlayer(id); });
+  }
+  else if (m.t === 'zs') applyZombieSnapshot(m.list);
+  else if (m.t === 'time') { gameHour = m.hour; day = m.day; }
+  else if (m.t === 'chat') addChat(m.name, m.text);
+  else if (m.t === 'joined') { upsertPlayer(m.id, m.name); addChat('', `${m.name} зашёл в игру`); }
+  else if (m.t === 'left') removePlayer(m.id);
+  else if (m.t === 'hurt') { if (health > 0) health -= m.d; }
+}
+function onHostLost() {
+  if (!net.active) return;
+  net.active = false; net.role = null; net.hostConn = null;
+  net.players.forEach(p => { if (p.av) scene.remove(p.av.g); }); net.players.clear();
+  notify('Связь с хозяином комнаты потеряна. Дальше игра идёт одиночная');
+}
+
+// Создание комнаты и вход
+function hostCreate(name) {
+  if (!window.Peer) return setMpStatus('Библиотека PeerJS не найдена. Выполни: npm install peerjs');
+  net.name = sanitizeName(name); mpNameVal = net.name;
+  setMpStatus('Создаю комнату...');
+  const tryId = attempt => {
+    const code = Array.from({ length: 6 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');
+    const peer = new window.Peer('dz-' + code);
+    peer.on('open', () => {
+      net.peer = peer; net.code = code; net.role = 'host'; net.active = true; net.id = 'p0';
+      startGame(true, true);
+      notify('Комната создана. Код: ' + code + ' (виден справа вверху). Enter - чат');
+    });
+    peer.on('connection', handleHostConn);
+    peer.on('error', err => {
+      if (err.type === 'unavailable-id' && attempt < 5) tryId(attempt + 1);
+      else if (!net.active) setMpStatus('Не удалось создать комнату: ' + err.type);
+    });
+  };
+  tryId(0);
+}
+function peekRoom(code, name) { // сначала узнаём зерно мира хозяина, потом перезагружаемся с ним
+  if (!window.Peer) return setMpStatus('Библиотека PeerJS не найдена. Выполни: npm install peerjs');
+  code = String(code || '').trim().toUpperCase();
+  if (!code) return setMpStatus('Введи код комнаты');
+  setMpStatus('Ищу комнату...');
+  const peer = new window.Peer();
+  let done = false;
+  const fail = msg => { if (done) return; done = true; try { peer.destroy(); } catch (e) { /* уже закрыт */ } setMpStatus(msg); };
+  const timer = setTimeout(() => fail('Комната не отвечает. Проверь код'), 12000);
+  peer.on('error', err => { clearTimeout(timer); fail('Ошибка соединения: ' + err.type); });
+  peer.on('open', () => {
+    const conn = peer.connect('dz-' + code, { reliable: true, serialization: 'json' });
+    conn.on('open', () => conn.send({ t: 'peek' }));
+    conn.on('data', m => {
+      if (m.t !== 'info' || done) return;
+      done = true; clearTimeout(timer);
+      try { peer.destroy(); } catch (e) { /* уже закрыт */ }
+      if (m.seed === WORLD_SEED) joinRoom(code, name, false); // мир уже тот же, перезагрузка не нужна
+      else { try { localStorage.setItem('dz_boot', JSON.stringify({ seed: m.seed, mp: { code, name: sanitizeName(name) } })); location.reload(); } catch (e) { setMpStatus('Не удалось перезапустить игру'); } }
+    });
+  });
+}
+function joinRoom(code, name, auto) {
+  net.name = sanitizeName(name); net.code = code;
+  setMpStatus('Подключаюсь...');
+  const peer = new window.Peer();
+  net.peer = peer;
+  peer.on('error', err => { if (!net.active) { setMpStatus('Не удалось подключиться: ' + err.type); mainMenu.style.display = 'flex'; renderMainMenu('mp'); } });
+  peer.on('open', () => {
+    const conn = peer.connect('dz-' + code, { reliable: true, serialization: 'json' });
+    net.hostConn = conn;
+    conn.on('open', () => conn.send({ t: 'hello', name: net.name }));
+    conn.on('data', handleClientMsg);
+    conn.on('close', onHostLost);
+  });
+}
+
+// Каждый кадр: отправка своего состояния, зомби и времени; аватары
+function netTick(dt) {
+  if (!net.active) { mpHud.style.display = 'none'; return; }
+  net.tPlayers += dt; net.tZombies += dt; net.tTime += dt; net.tHud += dt;
+  if (net.role === 'host') {
+    if (net.tPlayers >= 0.08) {
+      net.tPlayers = 0;
+      const list = [Object.assign({ id: 'p0', name: net.name }, ownState())];
+      net.players.forEach(p => list.push({ id: p.id, name: p.name, x: p.x, y: p.y, z: p.z, yaw: p.yaw, w: p.w, mv: p.mv, hp: p.hp }));
+      netBroadcast({ t: 'pl', list });
+    }
+    if (net.tZombies >= 0.1) {
+      net.tZombies = 0;
+      netBroadcast({ t: 'zs', list: zombies.map(z => [z.id, +z.mesh.position.x.toFixed(2), +z.mesh.position.z.toFixed(2), +z.mesh.rotation.y.toFixed(2), z.hp, z.mv ? 1 : 0]) });
+    }
+    if (net.tTime >= 2) { net.tTime = 0; netBroadcast({ t: 'time', hour: gameHour, day }); }
+  } else if (net.role === 'client' && net.hostConn && net.tPlayers >= 0.08) {
+    net.tPlayers = 0; netSendTo(net.hostConn, Object.assign({ t: 'ps' }, ownState()));
+  }
+  updateAvatars(dt);
+  if (net.tHud >= 1) {
+    net.tHud = 0;
+    mpHud.style.display = gameStarted ? 'block' : 'none';
+    const names = [net.name + ' (ты)']; net.players.forEach(p => names.push(p.name));
+    mpHud.textContent = (net.role === 'host' ? 'Код комнаты: ' + net.code + '\n' : '') + 'Игроки: ' + names.join(', ') + '\nEnter - чат';
+  }
 }
 
 // --- Админ-панель: Настройки -> Админ-панель, пароль 1234 (это замок от случайного входа, а не настоящая защита) ---
@@ -3739,6 +4045,8 @@ function adminAction(act, arg, arg2) {
 // Управление
 addEventListener('keydown', e => {
   if (!gameStarted) return;
+  if (chatOpen) return;                                   // печатаем сообщение
+  if (net.active && e.code === 'Enter' && !menuOpen) { e.preventDefault(); openChat(); return; }
   if (e.code === 'Tab') { e.preventDefault(); toggleMenu(!menuOpen); return; }
   if (menuOpen) { if (e.code === 'Escape') toggleMenu(false); return; }
   keys[e.code] = true;
@@ -3824,7 +4132,7 @@ function axeHit() { // момент удара: дерево перед тобо
   for (const z of zombies) {
     const to = z.mesh.position.clone().sub(camera.position).setY(0);
     const d = to.length();
-    if (d < 2.6 && to.normalize().dot(fwd2) > 0.6) { z.hp -= 2; z.mesh.position.addScaledVector(to, 0.8); }
+    if (d < 2.6 && to.normalize().dot(fwd2) > 0.6) { damageZombie(z, 2); z.mesh.position.addScaledVector(to, 0.8); }
   }
   kick += 0.03;
 }
@@ -3842,7 +4150,7 @@ function attackShotgun() { // 6 дробинок с разбросом
     const wallHits = raycaster.intersectObjects(blockers, false);
     if (wallHits.length && wallHits[0].distance < zHits[0].distance) continue;
     const z = zombieOf(zHits[0].object);
-    if (z) z.hp -= zHits[0].point.y > 1.8 ? 2 : 1;
+    if (z) damageZombie(z, zHits[0].point.y > 1.8 ? 2 : 1);
   }
 }
 
@@ -3857,7 +4165,7 @@ function attackAK() { // автомат: очередь при зажатой к
   const wallHits = raycaster.intersectObjects(blockers, false);
   if (wallHits.length && wallHits[0].distance < zHits[0].distance) return;
   const z = zombieOf(zHits[0].object);
-  if (z) z.hp -= zHits[0].point.y > 1.8 ? 2 : 1;
+  if (z) damageZombie(z, zHits[0].point.y > 1.8 ? 2 : 1);
 }
 
 function attack() {
@@ -3878,14 +4186,14 @@ function attack() {
   if (wallHits.length && wallHits[0].distance < zHits[0].distance) return; // пуля попала в стену
 
   const z = zombieOf(zHits[0].object);
-  if (z) z.hp -= zHits[0].point.y > 1.8 ? 2 : 1; // в голову урон x2
+  if (z) damageZombie(z, zHits[0].point.y > 1.8 ? 2 : 1); // в голову урон x2
 }
 
 // --- Цикл ---
 const clock = new THREE.Clock();
 function loop() {
   const rawDt = clock.getDelta();
-  const dt = (menuOpen || sleeping || !gameStarted) ? 0 : Math.min(rawDt, 0.1); // в меню и во сне игра на паузе
+  const dt = ((menuOpen && !net.active) || sleeping || !gameStarted) ? 0 : Math.min(rawDt, 0.1); // в меню и во сне игра на паузе
   if (rawDt > 0) fpsSmooth = fpsSmooth * 0.95 + (1 / rawDt) * 0.05;
   if (adm('god')) { health = 100; hunger = 100; thirst = 100; }
   if (adm('infAmmo')) { ammo = MAG; sgAmmo = SG_MAG; reserve = Math.max(reserve, 30); if (hasShotgun) sgReserve = Math.max(sgReserve, 30); akAmmo = AK_MAG; if (hasAK) akReserve = Math.max(akReserve, 60); }
@@ -4187,19 +4495,28 @@ function loop() {
   // Зомби
   for (let i = zombies.length - 1; i >= 0; i--) {
     const z = zombies[i];
+    if (net.role === 'client') { clientZombie(z, dt); continue; } // у клиента зомби двигает хозяин комнаты
     if (z.hp <= 0) { scene.remove(z.mesh); zombies.splice(i, 1); kills++; if (!adm('noZombies')) spawnZombie(); continue; }
-    const to = camera.position.clone().sub(z.mesh.position).setY(0);
+    const tgt = pickTarget(z);
+    const to = new THREE.Vector3(tgt.x - z.mesh.position.x, 0, tgt.z - z.mesh.position.z);
     const dist = to.length();
-    if (dist < 35 && dist > 1.2) {
+    const chase = dist < 35 && dist > 1.2;
+    z.mv = chase ? 1 : 0;
+    if (chase) {
       to.normalize();
       z.mesh.position.addScaledVector(to, (2 + (1 - daylight) * 1.0) * dt); // ночью быстрее
       z.mesh.rotation.y = Math.atan2(to.x, to.z);
       resolveCollisions(z.mesh.position, 0.6);
     }
-    animateZombie(z, dist < 35 && dist > 1.2, dt);
+    animateZombie(z, chase, dt);
     z.cooldown -= dt;
-    if (dist <= 1.5 && z.cooldown <= 0 && health > 0 && !menuOpen && camera.position.y < 2.9) { health -= 10; z.cooldown = 1; }
+    if (dist <= 1.5 && z.cooldown <= 0 && tgt.y < 2.9) {
+      if (tgt.remote) { netSendTo(net.conns.get(tgt.remote.id), { t: 'hurt', d: 10 }); z.cooldown = 1; } // укус другого игрока
+      else if (health > 0 && (!menuOpen || net.active)) { health -= 10; z.cooldown = 1; }
+    }
   }
+
+  netTick(Math.min(rawDt, 0.1));
 
   if (health <= 0) {
     health = 0;
