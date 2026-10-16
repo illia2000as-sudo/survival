@@ -423,6 +423,50 @@ function decorateAbandonedHouse(x, z, style) {
   }
 }
 
+
+// --- Следы времени: потёки, облупившаяся штукатурка и заколоченные окна ---
+// Только визуальные меши: не меняют коллайдеры, лут или поведение домов.
+// Локальный генератор зависит от координат дома и не сдвигает общий WORLD_SEED.
+function weatherAbandonedHouse(x, z, style) {
+  let seed = (Math.imul(Math.floor(x * 10) + 12000, 73856093) ^
+    Math.imul(Math.floor(z * 10) + 18000, 19349663) ^
+    Math.imul(style + 1, 83492791)) >>> 0;
+  const rand = () => {
+    seed = (seed + 0x6D2B79F5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  const stainColors = [0x5b5548, 0x6b6251, 0x777064];
+  // Потёки у основания и под окнами на передней/задней стене.
+  for (const side of [-1, 1]) {
+    const wallZ = z + side * 4.015;
+    for (let i = 0; i < 2; i++) {
+      const px = x + (rand() - 0.5) * 6.2;
+      const h = 0.35 + rand() * 0.8;
+      const stain = box(0.18 + rand() * 0.35, h, 0.025, stainColors[Math.floor(rand() * stainColors.length)], px, 0.35 + h / 2, wallZ, false);
+      stain.material.roughness = 1;
+    }
+  }
+
+  // В каждом третьем доме одно окно выглядит заколоченным.
+  if (rand() < 0.72) {
+    const front = rand() < 0.5;
+    const wx = x + (front ? (rand() < 0.5 ? -2.6 : 2.6) : (rand() < 0.5 ? -2.2 : 2.2));
+    const wz = z + (front ? 4.035 : -4.035);
+    const boardMat = style === 1 ? 0x493725 : 0x66513a;
+    for (let i = 0; i < 2; i++) {
+      const board = box(1.45, 0.12, 0.055, boardMat, wx, 1.25 + i * 0.48, wz, false);
+      board.rotation.z = (i === 0 ? -1 : 1) * (0.06 + rand() * 0.1);
+    }
+  }
+
+  // Небольшая облупившаяся зона у одного из углов.
+  const side = rand() < 0.5 ? -1 : 1;
+  const peel = box(0.42 + rand() * 0.35, 0.5 + rand() * 0.55, 0.035, 0x625d51, x + side * 3.58, 0.65 + rand() * 0.3, z - 3.99, false);
+  peel.material.roughness = 1;
+}
+
 for (let i = 0; i < 8; i++) {
   const x = (Math.random() - 0.5) * 200, z = (Math.random() - 0.5) * 200;
   if ((Math.abs(x) < 15 && Math.abs(z) < 15) || Math.abs(x) < 8 || Math.abs(z) < 8) continue;
@@ -437,6 +481,7 @@ for (let i = 0; i < 8; i++) {
     }
   }
   decorateAbandonedHouse(x, z, i % 3);
+  weatherAbandonedHouse(x, z, i % 3);
   housePositions.push({ x, z });
 }
 
