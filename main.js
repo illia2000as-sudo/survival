@@ -768,13 +768,18 @@ buildAbandonedConvoy();
 
 // --- Зомби ---
 const zombies = [];
-function spawnZombie(ax, az) {
+function spawnZombie(ax, az, forcedType) {
+  const roll = Math.random();
+  const type = forcedType || (roll < 0.55 ? 'walker' : roll < 0.76 ? 'runner' : roll < 0.91 ? 'brute' : 'toxic');
   const g = new THREE.Group();
   const M = (c, r) => new THREE.MeshStandardMaterial({ color: c, roughness: r || 0.9, flatShading: true });
   const part = (w, h, d, mat, x, y, z, parent) => { const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat); m.position.set(x, y, z); (parent || g).add(m); return m; };
   const shirts = [0x3a4a6a, 0x6a3a3a, 0x4a5a3a, 0x55504a, 0x3a3a55];
   const skin = new THREE.Color(0x6b8f5a).offsetHSL((Math.random() - 0.5) * 0.05, 0, (Math.random() - 0.5) * 0.08);
   const skinM = M(skin), shirtM = M(shirts[Math.floor(Math.random() * shirts.length)]), pantsM = M(0x2a2a2a);
+  if (type === 'runner') { skinM.color.setHex(0x78916a); shirtM.color.setHex(0x5a5145); pantsM.color.setHex(0x282b2b); }
+  if (type === 'brute') { skinM.color.setHex(0x777d59); shirtM.color.setHex(0x343b32); pantsM.color.setHex(0x252723); }
+  if (type === 'toxic') { skinM.color.setHex(0x9ab64b); shirtM.color.setHex(0x354a2b); pantsM.color.setHex(0x293528); }
   const body = part(0.7, 0.95, 0.38, shirtM, 0, 1.45, 0);
   part(0.72, 0.16, 0.4, M(0x1f2a1f), 0, 1.0, 0);                       // ремень
   part(0.2, 0.3, 0.02, skinM, 0.18, 1.3, 0.2);                           // дыра в рубашке
@@ -794,12 +799,27 @@ function spawnZombie(ax, az) {
     g.add(p); return p;
   };
   const parts = { body, head, armL: arm(-1), armR: arm(1), legL: leg(-1), legR: leg(1) };
+  if (type === 'runner') {
+    body.scale.set(0.78, 0.94, 0.82); head.scale.set(0.9, 0.92, 0.9);
+    parts.armL.rotation.z = -0.12; parts.armR.rotation.z = 0.12;
+  } else if (type === 'brute') {
+    body.scale.set(1.48, 1.18, 1.35); head.scale.set(1.12, 1.08, 1.12);
+    parts.armL.scale.set(1.35, 1.18, 1.25); parts.armR.scale.set(1.35, 1.18, 1.25);
+    parts.legL.scale.set(1.25, 1.05, 1.2); parts.legR.scale.set(1.25, 1.05, 1.2);
+    part(0.88, 0.16, 0.48, M(0x292d28), 0, 1.9, 0.02); // толстая защита плеч
+  } else if (type === 'toxic') {
+    part(0.2, 0.18, 0.2, M(0xb5c94c), -0.28, 1.8, 0.12);
+    part(0.18, 0.22, 0.18, M(0x879d39), 0.3, 1.5, 0.18);
+    part(0.16, 0.16, 0.16, M(0xc6d75a), 0.08, 2.35, 0.16);
+    part(0.48, 0.06, 0.08, M(0x5c7a27), 0, 1.04, 0.23);
+  }
   parts.armL.rotation.x = parts.armR.rotation.x = -1.35;
   const a = Math.random() * Math.PI * 2, r = 25 + Math.random() * 40;
   if (ax !== undefined) g.position.set(ax, 0, az); else g.position.set(Math.cos(a) * r, 0, Math.sin(a) * r);
   resolveCollisions(g.position, 0.6);
   scene.add(g);
-  const zo = { mesh: g, hp: 3, cooldown: 0, parts, phase: Math.random() * 6, id: zombieUid++, mv: 0 };
+  const stats = { walker: { hp: 3, speed: 2, damage: 10 }, runner: { hp: 2, speed: 4.0, damage: 8 }, brute: { hp: 8, speed: 1.25, damage: 20 }, toxic: { hp: 4, speed: 2.25, damage: 12 } }[type] || { hp: 3, speed: 2, damage: 10 };
+  const zo = { mesh: g, hp: stats.hp, maxHp: stats.hp, cooldown: 0, parts, phase: Math.random() * 6, id: zombieUid++, mv: 0, type, speed: stats.speed, damage: stats.damage };
   zombies.push(zo);
   return zo;
 }
@@ -4125,10 +4145,14 @@ function clientZombie(z, dt) {
 }
 function applyZombieSnapshot(list) {
   const seen = new Set();
-  for (const [id, x, zz, ry, hp, mv] of list) {
+  for (const [id, x, zz, ry, hp, mv, type] of list) {
     seen.add(id);
     let z = zombies.find(q => q.id === id);
-    if (!z) { z = spawnZombie(x, zz); z.id = id; }
+    const netType = type || 'walker';
+    if (z && z.type !== netType) {
+      const index = zombies.indexOf(z); scene.remove(z.mesh); zombies.splice(index, 1); z = null;
+    }
+    if (!z) { z = spawnZombie(x, zz, netType); z.id = id; }
     z.tx = x; z.tz = zz; z.try = ry; z.hp = hp; z.mv = mv;
   }
   for (let i = zombies.length - 1; i >= 0; i--) {
@@ -4271,7 +4295,7 @@ function netTick(dt) {
     }
     if (net.tZombies >= 0.1) {
       net.tZombies = 0;
-      netBroadcast({ t: 'zs', list: zombies.map(z => [z.id, +z.mesh.position.x.toFixed(2), +z.mesh.position.z.toFixed(2), +z.mesh.rotation.y.toFixed(2), z.hp, z.mv ? 1 : 0]) });
+      netBroadcast({ t: 'zs', list: zombies.map(z => [z.id, +z.mesh.position.x.toFixed(2), +z.mesh.position.z.toFixed(2), +z.mesh.rotation.y.toFixed(2), z.hp, z.mv ? 1 : 0, z.type || 'walker']) });
     }
     if (net.tTime >= 2) { net.tTime = 0; netBroadcast({ t: 'time', hour: gameHour, day }); }
   } else if (net.role === 'client' && net.hostConn && net.tPlayers >= 0.08) {
@@ -4886,15 +4910,15 @@ function loop() {
     z.mv = chase ? 1 : 0;
     if (chase) {
       to.normalize();
-      z.mesh.position.addScaledVector(to, (2 + (1 - daylight) * 1.0) * dt); // ночью быстрее
+      z.mesh.position.addScaledVector(to, ((z.speed || 2) + (1 - daylight) * (z.type === 'runner' ? 1.5 : 1.0)) * dt); // ночью быстрее
       z.mesh.rotation.y = Math.atan2(to.x, to.z);
       resolveCollisions(z.mesh.position, 0.6);
     }
     animateZombie(z, chase, dt);
     z.cooldown -= dt;
-    if (dist <= 1.5 && z.cooldown <= 0 && tgt.y < 2.9) {
-      if (tgt.remote) { netSendTo(net.conns.get(tgt.remote.id), { t: 'hurt', d: 10 }); z.cooldown = 1; } // укус другого игрока
-      else if (health > 0 && (!menuOpen || net.active)) { health -= 10; z.cooldown = 1; }
+    if (dist <= (z.type === 'brute' ? 1.8 : 1.5) && z.cooldown <= 0 && tgt.y < 2.9) {
+      if (tgt.remote) { netSendTo(net.conns.get(tgt.remote.id), { t: 'hurt', d: z.damage || 10 }); z.cooldown = z.type === 'runner' ? 0.8 : 1.15; } // укус другого игрока
+      else if (health > 0 && (!menuOpen || net.active)) { health -= z.damage || 10; z.cooldown = z.type === 'runner' ? 0.8 : 1.15; }
     }
   }
 
