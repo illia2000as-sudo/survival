@@ -3553,7 +3553,7 @@ function renderMainMenu(view) {
       return `<div style="display:flex;align-items:center;justify-content:center;gap:8px;margin:6px"><div style="width:520px;max-width:55vw;padding:10px 14px;border:2px solid #4a5a3a;border-radius:8px;background:rgba(20,26,18,.85);text-align:left">Слот ${i}: ${d ? slotInfo(d) : '<span style="opacity:.6">пусто</span>'}</div>${d ? Bs('Загрузить', 'slot:' + i) + Bs('Удалить', 'del:' + i) : ''}</div>`;
     }).join('') + B('Назад', 'back');
   }
-  mainMenu.innerHTML = `<div style="text-align:center"><div style="font-size:72px;letter-spacing:10px;color:#c8e07a;text-shadow:0 4px 12px #000">DEADZONE</div><div style="opacity:.8;margin-bottom:24px">Постапокалиптическое выживание</div>${body}</div><div style="position:absolute;right:14px;bottom:10px;opacity:.6;font-size:14px">версия 1.1.5 · сохраняться можно на кровати</div>`;
+  mainMenu.innerHTML = `<div style="text-align:center"><div style="font-size:72px;letter-spacing:10px;color:#c8e07a;text-shadow:0 4px 12px #000">DEADZONE</div><div style="opacity:.8;margin-bottom:24px">Постапокалиптическое выживание</div>${body}</div><div style="position:absolute;right:14px;bottom:10px;opacity:.6;font-size:14px">версия 1.1.7 · сохраняться можно на кровати</div>`;
 }
 function startGame(isNew, lock) {
   gameStarted = true; mainMenu.style.display = 'none';
@@ -3624,11 +3624,23 @@ function bootGame() { // автозапуск после перезагрузк�
 }
 
 // --- Мультиплеер: кооператив по коду комнаты (WebRTC через PeerJS, свой сервер не нужен) ---
-const net = { active: false, role: null, peer: null, hostConn: null, conns: new Map(), id: 'p0', name: 'Игрок', code: '', nextId: 1, players: new Map(), tPlayers: 0, tZombies: 0, tTime: 0, tHud: 0, status: '', lastChat: null };
+const net = { active: false, joining: false, joinTimer: null, role: null, peer: null, hostConn: null, conns: new Map(), id: 'p0', name: 'Игрок', code: '', nextId: 1, players: new Map(), tPlayers: 0, tZombies: 0, tTime: 0, tHud: 0, status: '', lastChat: null };
 let mpNameVal = 'Игрок', mpCodeVal = '', chatOpen = false;
 const mpBoot = bootInfo && bootInfo.mp ? bootInfo.mp : null;      // после перезагрузки: куда подключаться
 const sanitizeName = n => (String(n || '').trim().slice(0, 12)) || 'Игрок';
 function setMpStatus(t) { net.status = t; const el = document.getElementById('mpStatus'); if (el) el.textContent = t; }
+function clearJoinTimer() { if (net.joinTimer) { clearTimeout(net.joinTimer); net.joinTimer = null; } }
+function failJoin(message) {
+  if (!net.joining || net.active) return;
+  net.joining = false;
+  clearJoinTimer();
+  const peer = net.peer;
+  net.peer = null; net.hostConn = null;
+  try { if (peer) peer.destroy(); } catch (e) { /* соединение уже закрыто */ }
+  mainMenu.style.display = 'flex';
+  renderMainMenu('mp');
+  setMpStatus(message);
+}
 function netSendTo(conn, msg) { try { if (conn && conn.open) conn.send(msg); } catch (e) { /* связь оборвалась */ } }
 function netBroadcast(msg, exceptConn) { net.conns.forEach(c => { if (c !== exceptConn) netSendTo(c, msg); }); }
 
@@ -3790,7 +3802,8 @@ function handleHostMsg(conn, m) {
 }
 function handleClientMsg(m) {
   if (m.t === 'welcome') {
-    if (m.seed !== WORLD_SEED) { setMpStatus('Мир не совпал, попробуй подключиться ещё раз'); return; }
+    if (m.seed !== WORLD_SEED) { failJoin('Мир не совпал. Попробуй подключиться ещё раз'); return; }
+    clearJoinTimer(); net.joining = false;
     net.id = m.id; net.role = 'client'; net.active = true;
     startGame(true, false);
     gameHour = m.hour; day = m.day;
@@ -3798,7 +3811,7 @@ function handleClientMsg(m) {
     m.players.forEach(pl => { if (pl.id !== net.id) upsertPlayer(pl.id, pl.name); });
     notify('Подключено! Enter - чат. Мир общий: зомби и игроки, лут пока у каждого свой');
   }
-  else if (m.t === 'full') setMpStatus('В комнате нет мест (максимум 4 игрока)');
+  else if (m.t === 'full') failJoin('В комнате нет мест (максимум 4 игрока)');
   else if (m.t === 'pl') {
     const ids = new Set();
     m.list.forEach(e => { if (e.id === net.id) return; ids.add(e.id); const p = upsertPlayer(e.id, e.name); p.x = e.x; p.y = e.y; p.z = e.z; p.yaw = e.yaw; p.w = e.w; p.mv = e.mv; p.hp = e.hp; });
@@ -3863,16 +3876,22 @@ function peekRoom(code, name) { // сначала узнаём зерно мир
 }
 function joinRoom(code, name, auto) {
   net.name = sanitizeName(name); net.code = code;
+  clearJoinTimer(); net.joining = true;
   setMpStatus('Подключаюсь...');
-  const peer = new window.Peer();
+  let peer;
+  try { peer = new window.Peer(); }
+  catch (err) { failJoin('Не удалось запустить сетевое соединение'); return; }
   net.peer = peer;
-  peer.on('error', err => { if (!net.active) { setMpStatus('Не удалось подключиться: ' + err.type); mainMenu.style.display = 'flex'; renderMainMenu('mp'); } });
+  net.joinTimer = setTimeout(() => failJoin('Комната не ответила за 20 секунд. Проверь код и интернет'), 20000);
+  peer.on('error', err => { if (net.joining && !net.active) failJoin('Не удалось подключиться: ' + (err.type || 'ошибка сети')); });
   peer.on('open', () => {
+    if (!net.joining) return;
     const conn = peer.connect('dz-' + code, { reliable: true, serialization: 'json' });
     net.hostConn = conn;
-    conn.on('open', () => conn.send({ t: 'hello', name: net.name }));
+    conn.on('open', () => { if (net.joining) conn.send({ t: 'hello', name: net.name }); });
     conn.on('data', handleClientMsg);
-    conn.on('close', onHostLost);
+    conn.on('error', err => { if (net.joining && !net.active) failJoin('Ошибка связи с комнатой: ' + (err.type || 'соединение')); });
+    conn.on('close', () => { if (net.active) onHostLost(); else failJoin('Комната закрыла соединение. Проверь код и попробуй ещё раз'); });
   });
 }
 
