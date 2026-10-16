@@ -562,6 +562,104 @@ for (let i = 0; i < 8; i++) {
   }
 }
 
+
+// --- Заброшенный промышленный двор: склад, контейнеры, бочки и ограждение ---
+{
+  // Выбираем свободный сектор вдали от центральных дорог и жилых домов.
+  const candidates = [
+    [68, 66], [-68, 66], [68, -66], [-68, -66],
+    [82, 42], [-82, 42], [82, -42], [-82, -42],
+    [52, 82], [-52, 82], [52, -82], [-52, -82]
+  ];
+  let site = candidates.find(([sx, sz]) =>
+    Math.abs(sx) > 30 && Math.abs(sz) > 30 &&
+    housePositions.every(h => Math.hypot(h.x - sx, h.z - sz) > 23) &&
+    trees.every(t => Math.hypot(t.trunk.position.x - sx, t.trunk.position.z - sz) > 13)
+  );
+  if (!site) site = [74, -72];
+  const [sx, sz] = site;
+
+  const metal = new THREE.MeshStandardMaterial({ color: 0x555b5b, roughness: 0.94, metalness: 0.22 });
+  const rust = new THREE.MeshStandardMaterial({ color: 0x78462e, roughness: 1, metalness: 0.12 });
+  const concrete = new THREE.MeshStandardMaterial({ color: 0x77756d, roughness: 1 });
+  const darkMetal = new THREE.MeshStandardMaterial({ color: 0x303737, roughness: 0.98, metalness: 0.18 });
+  const hazard = new THREE.MeshStandardMaterial({ color: 0xc1a64d, roughness: 1 });
+
+  // Низкий склад с открытым въездом. Декоративные элементы не меняют коллизии.
+  box(15, 0.18, 12, 0x66645b, sx, 0.09, sz, false);
+  box(15, 4.2, 0.35, 0x696d68, sx, 2.1, sz - 6, false);
+  box(0.35, 4.2, 12, 0x5b625f, sx - 7.5, 2.1, sz, false);
+  box(0.35, 4.2, 12, 0x5b625f, sx + 7.5, 2.1, sz, false);
+  box(4.4, 4.2, 0.35, 0x646965, sx - 5.3, 2.1, sz + 6, false);
+  box(4.4, 4.2, 0.35, 0x646965, sx + 5.3, 2.1, sz + 6, false);
+  box(15.8, 0.24, 12.8, 0x3f4544, sx, 4.25, sz, false);
+  // Рёбра крыши и следы коррозии.
+  for (let i = -6; i <= 6; i += 2) {
+    box(0.07, 0.05, 12.2, darkMetal, sx + i, 4.4, sz, false);
+  }
+  for (let i = 0; i < 5; i++) {
+    box(0.3, 0.8 + (i % 2) * 0.45, 0.04, rust, sx - 6 + i * 2.7, 2.5, sz - 6.19, false);
+  }
+
+  // Два грузовых контейнера с вертикальными рёбрами.
+  const addContainer = (cx, cz, color) => {
+    box(5.6, 2.5, 2.5, color, cx, 1.25, cz, false);
+    for (let r = -2; r <= 2; r++) {
+      box(0.09, 2.35, 0.08, darkMetal, cx + r * 1.05, 1.25, cz + 1.29, false);
+    }
+    box(5.55, 0.08, 2.45, darkMetal, cx, 2.53, cz, false);
+  };
+  addContainer(sx - 11, sz + 1, 0x596b68);
+  addContainer(sx + 11, sz - 2, 0x705744);
+
+  // Бочки, бетонные блоки и сломанный паллет у въезда.
+  for (const [dx, dz, color] of [[-3, 9, 0x5e633d], [0, 9.4, 0x76432d], [3.2, 8.8, 0x565d5e]]) {
+    const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.42, 0.42, 1.05, 12), new THREE.MeshStandardMaterial({ color, roughness: 0.86, metalness: 0.18 }));
+    barrel.position.set(sx + dx, 0.525, sz + dz);
+    scene.add(barrel);
+    const rim = new THREE.Mesh(new THREE.CylinderGeometry(0.43, 0.43, 0.07, 12), darkMetal);
+    rim.position.set(sx + dx, 0.86, sz + dz);
+    scene.add(rim);
+  }
+  box(1.8, 0.12, 1.1, 0x654a30, sx + 5.2, 0.18, sz + 9.2, false);
+  box(1.8, 0.08, 0.12, 0x493725, sx + 5.2, 0.28, sz + 8.9, false);
+  box(1.8, 0.08, 0.12, 0x493725, sx + 5.2, 0.28, sz + 9.5, false);
+  box(1.4, 0.8, 0.8, concrete, sx - 9.3, 0.4, sz + 8.2, false);
+  box(1.2, 0.7, 0.8, concrete, sx + 9.1, 0.35, sz + 8.6, false);
+
+  // Частичное ограждение: оставляем широкий въезд со стороны +Z.
+  const fenceMat = new THREE.MeshStandardMaterial({ color: 0x454d4b, roughness: 1, metalness: 0.25 });
+  const fencePost = (px, pz) => box(0.14, 1.6, 0.14, fenceMat, px, 0.8, pz, false);
+  for (let i = -7; i <= 7; i += 2) {
+    if (Math.abs(i) < 3) continue;
+    fencePost(sx + i, sz + 12);
+    box(2, 0.08, 0.08, fenceMat, sx + i + 1, 1.25, sz + 12, false);
+    box(2, 0.08, 0.08, fenceMat, sx + i + 1, 0.55, sz + 12, false);
+  }
+  for (let i = -5; i <= 5; i += 2) {
+    fencePost(sx - 13, sz + i);
+    fencePost(sx + 13, sz + i);
+    box(0.08, 0.08, 2, fenceMat, sx - 13, 1.25, sz + i + 1, false);
+    box(0.08, 0.08, 2, fenceMat, sx + 13, 1.25, sz + i + 1, false);
+  }
+
+  // Предупреждающая табличка на стойках.
+  box(1.5, 0.9, 0.1, 0x3c4240, sx - 10.5, 2.0, sz + 11.8, false);
+  box(1.25, 0.65, 0.035, hazard, sx - 10.5, 2.0, sz + 11.73, false);
+  box(0.12, 0.48, 0.04, 0x343936, sx - 10.5, 2.0, sz + 11.69, false);
+  box(0.34, 0.12, 0.04, 0x343936, sx - 10.5, 2.0, sz + 11.68, false);
+
+  // Ржавые обломки и пятна загрязнения вокруг двора.
+  for (let i = 0; i < 12; i++) {
+    const dx = (i % 4 - 1.5) * 4.1 + (i % 2) * 0.6;
+    const dz = 14 + Math.floor(i / 4) * 2.1;
+    const debris = new THREE.Mesh(new THREE.DodecahedronGeometry(0.25 + (i % 3) * 0.12, 0), i % 2 ? rust : concrete);
+    debris.position.set(sx + dx, 0.18, sz + dz);
+    debris.rotation.set(i * 0.17, i * 0.73, i * 0.11);
+    scene.add(debris);
+  }
+}
+
 // --- Зомби ---
 const zombies = [];
 function spawnZombie(ax, az) {
