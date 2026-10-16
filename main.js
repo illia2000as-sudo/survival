@@ -660,6 +660,112 @@ for (let i = 0; i < 8; i++) {
   }
 }
 
+// --- Заброшенный транспортный конвой: два грузовика и машина сопровождения ---
+function buildAbandonedConvoy() {
+  // Держим конвой на прямом участке шоссе, но не рядом со стартовым перекрёстком.
+  const candidates = [[104, 0], [122, 0], [-104, 0], [-122, 0]];
+  let site = candidates.find(([x, z]) =>
+    housePositions.every(h => Math.hypot(h.x - x, h.z - z) > 15) &&
+    trees.every(t => Math.hypot(t.trunk.position.x - x, t.trunk.position.z - z) > 8)
+  );
+  if (!site) site = [104, 0];
+  const [cx, cz] = site;
+  const paint = {
+    tire: new THREE.MeshStandardMaterial({ color: 0x202223, roughness: 1 }),
+    steel: new THREE.MeshStandardMaterial({ color: 0x4b514f, roughness: 0.85, metalness: 0.28 }),
+    dark: new THREE.MeshStandardMaterial({ color: 0x282d2d, roughness: 0.95, metalness: 0.12 }),
+    glass: new THREE.MeshStandardMaterial({ color: 0x18282b, roughness: 0.3, metalness: 0.25 }),
+    rust: new THREE.MeshStandardMaterial({ color: 0x78442d, roughness: 1, metalness: 0.1 }),
+    crate: new THREE.MeshStandardMaterial({ color: 0x705638, roughness: 1 }),
+    tarp: new THREE.MeshStandardMaterial({ color: 0x555b43, roughness: 1 }),
+    red: new THREE.MeshStandardMaterial({ color: 0x8f2920, roughness: 0.75 }),
+    lamp: new THREE.MeshStandardMaterial({ color: 0xd6cba0, emissive: 0x554522, roughness: 0.5 })
+  };
+  const addBox = (g, w, h, d, mat, x, y, z) => {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+    m.position.set(x, y, z); g.add(m); return m;
+  };
+  const addWheel = (g, x, z, damaged) => {
+    const tire = new THREE.Mesh(new THREE.CylinderGeometry(0.48, 0.48, 0.32, 12), paint.tire);
+    tire.rotation.z = Math.PI / 2;
+    tire.position.set(x, damaged ? 0.27 : 0.48, z);
+    if (damaged) tire.rotation.x = 0.22;
+    g.add(tire);
+    const hub = new THREE.Mesh(new THREE.CylinderGeometry(0.19, 0.19, 0.34, 10), paint.steel);
+    hub.rotation.z = Math.PI / 2; hub.position.copy(tire.position); g.add(hub);
+  };
+  const addTruck = (x, z, variant) => {
+    const g = new THREE.Group();
+    const body = variant === 1 ? paint.rust : variant === 2 ? paint.dark : paint.steel;
+    addBox(g, 1.9, 0.38, 5.9, paint.dark, 0, 0.82, 0);
+    addBox(g, 2.25, 0.68, 2.2, body, 0, 1.18, -1.65);
+    addBox(g, 2.05, 0.72, 3.0, paint.tarp, 0, 1.65, 1.25);
+    addBox(g, 2.15, 0.12, 3.1, paint.dark, 0, 1.22, 1.25);
+    [-1, 1].forEach(side => {
+      addBox(g, 0.08, 0.7, 3.05, body, side * 1.06, 1.62, 1.25);
+      for (let k = 0; k < 5; k++) addBox(g, 0.045, 0.58, 0.055, paint.rust, side * 1.11, 1.62, 0.1 + k * 0.58);
+    });
+    addBox(g, 2.1, 0.65, 0.08, body, 0, 1.6, 2.78);
+    addBox(g, 2.1, 0.65, 0.08, body, 0, 1.6, -0.28);
+    addBox(g, 1.62, 0.42, 0.045, paint.glass, 0, 1.52, -2.78);
+    [-1, 1].forEach(side => {
+      addBox(g, 0.045, 0.4, 0.55, paint.glass, side * 1.13, 1.55, -1.7);
+      addBox(g, 0.42, 0.1, 0.16, paint.lamp, side * 0.78, 1.02, -2.82);
+      addBox(g, 0.35, 0.12, 0.12, paint.red, side * 0.78, 0.92, 2.98);
+    });
+    addBox(g, 2.45, 0.16, 0.24, paint.dark, 0, 0.72, -2.93);
+    addBox(g, 2.35, 0.13, 0.22, paint.rust, 0, 0.72, 3.0);
+    if (variant !== 2) {
+      [[-0.48, 1.65, 0.6], [0.35, 1.65, 1.35], [0.25, 1.65, 2.05]].forEach(([bx, by, bz], i) => {
+        addBox(g, 0.62, 0.58, 0.62, i === 1 ? paint.tarp : paint.crate, bx, by, bz);
+        addBox(g, 0.65, 0.045, 0.045, paint.rust, bx, by + 0.08, bz);
+      });
+    } else {
+      const bent = addBox(g, 0.12, 0.42, 1.0, paint.rust, 1.1, 1.38, 1.8);
+      bent.rotation.x = -0.12;
+      addBox(g, 0.7, 0.5, 0.7, paint.crate, -0.35, 1.55, 1.2);
+    }
+    [-1, 1].forEach(side => [-2.0, 0.2, 2.25].forEach((wz, i) => addWheel(g, side * 1.2, wz, variant === 1 && side === 1 && i === 2)));
+    for (let i = 0; i < 4; i++) addBox(g, 0.22, 0.08, 0.035, paint.rust, -0.72 + i * 0.43, 1.28 + (i % 2) * 0.18, -2.78);
+    g.position.set(x, 0, z);
+    g.rotation.y = Math.PI / 2;
+    scene.add(g);
+    colliders.push({ minX: x - 3.3, maxX: x + 3.3, minZ: z - 1.65, maxZ: z + 1.65 });
+  };
+  addTruck(cx - 7.2, cz - 0.25, 0);
+  addTruck(cx, cz + 0.35, 1);
+  addTruck(cx + 7.1, cz - 0.1, 2);
+
+  const concrete = new THREE.MeshStandardMaterial({ color: 0x77766d, roughness: 1 });
+  const hazard = new THREE.MeshStandardMaterial({ color: 0xb6a05a, roughness: 1 });
+  const debris = new THREE.MeshStandardMaterial({ color: 0x4a4d49, roughness: 1 });
+  [[cx - 2.5, cz + 4.1], [cx + 2.2, cz + 4.4]].forEach(([x, z], i) => {
+    const block = new THREE.Mesh(new THREE.BoxGeometry(2.5, 0.75, 0.7), concrete);
+    block.position.set(x, 0.38, z); block.rotation.y = i ? -0.16 : 0.12; scene.add(block);
+    colliders.push({ minX: x - 1.35, maxX: x + 1.35, minZ: z - 0.45, maxZ: z + 0.45 });
+    for (let k = 0; k < 4; k++) addBox(scene, 0.18, 0.08, 0.025, hazard, x - 0.8 + k * 0.52, 0.55, z - 0.36);
+  });
+  for (let i = 0; i < 9; i++) {
+    const scrap = new THREE.Mesh(new THREE.DodecahedronGeometry(0.18 + (i % 3) * 0.08, 0), i % 2 ? paint.rust : debris);
+    scrap.position.set(cx - 9 + i * 2.2, 0.14, cz + 5.1 + (i % 3) * 0.55);
+    scrap.rotation.set(i * 0.2, i * 0.7, i * 0.15); scene.add(scrap);
+  }
+  const sign = new THREE.Group();
+  const post = new THREE.Mesh(new THREE.BoxGeometry(0.16, 2.2, 0.16), paint.dark);
+  post.position.set(0, 1.1, 0); sign.add(post);
+  const plate = new THREE.Mesh(new THREE.BoxGeometry(2.4, 0.75, 0.12), paint.rust);
+  plate.position.set(0, 2.05, 0); sign.add(plate);
+  const canvas = document.createElement('canvas'); canvas.width = 512; canvas.height = 160;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#353a36'; ctx.fillRect(0, 0, 512, 160);
+  ctx.strokeStyle = '#c4ad65'; ctx.lineWidth = 10; ctx.strokeRect(8, 8, 496, 144);
+  ctx.fillStyle = '#e4dcc0'; ctx.font = 'bold 68px monospace'; ctx.textAlign = 'center'; ctx.fillText('КОНВОЙ', 256, 102);
+  const label = new THREE.Mesh(new THREE.PlaneGeometry(2.25, 0.7), new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(canvas) }));
+  label.position.set(0, 2.05, 0.071); sign.add(label);
+  sign.position.set(cx + 12, 0, cz + 4.5); sign.rotation.y = Math.PI / 2; scene.add(sign);
+}
+buildAbandonedConvoy();
+
 // --- Зомби ---
 const zombies = [];
 function spawnZombie(ax, az) {
