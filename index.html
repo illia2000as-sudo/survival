@@ -2,8 +2,14 @@
 <html>
 <body style="margin:0; overflow:hidden">
 <script type="importmap">
-{ "imports": { "three": "./node_modules/three/build/three.module.js" } }
+{
+  "imports": {
+    "three": "./node_modules/three/build/three.module.js"
+  }
+}
 </script>
+<!-- Multiplayer: expose PeerJS as window.Peer for the existing room-code system. -->
+<script src="./node_modules/peerjs/dist/peerjs.min.js"></script>
 <script type="module" src="main.js"></script>
 </body>
 </html>

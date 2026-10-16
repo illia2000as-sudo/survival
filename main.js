@@ -357,6 +357,116 @@ function buildHouse(x, z, st) {
   }
 }
 
+// --- Декор заброшенных домов: мусор, обломки, доски и сорняки ---
+const houseJunkMats = [
+  new THREE.MeshStandardMaterial({ color: 0x514638, roughness: 1 }),
+  new THREE.MeshStandardMaterial({ color: 0x71634e, roughness: 1 }),
+  new THREE.MeshStandardMaterial({ color: 0x45494a, roughness: 1, metalness: 0.25 }),
+  new THREE.MeshStandardMaterial({ color: 0x343936, roughness: 1 })
+];
+const houseJunkGeos = [
+  new THREE.DodecahedronGeometry(0.34, 0),
+  new THREE.DodecahedronGeometry(0.22, 0),
+  new THREE.BoxGeometry(0.9, 0.08, 0.16),
+  new THREE.BoxGeometry(0.65, 0.08, 0.12)
+];
+const weedMat = new THREE.MeshStandardMaterial({ color: 0x435535, roughness: 1, flatShading: true });
+const weedGeo = new THREE.ConeGeometry(0.13, 0.48, 5);
+
+function decorateAbandonedHouse(x, z, style) {
+  // Точки по бокам и сзади дома; перед дверью оставляем проход.
+  const spots = [
+    [-5.0, -2.8], [5.0, -2.6], [-5.0, 2.2], [5.0, 1.8],
+    [-3.8, -5.0], [3.8, -5.0], [-5.4, 4.8], [5.3, 4.7]
+  ];
+  const count = 4 + Math.floor(Math.random() * 3);
+  for (let i = 0; i < count; i++) {
+    const base = spots[(i + style * 2) % spots.length];
+    const px = x + base[0] + (Math.random() - 0.5) * 1.0;
+    const pz = z + base[1] + (Math.random() - 0.5) * 0.8;
+    // Не ставим декор на две главные дороги и прямо перед дверью.
+    if (Math.abs(px) < 8 || Math.abs(pz) < 8) continue;
+    if (Math.abs(px - x) < 1.8 && pz > z + 3.2) continue;
+
+    if (Math.random() < 0.42) {
+      const crate = box(0.58, 0.52, 0.58, style === 1 ? 0x55402b : 0x67513a, px, 0.26, pz, false);
+      crate.rotation.y = Math.random() * 1.2;
+      const slat = box(0.62, 0.06, 0.07, 0x392d20, px, 0.32, pz + 0.3, false);
+      slat.rotation.y = crate.rotation.y;
+    } else {
+      const geoIndex = Math.random() < 0.55 ? 0 : 1;
+      const rubble = new THREE.Mesh(houseJunkGeos[geoIndex], houseJunkMats[Math.floor(Math.random() * houseJunkMats.length)]);
+      rubble.position.set(px, geoIndex === 0 ? 0.2 : 0.12, pz);
+      rubble.scale.set(1 + Math.random(), 0.65 + Math.random() * 0.4, 0.8 + Math.random() * 0.7);
+      rubble.rotation.set(Math.random() * 0.2, Math.random() * 6, Math.random() * 0.15);
+      scene.add(rubble);
+    }
+
+    if (i % 2 === 0) {
+      const weed = new THREE.Mesh(weedGeo, weedMat);
+      weed.position.set(px + (Math.random() - 0.5) * 0.7, 0.22, pz + (Math.random() - 0.5) * 0.7);
+      weed.rotation.y = Math.random() * 6;
+      scene.add(weed);
+    }
+  }
+
+  // Упавшие доски по бокам дома, не в дверном проёме.
+  for (let i = 0; i < 2; i++) {
+    const side = i === 0 ? -1 : 1;
+    const px = x + side * (5.1 + Math.random() * 0.4);
+    const pz = z - 0.8 + (Math.random() - 0.5) * 2.4;
+    if (Math.abs(px) < 8 || Math.abs(pz) < 8) continue;
+    const plank = new THREE.Mesh(houseJunkGeos[2 + i], houseJunkMats[i]);
+    plank.position.set(px, 0.08, pz);
+    plank.rotation.set(0, Math.random() * 2.8, (Math.random() - 0.5) * 0.12);
+    scene.add(plank);
+  }
+}
+
+
+// --- Следы времени: потёки, облупившаяся штукатурка и заколоченные окна ---
+// Только визуальные меши: не меняют коллайдеры, лут или поведение домов.
+// Локальный генератор зависит от координат дома и не сдвигает общий WORLD_SEED.
+function weatherAbandonedHouse(x, z, style) {
+  let seed = (Math.imul(Math.floor(x * 10) + 12000, 73856093) ^
+    Math.imul(Math.floor(z * 10) + 18000, 19349663) ^
+    Math.imul(style + 1, 83492791)) >>> 0;
+  const rand = () => {
+    seed = (seed + 0x6D2B79F5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  const stainColors = [0x5b5548, 0x6b6251, 0x777064];
+  // Потёки у основания и под окнами на передней/задней стене.
+  for (const side of [-1, 1]) {
+    const wallZ = z + side * 4.015;
+    for (let i = 0; i < 2; i++) {
+      const px = x + (rand() - 0.5) * 6.2;
+      const h = 0.35 + rand() * 0.8;
+      const stain = box(0.18 + rand() * 0.35, h, 0.025, stainColors[Math.floor(rand() * stainColors.length)], px, 0.35 + h / 2, wallZ, false);
+      stain.material.roughness = 1;
+    }
+  }
+
+  // В каждом третьем доме одно окно выглядит заколоченным.
+  if (rand() < 0.72) {
+    const front = rand() < 0.5;
+    const wx = x + (front ? (rand() < 0.5 ? -2.6 : 2.6) : (rand() < 0.5 ? -2.2 : 2.2));
+    const wz = z + (front ? 4.035 : -4.035);
+    const boardMat = style === 1 ? 0x493725 : 0x66513a;
+    for (let i = 0; i < 2; i++) {
+      const board = box(1.45, 0.12, 0.055, boardMat, wx, 1.25 + i * 0.48, wz, false);
+      board.rotation.z = (i === 0 ? -1 : 1) * (0.06 + rand() * 0.1);
+    }
+  }
+
+  // Небольшая облупившаяся зона у одного из углов.
+  const side = rand() < 0.5 ? -1 : 1;
+  const peel = box(0.42 + rand() * 0.35, 0.5 + rand() * 0.55, 0.035, 0x625d51, x + side * 3.58, 0.65 + rand() * 0.3, z - 3.99, false);
+  peel.material.roughness = 1;
+}
+
 for (let i = 0; i < 8; i++) {
   const x = (Math.random() - 0.5) * 200, z = (Math.random() - 0.5) * 200;
   if ((Math.abs(x) < 15 && Math.abs(z) < 15) || Math.abs(x) < 8 || Math.abs(z) < 8) continue;
@@ -370,16 +480,65 @@ for (let i = 0; i < 8; i++) {
       trees.splice(k, 1);
     }
   }
+  decorateAbandonedHouse(x, z, i % 3);
+  weatherAbandonedHouse(x, z, i % 3);
   housePositions.push({ x, z });
 }
 
-// --- Дороги, пятна травы, камни и кусты ---
+// --- Дороги, обочины, повреждения асфальта, пятна травы, камни и кусты ---
 {
-  const roadMat = new THREE.MeshStandardMaterial({ color: 0x6f6350, roughness: 1, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
+  // Сохраняем расположение и ширину дорог для старой карты и транспорта.
+  const roadMat = new THREE.MeshStandardMaterial({ color: 0x454849, roughness: 1, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
+  const shoulderMat = new THREE.MeshStandardMaterial({ color: 0x777568, roughness: 1, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 });
+  const edgeMat = new THREE.MeshStandardMaterial({ color: 0x8b805e, roughness: 1, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 });
+  const markMat = new THREE.MeshStandardMaterial({ color: 0xb3a36e, roughness: 1, transparent: true, opacity: 0.48, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 });
+  const crackMat = new THREE.MeshStandardMaterial({ color: 0x292d2e, roughness: 1, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 });
   [[400, 7], [7, 400]].forEach(([w, d]) => {
     const r = new THREE.Mesh(new THREE.PlaneGeometry(w, d), roadMat);
     r.rotation.x = -Math.PI / 2; r.position.y = 0.02; scene.add(r);
   });
+
+  // Потёртые обочины и остатки краевой разметки.
+  [[400, 0.7, 0, -3.85], [400, 0.7, 0, 3.85], [0.7, 400, -3.85, 0], [0.7, 400, 3.85, 0]].forEach(([w, d, x, z]) => {
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(w, d), shoulderMat);
+    m.rotation.x = -Math.PI / 2; m.position.set(x, 0.024, z); scene.add(m);
+  });
+  [[400, 0.08, 0, -3.18], [400, 0.08, 0, 3.18], [0.08, 400, -3.18, 0], [0.08, 400, 3.18, 0]].forEach(([w, d, x, z]) => {
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(w, d), edgeMat);
+    m.rotation.x = -Math.PI / 2; m.position.set(x, 0.029, z); scene.add(m);
+  });
+
+  // Выцветшая прерывистая разметка.
+  for (let p = -190; p <= 190; p += 10) {
+    if (Math.abs(p) < 8) continue;
+    const a = new THREE.Mesh(new THREE.PlaneGeometry(4.2, 0.12), markMat);
+    a.rotation.x = -Math.PI / 2; a.position.set(p, 0.032, 0); scene.add(a);
+    const b = new THREE.Mesh(new THREE.PlaneGeometry(0.12, 4.2), markMat);
+    b.rotation.x = -Math.PI / 2; b.position.set(0, 0.032, p); scene.add(b);
+  }
+
+  // Тёмные заплаты и тонкие трещины: чисто визуальные детали без коллайдеров.
+  const patchMats = [
+    new THREE.MeshStandardMaterial({ color: 0x353a3b, roughness: 1, transparent: true, opacity: 0.72, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }),
+    new THREE.MeshStandardMaterial({ color: 0x3d4142, roughness: 1, transparent: true, opacity: 0.72, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 })
+  ];
+  for (let i = 0; i < 34; i++) {
+    const horizontal = Math.random() < 0.5;
+    const p = (Math.random() - 0.5) * 370;
+    const across = (Math.random() - 0.5) * 4.8;
+    const patch = new THREE.Mesh(new THREE.PlaneGeometry(0.45 + Math.random() * 1.6, 0.22 + Math.random() * 0.7), patchMats[i % patchMats.length]);
+    patch.rotation.x = -Math.PI / 2; patch.rotation.z = (Math.random() - 0.5) * 0.12;
+    patch.position.set(horizontal ? p : across, 0.031, horizontal ? across : p); scene.add(patch);
+  }
+  for (let i = 0; i < 58; i++) {
+    const horizontal = Math.random() < 0.5;
+    const p = (Math.random() - 0.5) * 380;
+    const across = (Math.random() - 0.5) * 5.6;
+    const crack = new THREE.Mesh(new THREE.PlaneGeometry(0.45 + Math.random() * 1.1, 0.025 + Math.random() * 0.035), crackMat);
+    crack.rotation.x = -Math.PI / 2; crack.rotation.z = (Math.random() - 0.5) * 0.9;
+    crack.position.set(horizontal ? p : across, 0.034, horizontal ? across : p); scene.add(crack);
+  }
+
   const greens = [0x566a41, 0x5f7249, 0x4f6339, 0x66784c];
   for (let i = 0; i < 90; i++) {
     const mt = new THREE.MeshStandardMaterial({ color: greens[i % 4], roughness: 1, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1, depthWrite: false });
@@ -403,15 +562,224 @@ for (let i = 0; i < 8; i++) {
   }
 }
 
+
+// --- Заброшенный промышленный двор: склад, контейнеры, бочки и ограждение ---
+{
+  // Выбираем свободный сектор вдали от центральных дорог и жилых домов.
+  const candidates = [
+    [68, 66], [-68, 66], [68, -66], [-68, -66],
+    [82, 42], [-82, 42], [82, -42], [-82, -42],
+    [52, 82], [-52, 82], [52, -82], [-52, -82]
+  ];
+  let site = candidates.find(([sx, sz]) =>
+    Math.abs(sx) > 30 && Math.abs(sz) > 30 &&
+    housePositions.every(h => Math.hypot(h.x - sx, h.z - sz) > 23) &&
+    trees.every(t => Math.hypot(t.trunk.position.x - sx, t.trunk.position.z - sz) > 13)
+  );
+  if (!site) site = [74, -72];
+  const [sx, sz] = site;
+
+  const metal = new THREE.MeshStandardMaterial({ color: 0x555b5b, roughness: 0.94, metalness: 0.22 });
+  const rust = new THREE.MeshStandardMaterial({ color: 0x78462e, roughness: 1, metalness: 0.12 });
+  const concrete = new THREE.MeshStandardMaterial({ color: 0x77756d, roughness: 1 });
+  const darkMetal = new THREE.MeshStandardMaterial({ color: 0x303737, roughness: 0.98, metalness: 0.18 });
+  const hazard = new THREE.MeshStandardMaterial({ color: 0xc1a64d, roughness: 1 });
+
+  // Низкий склад с открытым въездом. Декоративные элементы не меняют коллизии.
+  box(15, 0.18, 12, 0x66645b, sx, 0.09, sz, false);
+  box(15, 4.2, 0.35, 0x696d68, sx, 2.1, sz - 6, false);
+  box(0.35, 4.2, 12, 0x5b625f, sx - 7.5, 2.1, sz, false);
+  box(0.35, 4.2, 12, 0x5b625f, sx + 7.5, 2.1, sz, false);
+  box(4.4, 4.2, 0.35, 0x646965, sx - 5.3, 2.1, sz + 6, false);
+  box(4.4, 4.2, 0.35, 0x646965, sx + 5.3, 2.1, sz + 6, false);
+  box(15.8, 0.24, 12.8, 0x3f4544, sx, 4.25, sz, false);
+  // Рёбра крыши и следы коррозии.
+  for (let i = -6; i <= 6; i += 2) {
+    box(0.07, 0.05, 12.2, darkMetal, sx + i, 4.4, sz, false);
+  }
+  for (let i = 0; i < 5; i++) {
+    box(0.3, 0.8 + (i % 2) * 0.45, 0.04, rust, sx - 6 + i * 2.7, 2.5, sz - 6.19, false);
+  }
+
+  // Два грузовых контейнера с вертикальными рёбрами.
+  const addContainer = (cx, cz, color) => {
+    box(5.6, 2.5, 2.5, color, cx, 1.25, cz, false);
+    for (let r = -2; r <= 2; r++) {
+      box(0.09, 2.35, 0.08, darkMetal, cx + r * 1.05, 1.25, cz + 1.29, false);
+    }
+    box(5.55, 0.08, 2.45, darkMetal, cx, 2.53, cz, false);
+  };
+  addContainer(sx - 11, sz + 1, 0x596b68);
+  addContainer(sx + 11, sz - 2, 0x705744);
+
+  // Бочки, бетонные блоки и сломанный паллет у въезда.
+  for (const [dx, dz, color] of [[-3, 9, 0x5e633d], [0, 9.4, 0x76432d], [3.2, 8.8, 0x565d5e]]) {
+    const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.42, 0.42, 1.05, 12), new THREE.MeshStandardMaterial({ color, roughness: 0.86, metalness: 0.18 }));
+    barrel.position.set(sx + dx, 0.525, sz + dz);
+    scene.add(barrel);
+    const rim = new THREE.Mesh(new THREE.CylinderGeometry(0.43, 0.43, 0.07, 12), darkMetal);
+    rim.position.set(sx + dx, 0.86, sz + dz);
+    scene.add(rim);
+  }
+  box(1.8, 0.12, 1.1, 0x654a30, sx + 5.2, 0.18, sz + 9.2, false);
+  box(1.8, 0.08, 0.12, 0x493725, sx + 5.2, 0.28, sz + 8.9, false);
+  box(1.8, 0.08, 0.12, 0x493725, sx + 5.2, 0.28, sz + 9.5, false);
+  box(1.4, 0.8, 0.8, concrete, sx - 9.3, 0.4, sz + 8.2, false);
+  box(1.2, 0.7, 0.8, concrete, sx + 9.1, 0.35, sz + 8.6, false);
+
+  // Частичное ограждение: оставляем широкий въезд со стороны +Z.
+  const fenceMat = new THREE.MeshStandardMaterial({ color: 0x454d4b, roughness: 1, metalness: 0.25 });
+  const fencePost = (px, pz) => box(0.14, 1.6, 0.14, fenceMat, px, 0.8, pz, false);
+  for (let i = -7; i <= 7; i += 2) {
+    if (Math.abs(i) < 3) continue;
+    fencePost(sx + i, sz + 12);
+    box(2, 0.08, 0.08, fenceMat, sx + i + 1, 1.25, sz + 12, false);
+    box(2, 0.08, 0.08, fenceMat, sx + i + 1, 0.55, sz + 12, false);
+  }
+  for (let i = -5; i <= 5; i += 2) {
+    fencePost(sx - 13, sz + i);
+    fencePost(sx + 13, sz + i);
+    box(0.08, 0.08, 2, fenceMat, sx - 13, 1.25, sz + i + 1, false);
+    box(0.08, 0.08, 2, fenceMat, sx + 13, 1.25, sz + i + 1, false);
+  }
+
+  // Предупреждающая табличка на стойках.
+  box(1.5, 0.9, 0.1, 0x3c4240, sx - 10.5, 2.0, sz + 11.8, false);
+  box(1.25, 0.65, 0.035, hazard, sx - 10.5, 2.0, sz + 11.73, false);
+  box(0.12, 0.48, 0.04, 0x343936, sx - 10.5, 2.0, sz + 11.69, false);
+  box(0.34, 0.12, 0.04, 0x343936, sx - 10.5, 2.0, sz + 11.68, false);
+
+  // Ржавые обломки и пятна загрязнения вокруг двора.
+  for (let i = 0; i < 12; i++) {
+    const dx = (i % 4 - 1.5) * 4.1 + (i % 2) * 0.6;
+    const dz = 14 + Math.floor(i / 4) * 2.1;
+    const debris = new THREE.Mesh(new THREE.DodecahedronGeometry(0.25 + (i % 3) * 0.12, 0), i % 2 ? rust : concrete);
+    debris.position.set(sx + dx, 0.18, sz + dz);
+    debris.rotation.set(i * 0.17, i * 0.73, i * 0.11);
+    scene.add(debris);
+  }
+}
+
+// --- Заброшенный транспортный конвой: два грузовика и машина сопровождения ---
+function buildAbandonedConvoy() {
+  // Держим конвой на прямом участке шоссе, но не рядом со стартовым перекрёстком.
+  const candidates = [[104, 0], [122, 0], [-104, 0], [-122, 0]];
+  let site = candidates.find(([x, z]) =>
+    housePositions.every(h => Math.hypot(h.x - x, h.z - z) > 15) &&
+    trees.every(t => Math.hypot(t.trunk.position.x - x, t.trunk.position.z - z) > 8)
+  );
+  if (!site) site = [104, 0];
+  const [cx, cz] = site;
+  const paint = {
+    tire: new THREE.MeshStandardMaterial({ color: 0x202223, roughness: 1 }),
+    steel: new THREE.MeshStandardMaterial({ color: 0x4b514f, roughness: 0.85, metalness: 0.28 }),
+    dark: new THREE.MeshStandardMaterial({ color: 0x282d2d, roughness: 0.95, metalness: 0.12 }),
+    glass: new THREE.MeshStandardMaterial({ color: 0x18282b, roughness: 0.3, metalness: 0.25 }),
+    rust: new THREE.MeshStandardMaterial({ color: 0x78442d, roughness: 1, metalness: 0.1 }),
+    crate: new THREE.MeshStandardMaterial({ color: 0x705638, roughness: 1 }),
+    tarp: new THREE.MeshStandardMaterial({ color: 0x555b43, roughness: 1 }),
+    red: new THREE.MeshStandardMaterial({ color: 0x8f2920, roughness: 0.75 }),
+    lamp: new THREE.MeshStandardMaterial({ color: 0xd6cba0, emissive: 0x554522, roughness: 0.5 })
+  };
+  const addBox = (g, w, h, d, mat, x, y, z) => {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+    m.position.set(x, y, z); g.add(m); return m;
+  };
+  const addWheel = (g, x, z, damaged) => {
+    const tire = new THREE.Mesh(new THREE.CylinderGeometry(0.48, 0.48, 0.32, 12), paint.tire);
+    tire.rotation.z = Math.PI / 2;
+    tire.position.set(x, damaged ? 0.27 : 0.48, z);
+    if (damaged) tire.rotation.x = 0.22;
+    g.add(tire);
+    const hub = new THREE.Mesh(new THREE.CylinderGeometry(0.19, 0.19, 0.34, 10), paint.steel);
+    hub.rotation.z = Math.PI / 2; hub.position.copy(tire.position); g.add(hub);
+  };
+  const addTruck = (x, z, variant) => {
+    const g = new THREE.Group();
+    const body = variant === 1 ? paint.rust : variant === 2 ? paint.dark : paint.steel;
+    addBox(g, 1.9, 0.38, 5.9, paint.dark, 0, 0.82, 0);
+    addBox(g, 2.25, 0.68, 2.2, body, 0, 1.18, -1.65);
+    addBox(g, 2.05, 0.72, 3.0, paint.tarp, 0, 1.65, 1.25);
+    addBox(g, 2.15, 0.12, 3.1, paint.dark, 0, 1.22, 1.25);
+    [-1, 1].forEach(side => {
+      addBox(g, 0.08, 0.7, 3.05, body, side * 1.06, 1.62, 1.25);
+      for (let k = 0; k < 5; k++) addBox(g, 0.045, 0.58, 0.055, paint.rust, side * 1.11, 1.62, 0.1 + k * 0.58);
+    });
+    addBox(g, 2.1, 0.65, 0.08, body, 0, 1.6, 2.78);
+    addBox(g, 2.1, 0.65, 0.08, body, 0, 1.6, -0.28);
+    addBox(g, 1.62, 0.42, 0.045, paint.glass, 0, 1.52, -2.78);
+    [-1, 1].forEach(side => {
+      addBox(g, 0.045, 0.4, 0.55, paint.glass, side * 1.13, 1.55, -1.7);
+      addBox(g, 0.42, 0.1, 0.16, paint.lamp, side * 0.78, 1.02, -2.82);
+      addBox(g, 0.35, 0.12, 0.12, paint.red, side * 0.78, 0.92, 2.98);
+    });
+    addBox(g, 2.45, 0.16, 0.24, paint.dark, 0, 0.72, -2.93);
+    addBox(g, 2.35, 0.13, 0.22, paint.rust, 0, 0.72, 3.0);
+    if (variant !== 2) {
+      [[-0.48, 1.65, 0.6], [0.35, 1.65, 1.35], [0.25, 1.65, 2.05]].forEach(([bx, by, bz], i) => {
+        addBox(g, 0.62, 0.58, 0.62, i === 1 ? paint.tarp : paint.crate, bx, by, bz);
+        addBox(g, 0.65, 0.045, 0.045, paint.rust, bx, by + 0.08, bz);
+      });
+    } else {
+      const bent = addBox(g, 0.12, 0.42, 1.0, paint.rust, 1.1, 1.38, 1.8);
+      bent.rotation.x = -0.12;
+      addBox(g, 0.7, 0.5, 0.7, paint.crate, -0.35, 1.55, 1.2);
+    }
+    [-1, 1].forEach(side => [-2.0, 0.2, 2.25].forEach((wz, i) => addWheel(g, side * 1.2, wz, variant === 1 && side === 1 && i === 2)));
+    for (let i = 0; i < 4; i++) addBox(g, 0.22, 0.08, 0.035, paint.rust, -0.72 + i * 0.43, 1.28 + (i % 2) * 0.18, -2.78);
+    g.position.set(x, 0, z);
+    g.rotation.y = Math.PI / 2;
+    scene.add(g);
+    colliders.push({ minX: x - 3.3, maxX: x + 3.3, minZ: z - 1.65, maxZ: z + 1.65 });
+  };
+  addTruck(cx - 7.2, cz - 0.25, 0);
+  addTruck(cx, cz + 0.35, 1);
+  addTruck(cx + 7.1, cz - 0.1, 2);
+
+  const concrete = new THREE.MeshStandardMaterial({ color: 0x77766d, roughness: 1 });
+  const hazard = new THREE.MeshStandardMaterial({ color: 0xb6a05a, roughness: 1 });
+  const debris = new THREE.MeshStandardMaterial({ color: 0x4a4d49, roughness: 1 });
+  [[cx - 2.5, cz + 4.1], [cx + 2.2, cz + 4.4]].forEach(([x, z], i) => {
+    const block = new THREE.Mesh(new THREE.BoxGeometry(2.5, 0.75, 0.7), concrete);
+    block.position.set(x, 0.38, z); block.rotation.y = i ? -0.16 : 0.12; scene.add(block);
+    colliders.push({ minX: x - 1.35, maxX: x + 1.35, minZ: z - 0.45, maxZ: z + 0.45 });
+    for (let k = 0; k < 4; k++) addBox(scene, 0.18, 0.08, 0.025, hazard, x - 0.8 + k * 0.52, 0.55, z - 0.36);
+  });
+  for (let i = 0; i < 9; i++) {
+    const scrap = new THREE.Mesh(new THREE.DodecahedronGeometry(0.18 + (i % 3) * 0.08, 0), i % 2 ? paint.rust : debris);
+    scrap.position.set(cx - 9 + i * 2.2, 0.14, cz + 5.1 + (i % 3) * 0.55);
+    scrap.rotation.set(i * 0.2, i * 0.7, i * 0.15); scene.add(scrap);
+  }
+  const sign = new THREE.Group();
+  const post = new THREE.Mesh(new THREE.BoxGeometry(0.16, 2.2, 0.16), paint.dark);
+  post.position.set(0, 1.1, 0); sign.add(post);
+  const plate = new THREE.Mesh(new THREE.BoxGeometry(2.4, 0.75, 0.12), paint.rust);
+  plate.position.set(0, 2.05, 0); sign.add(plate);
+  const canvas = document.createElement('canvas'); canvas.width = 512; canvas.height = 160;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#353a36'; ctx.fillRect(0, 0, 512, 160);
+  ctx.strokeStyle = '#c4ad65'; ctx.lineWidth = 10; ctx.strokeRect(8, 8, 496, 144);
+  ctx.fillStyle = '#e4dcc0'; ctx.font = 'bold 68px monospace'; ctx.textAlign = 'center'; ctx.fillText('КОНВОЙ', 256, 102);
+  const label = new THREE.Mesh(new THREE.PlaneGeometry(2.25, 0.7), new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(canvas) }));
+  label.position.set(0, 2.05, 0.071); sign.add(label);
+  sign.position.set(cx + 12, 0, cz + 4.5); sign.rotation.y = Math.PI / 2; scene.add(sign);
+}
+buildAbandonedConvoy();
+
 // --- Зомби ---
 const zombies = [];
-function spawnZombie(ax, az) {
+function spawnZombie(ax, az, forcedType) {
+  const roll = Math.random();
+  const type = forcedType || (roll < 0.55 ? 'walker' : roll < 0.76 ? 'runner' : roll < 0.91 ? 'brute' : 'toxic');
   const g = new THREE.Group();
   const M = (c, r) => new THREE.MeshStandardMaterial({ color: c, roughness: r || 0.9, flatShading: true });
   const part = (w, h, d, mat, x, y, z, parent) => { const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat); m.position.set(x, y, z); (parent || g).add(m); return m; };
   const shirts = [0x3a4a6a, 0x6a3a3a, 0x4a5a3a, 0x55504a, 0x3a3a55];
   const skin = new THREE.Color(0x6b8f5a).offsetHSL((Math.random() - 0.5) * 0.05, 0, (Math.random() - 0.5) * 0.08);
   const skinM = M(skin), shirtM = M(shirts[Math.floor(Math.random() * shirts.length)]), pantsM = M(0x2a2a2a);
+  if (type === 'runner') { skinM.color.setHex(0x78916a); shirtM.color.setHex(0x5a5145); pantsM.color.setHex(0x282b2b); }
+  if (type === 'brute') { skinM.color.setHex(0x777d59); shirtM.color.setHex(0x343b32); pantsM.color.setHex(0x252723); }
+  if (type === 'toxic') { skinM.color.setHex(0x9ab64b); shirtM.color.setHex(0x354a2b); pantsM.color.setHex(0x293528); }
   const body = part(0.7, 0.95, 0.38, shirtM, 0, 1.45, 0);
   part(0.72, 0.16, 0.4, M(0x1f2a1f), 0, 1.0, 0);                       // ремень
   part(0.2, 0.3, 0.02, skinM, 0.18, 1.3, 0.2);                           // дыра в рубашке
@@ -431,12 +799,27 @@ function spawnZombie(ax, az) {
     g.add(p); return p;
   };
   const parts = { body, head, armL: arm(-1), armR: arm(1), legL: leg(-1), legR: leg(1) };
+  if (type === 'runner') {
+    body.scale.set(0.78, 0.94, 0.82); head.scale.set(0.9, 0.92, 0.9);
+    parts.armL.rotation.z = -0.12; parts.armR.rotation.z = 0.12;
+  } else if (type === 'brute') {
+    body.scale.set(1.48, 1.18, 1.35); head.scale.set(1.12, 1.08, 1.12);
+    parts.armL.scale.set(1.35, 1.18, 1.25); parts.armR.scale.set(1.35, 1.18, 1.25);
+    parts.legL.scale.set(1.25, 1.05, 1.2); parts.legR.scale.set(1.25, 1.05, 1.2);
+    part(0.88, 0.16, 0.48, M(0x292d28), 0, 1.9, 0.02); // толстая защита плеч
+  } else if (type === 'toxic') {
+    part(0.2, 0.18, 0.2, M(0xb5c94c), -0.28, 1.8, 0.12);
+    part(0.18, 0.22, 0.18, M(0x879d39), 0.3, 1.5, 0.18);
+    part(0.16, 0.16, 0.16, M(0xc6d75a), 0.08, 2.35, 0.16);
+    part(0.48, 0.06, 0.08, M(0x5c7a27), 0, 1.04, 0.23);
+  }
   parts.armL.rotation.x = parts.armR.rotation.x = -1.35;
   const a = Math.random() * Math.PI * 2, r = 25 + Math.random() * 40;
   if (ax !== undefined) g.position.set(ax, 0, az); else g.position.set(Math.cos(a) * r, 0, Math.sin(a) * r);
   resolveCollisions(g.position, 0.6);
   scene.add(g);
-  const zo = { mesh: g, hp: 3, cooldown: 0, parts, phase: Math.random() * 6, id: zombieUid++, mv: 0 };
+  const stats = { walker: { hp: 3, speed: 2, damage: 10 }, runner: { hp: 2, speed: 4.0, damage: 8 }, brute: { hp: 8, speed: 1.25, damage: 20 }, toxic: { hp: 4, speed: 2.25, damage: 12 } }[type] || { hp: 3, speed: 2, damage: 10 };
+  const zo = { mesh: g, hp: stats.hp, maxHp: stats.hp, cooldown: 0, parts, phase: Math.random() * 6, id: zombieUid++, mv: 0, type, speed: stats.speed, damage: stats.damage };
   zombies.push(zo);
   return zo;
 }
@@ -3553,7 +3936,7 @@ function renderMainMenu(view) {
       return `<div style="display:flex;align-items:center;justify-content:center;gap:8px;margin:6px"><div style="width:520px;max-width:55vw;padding:10px 14px;border:2px solid #4a5a3a;border-radius:8px;background:rgba(20,26,18,.85);text-align:left">Слот ${i}: ${d ? slotInfo(d) : '<span style="opacity:.6">пусто</span>'}</div>${d ? Bs('Загрузить', 'slot:' + i) + Bs('Удалить', 'del:' + i) : ''}</div>`;
     }).join('') + B('Назад', 'back');
   }
-  mainMenu.innerHTML = `<div style="text-align:center"><div style="font-size:72px;letter-spacing:10px;color:#c8e07a;text-shadow:0 4px 12px #000">DEADZONE</div><div style="opacity:.8;margin-bottom:24px">Постапокалиптическое выживание</div>${body}</div><div style="position:absolute;right:14px;bottom:10px;opacity:.6;font-size:14px">версия 1.1.5 · сохраняться можно на кровати</div>`;
+  mainMenu.innerHTML = `<div style="text-align:center"><div style="font-size:72px;letter-spacing:10px;color:#c8e07a;text-shadow:0 4px 12px #000">DEADZONE</div><div style="opacity:.8;margin-bottom:24px">Постапокалиптическое выживание</div>${body}</div><div style="position:absolute;right:14px;bottom:10px;opacity:.6;font-size:14px">версия 1.1.7 · сохраняться можно на кровати</div>`;
 }
 function startGame(isNew, lock) {
   gameStarted = true; mainMenu.style.display = 'none';
@@ -3624,11 +4007,23 @@ function bootGame() { // автозапуск после перезагрузк�
 }
 
 // --- Мультиплеер: кооператив по коду комнаты (WebRTC через PeerJS, свой сервер не нужен) ---
-const net = { active: false, role: null, peer: null, hostConn: null, conns: new Map(), id: 'p0', name: 'Игрок', code: '', nextId: 1, players: new Map(), tPlayers: 0, tZombies: 0, tTime: 0, tHud: 0, status: '', lastChat: null };
+const net = { active: false, joining: false, joinTimer: null, role: null, peer: null, hostConn: null, conns: new Map(), id: 'p0', name: 'Игрок', code: '', nextId: 1, players: new Map(), tPlayers: 0, tZombies: 0, tTime: 0, tHud: 0, status: '', lastChat: null };
 let mpNameVal = 'Игрок', mpCodeVal = '', chatOpen = false;
 const mpBoot = bootInfo && bootInfo.mp ? bootInfo.mp : null;      // после перезагрузки: куда подключаться
 const sanitizeName = n => (String(n || '').trim().slice(0, 12)) || 'Игрок';
 function setMpStatus(t) { net.status = t; const el = document.getElementById('mpStatus'); if (el) el.textContent = t; }
+function clearJoinTimer() { if (net.joinTimer) { clearTimeout(net.joinTimer); net.joinTimer = null; } }
+function failJoin(message) {
+  if (!net.joining || net.active) return;
+  net.joining = false;
+  clearJoinTimer();
+  const peer = net.peer;
+  net.peer = null; net.hostConn = null;
+  try { if (peer) peer.destroy(); } catch (e) { /* соединение уже закрыто */ }
+  mainMenu.style.display = 'flex';
+  renderMainMenu('mp');
+  setMpStatus(message);
+}
 function netSendTo(conn, msg) { try { if (conn && conn.open) conn.send(msg); } catch (e) { /* связь оборвалась */ } }
 function netBroadcast(msg, exceptConn) { net.conns.forEach(c => { if (c !== exceptConn) netSendTo(c, msg); }); }
 
@@ -3750,10 +4145,14 @@ function clientZombie(z, dt) {
 }
 function applyZombieSnapshot(list) {
   const seen = new Set();
-  for (const [id, x, zz, ry, hp, mv] of list) {
+  for (const [id, x, zz, ry, hp, mv, type] of list) {
     seen.add(id);
     let z = zombies.find(q => q.id === id);
-    if (!z) { z = spawnZombie(x, zz); z.id = id; }
+    const netType = type || 'walker';
+    if (z && z.type !== netType) {
+      const index = zombies.indexOf(z); scene.remove(z.mesh); zombies.splice(index, 1); z = null;
+    }
+    if (!z) { z = spawnZombie(x, zz, netType); z.id = id; }
     z.tx = x; z.tz = zz; z.try = ry; z.hp = hp; z.mv = mv;
   }
   for (let i = zombies.length - 1; i >= 0; i--) {
@@ -3790,7 +4189,8 @@ function handleHostMsg(conn, m) {
 }
 function handleClientMsg(m) {
   if (m.t === 'welcome') {
-    if (m.seed !== WORLD_SEED) { setMpStatus('Мир не совпал, попробуй подключиться ещё раз'); return; }
+    if (m.seed !== WORLD_SEED) { failJoin('Мир не совпал. Попробуй подключиться ещё раз'); return; }
+    clearJoinTimer(); net.joining = false;
     net.id = m.id; net.role = 'client'; net.active = true;
     startGame(true, false);
     gameHour = m.hour; day = m.day;
@@ -3798,7 +4198,7 @@ function handleClientMsg(m) {
     m.players.forEach(pl => { if (pl.id !== net.id) upsertPlayer(pl.id, pl.name); });
     notify('Подключено! Enter - чат. Мир общий: зомби и игроки, лут пока у каждого свой');
   }
-  else if (m.t === 'full') setMpStatus('В комнате нет мест (максимум 4 игрока)');
+  else if (m.t === 'full') failJoin('В комнате нет мест (максимум 4 игрока)');
   else if (m.t === 'pl') {
     const ids = new Set();
     m.list.forEach(e => { if (e.id === net.id) return; ids.add(e.id); const p = upsertPlayer(e.id, e.name); p.x = e.x; p.y = e.y; p.z = e.z; p.yaw = e.yaw; p.w = e.w; p.mv = e.mv; p.hp = e.hp; });
@@ -3863,16 +4263,22 @@ function peekRoom(code, name) { // сначала узнаём зерно мир
 }
 function joinRoom(code, name, auto) {
   net.name = sanitizeName(name); net.code = code;
+  clearJoinTimer(); net.joining = true;
   setMpStatus('Подключаюсь...');
-  const peer = new window.Peer();
+  let peer;
+  try { peer = new window.Peer(); }
+  catch (err) { failJoin('Не удалось запустить сетевое соединение'); return; }
   net.peer = peer;
-  peer.on('error', err => { if (!net.active) { setMpStatus('Не удалось подключиться: ' + err.type); mainMenu.style.display = 'flex'; renderMainMenu('mp'); } });
+  net.joinTimer = setTimeout(() => failJoin('Комната не ответила за 20 секунд. Проверь код и интернет'), 20000);
+  peer.on('error', err => { if (net.joining && !net.active) failJoin('Не удалось подключиться: ' + (err.type || 'ошибка сети')); });
   peer.on('open', () => {
+    if (!net.joining) return;
     const conn = peer.connect('dz-' + code, { reliable: true, serialization: 'json' });
     net.hostConn = conn;
-    conn.on('open', () => conn.send({ t: 'hello', name: net.name }));
+    conn.on('open', () => { if (net.joining) conn.send({ t: 'hello', name: net.name }); });
     conn.on('data', handleClientMsg);
-    conn.on('close', onHostLost);
+    conn.on('error', err => { if (net.joining && !net.active) failJoin('Ошибка связи с комнатой: ' + (err.type || 'соединение')); });
+    conn.on('close', () => { if (net.active) onHostLost(); else failJoin('Комната закрыла соединение. Проверь код и попробуй ещё раз'); });
   });
 }
 
@@ -3889,7 +4295,7 @@ function netTick(dt) {
     }
     if (net.tZombies >= 0.1) {
       net.tZombies = 0;
-      netBroadcast({ t: 'zs', list: zombies.map(z => [z.id, +z.mesh.position.x.toFixed(2), +z.mesh.position.z.toFixed(2), +z.mesh.rotation.y.toFixed(2), z.hp, z.mv ? 1 : 0]) });
+      netBroadcast({ t: 'zs', list: zombies.map(z => [z.id, +z.mesh.position.x.toFixed(2), +z.mesh.position.z.toFixed(2), +z.mesh.rotation.y.toFixed(2), z.hp, z.mv ? 1 : 0, z.type || 'walker']) });
     }
     if (net.tTime >= 2) { net.tTime = 0; netBroadcast({ t: 'time', hour: gameHour, day }); }
   } else if (net.role === 'client' && net.hostConn && net.tPlayers >= 0.08) {
@@ -4504,15 +4910,15 @@ function loop() {
     z.mv = chase ? 1 : 0;
     if (chase) {
       to.normalize();
-      z.mesh.position.addScaledVector(to, (2 + (1 - daylight) * 1.0) * dt); // ночью быстрее
+      z.mesh.position.addScaledVector(to, ((z.speed || 2) + (1 - daylight) * (z.type === 'runner' ? 1.5 : 1.0)) * dt); // ночью быстрее
       z.mesh.rotation.y = Math.atan2(to.x, to.z);
       resolveCollisions(z.mesh.position, 0.6);
     }
     animateZombie(z, chase, dt);
     z.cooldown -= dt;
-    if (dist <= 1.5 && z.cooldown <= 0 && tgt.y < 2.9) {
-      if (tgt.remote) { netSendTo(net.conns.get(tgt.remote.id), { t: 'hurt', d: 10 }); z.cooldown = 1; } // укус другого игрока
-      else if (health > 0 && (!menuOpen || net.active)) { health -= 10; z.cooldown = 1; }
+    if (dist <= (z.type === 'brute' ? 1.8 : 1.5) && z.cooldown <= 0 && tgt.y < 2.9) {
+      if (tgt.remote) { netSendTo(net.conns.get(tgt.remote.id), { t: 'hurt', d: z.damage || 10 }); z.cooldown = z.type === 'runner' ? 0.8 : 1.15; } // укус другого игрока
+      else if (health > 0 && (!menuOpen || net.active)) { health -= z.damage || 10; z.cooldown = z.type === 'runner' ? 0.8 : 1.15; }
     }
   }
 
