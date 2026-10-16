@@ -357,6 +357,72 @@ function buildHouse(x, z, st) {
   }
 }
 
+// --- Декор заброшенных домов: мусор, обломки, доски и сорняки ---
+const houseJunkMats = [
+  new THREE.MeshStandardMaterial({ color: 0x514638, roughness: 1 }),
+  new THREE.MeshStandardMaterial({ color: 0x71634e, roughness: 1 }),
+  new THREE.MeshStandardMaterial({ color: 0x45494a, roughness: 1, metalness: 0.25 }),
+  new THREE.MeshStandardMaterial({ color: 0x343936, roughness: 1 })
+];
+const houseJunkGeos = [
+  new THREE.DodecahedronGeometry(0.34, 0),
+  new THREE.DodecahedronGeometry(0.22, 0),
+  new THREE.BoxGeometry(0.9, 0.08, 0.16),
+  new THREE.BoxGeometry(0.65, 0.08, 0.12)
+];
+const weedMat = new THREE.MeshStandardMaterial({ color: 0x435535, roughness: 1, flatShading: true });
+const weedGeo = new THREE.ConeGeometry(0.13, 0.48, 5);
+
+function decorateAbandonedHouse(x, z, style) {
+  // Точки по бокам и сзади дома; перед дверью оставляем проход.
+  const spots = [
+    [-5.0, -2.8], [5.0, -2.6], [-5.0, 2.2], [5.0, 1.8],
+    [-3.8, -5.0], [3.8, -5.0], [-5.4, 4.8], [5.3, 4.7]
+  ];
+  const count = 4 + Math.floor(Math.random() * 3);
+  for (let i = 0; i < count; i++) {
+    const base = spots[(i + style * 2) % spots.length];
+    const px = x + base[0] + (Math.random() - 0.5) * 1.0;
+    const pz = z + base[1] + (Math.random() - 0.5) * 0.8;
+    // Не ставим декор на две главные дороги и прямо перед дверью.
+    if (Math.abs(px) < 8 || Math.abs(pz) < 8) continue;
+    if (Math.abs(px - x) < 1.8 && pz > z + 3.2) continue;
+
+    if (Math.random() < 0.42) {
+      const crate = box(0.58, 0.52, 0.58, style === 1 ? 0x55402b : 0x67513a, px, 0.26, pz, false);
+      crate.rotation.y = Math.random() * 1.2;
+      const slat = box(0.62, 0.06, 0.07, 0x392d20, px, 0.32, pz + 0.3, false);
+      slat.rotation.y = crate.rotation.y;
+    } else {
+      const geoIndex = Math.random() < 0.55 ? 0 : 1;
+      const rubble = new THREE.Mesh(houseJunkGeos[geoIndex], houseJunkMats[Math.floor(Math.random() * houseJunkMats.length)]);
+      rubble.position.set(px, geoIndex === 0 ? 0.2 : 0.12, pz);
+      rubble.scale.set(1 + Math.random(), 0.65 + Math.random() * 0.4, 0.8 + Math.random() * 0.7);
+      rubble.rotation.set(Math.random() * 0.2, Math.random() * 6, Math.random() * 0.15);
+      scene.add(rubble);
+    }
+
+    if (i % 2 === 0) {
+      const weed = new THREE.Mesh(weedGeo, weedMat);
+      weed.position.set(px + (Math.random() - 0.5) * 0.7, 0.22, pz + (Math.random() - 0.5) * 0.7);
+      weed.rotation.y = Math.random() * 6;
+      scene.add(weed);
+    }
+  }
+
+  // Упавшие доски по бокам дома, не в дверном проёме.
+  for (let i = 0; i < 2; i++) {
+    const side = i === 0 ? -1 : 1;
+    const px = x + side * (5.1 + Math.random() * 0.4);
+    const pz = z - 0.8 + (Math.random() - 0.5) * 2.4;
+    if (Math.abs(px) < 8 || Math.abs(pz) < 8) continue;
+    const plank = new THREE.Mesh(houseJunkGeos[2 + i], houseJunkMats[i]);
+    plank.position.set(px, 0.08, pz);
+    plank.rotation.set(0, Math.random() * 2.8, (Math.random() - 0.5) * 0.12);
+    scene.add(plank);
+  }
+}
+
 for (let i = 0; i < 8; i++) {
   const x = (Math.random() - 0.5) * 200, z = (Math.random() - 0.5) * 200;
   if ((Math.abs(x) < 15 && Math.abs(z) < 15) || Math.abs(x) < 8 || Math.abs(z) < 8) continue;
@@ -370,6 +436,7 @@ for (let i = 0; i < 8; i++) {
       trees.splice(k, 1);
     }
   }
+  decorateAbandonedHouse(x, z, i % 3);
   housePositions.push({ x, z });
 }
 
