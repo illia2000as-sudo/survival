@@ -373,13 +373,60 @@ for (let i = 0; i < 8; i++) {
   housePositions.push({ x, z });
 }
 
-// --- Дороги, пятна травы, камни и кусты ---
+// --- Дороги, обочины, повреждения асфальта, пятна травы, камни и кусты ---
 {
-  const roadMat = new THREE.MeshStandardMaterial({ color: 0x6f6350, roughness: 1, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
+  // Сохраняем расположение и ширину дорог для старой карты и транспорта.
+  const roadMat = new THREE.MeshStandardMaterial({ color: 0x454849, roughness: 1, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
+  const shoulderMat = new THREE.MeshStandardMaterial({ color: 0x777568, roughness: 1, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 });
+  const edgeMat = new THREE.MeshStandardMaterial({ color: 0x8b805e, roughness: 1, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 });
+  const markMat = new THREE.MeshStandardMaterial({ color: 0xb3a36e, roughness: 1, transparent: true, opacity: 0.48, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 });
+  const crackMat = new THREE.MeshStandardMaterial({ color: 0x292d2e, roughness: 1, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 });
   [[400, 7], [7, 400]].forEach(([w, d]) => {
     const r = new THREE.Mesh(new THREE.PlaneGeometry(w, d), roadMat);
     r.rotation.x = -Math.PI / 2; r.position.y = 0.02; scene.add(r);
   });
+
+  // Потёртые обочины и остатки краевой разметки.
+  [[400, 0.7, 0, -3.85], [400, 0.7, 0, 3.85], [0.7, 400, -3.85, 0], [0.7, 400, 3.85, 0]].forEach(([w, d, x, z]) => {
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(w, d), shoulderMat);
+    m.rotation.x = -Math.PI / 2; m.position.set(x, 0.024, z); scene.add(m);
+  });
+  [[400, 0.08, 0, -3.18], [400, 0.08, 0, 3.18], [0.08, 400, -3.18, 0], [0.08, 400, 3.18, 0]].forEach(([w, d, x, z]) => {
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(w, d), edgeMat);
+    m.rotation.x = -Math.PI / 2; m.position.set(x, 0.029, z); scene.add(m);
+  });
+
+  // Выцветшая прерывистая разметка.
+  for (let p = -190; p <= 190; p += 10) {
+    if (Math.abs(p) < 8) continue;
+    const a = new THREE.Mesh(new THREE.PlaneGeometry(4.2, 0.12), markMat);
+    a.rotation.x = -Math.PI / 2; a.position.set(p, 0.032, 0); scene.add(a);
+    const b = new THREE.Mesh(new THREE.PlaneGeometry(0.12, 4.2), markMat);
+    b.rotation.x = -Math.PI / 2; b.position.set(0, 0.032, p); scene.add(b);
+  }
+
+  // Тёмные заплаты и тонкие трещины: чисто визуальные детали без коллайдеров.
+  const patchMats = [
+    new THREE.MeshStandardMaterial({ color: 0x353a3b, roughness: 1, transparent: true, opacity: 0.72, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }),
+    new THREE.MeshStandardMaterial({ color: 0x3d4142, roughness: 1, transparent: true, opacity: 0.72, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 })
+  ];
+  for (let i = 0; i < 34; i++) {
+    const horizontal = Math.random() < 0.5;
+    const p = (Math.random() - 0.5) * 370;
+    const across = (Math.random() - 0.5) * 4.8;
+    const patch = new THREE.Mesh(new THREE.PlaneGeometry(0.45 + Math.random() * 1.6, 0.22 + Math.random() * 0.7), patchMats[i % patchMats.length]);
+    patch.rotation.x = -Math.PI / 2; patch.rotation.z = (Math.random() - 0.5) * 0.12;
+    patch.position.set(horizontal ? p : across, 0.031, horizontal ? across : p); scene.add(patch);
+  }
+  for (let i = 0; i < 58; i++) {
+    const horizontal = Math.random() < 0.5;
+    const p = (Math.random() - 0.5) * 380;
+    const across = (Math.random() - 0.5) * 5.6;
+    const crack = new THREE.Mesh(new THREE.PlaneGeometry(0.45 + Math.random() * 1.1, 0.025 + Math.random() * 0.035), crackMat);
+    crack.rotation.x = -Math.PI / 2; crack.rotation.z = (Math.random() - 0.5) * 0.9;
+    crack.position.set(horizontal ? p : across, 0.034, horizontal ? across : p); scene.add(crack);
+  }
+
   const greens = [0x566a41, 0x5f7249, 0x4f6339, 0x66784c];
   for (let i = 0; i < 90; i++) {
     const mt = new THREE.MeshStandardMaterial({ color: greens[i % 4], roughness: 1, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1, depthWrite: false });
