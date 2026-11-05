@@ -1,6 +1,12 @@
 <!DOCTYPE html>
 <html>
+<head>
+<meta charset="utf-8">
+<title>DeadZone</title>
+</head>
 <body style="margin:0; overflow:hidden">
+<!-- PeerJS нужен для мультиплеера (создаёт глобальный window.Peer) -->
+<script src="./node_modules/peerjs/dist/peerjs.min.js"></script>
 <script type="importmap">
 { "imports": { "three": "./node_modules/three/build/three.module.js" } }
 </script>

@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { initCutscenes } from './scenes/index.js'; // вступление и финал (папка scenes)
 
 // --- Сохранения: мир строится от числа (зерна), поэтому его можно воссоздать точно таким же ---
 let bootInfo = null;
@@ -15,7 +16,100 @@ const _realRandom = Math.random;
   };
 }
 let zombieUid = 0;
+
+// --- Безопасное удаление из массива: splice(indexOf(x), 1) при indexOf = -1 удаляет ПОСЛЕДНИЙ элемент массива ---
+function removeFrom(arr, item) { const i = arr.indexOf(item); if (i >= 0) arr.splice(i, 1); return i >= 0; }
+// --- Освобождение памяти видеокарты: у каждого зомби свои геометрии и материалы ---
+function disposeObject(o) { // общие (userData.shared) материалы и геометрии не трогаем: они нужны остальным
+  o.traverse(c => {
+    if (c.geometry && !c.geometry.userData?.shared) c.geometry.dispose();
+    const m = c.material;
+    if (m) (Array.isArray(m) ? m : [m]).forEach(x => { if (!x.userData?.shared) x.dispose(); });
+  });
+}
 let uidCounter = 0, initDone = false, gameStarted = false, currentSlot = 0, day = 1;
+
+// --- Рельеф ---
+// Внутри квадрата ±FLAT_HALF (дороги, дома, лут, машины) земля ровная, как раньше. За ним начинается дикая местность:
+// холмы растут с расстоянием, а у края мира поднимаются горами, через которые не пройти.
+// Высота считается из зерна мира без Math.random, поэтому у всех игроков комнаты рельеф одинаковый.
+const FLAT_HALF = 200;    // половина стороны ровной зоны
+const WORLD_HALF = 700;   // половина стороны всего мира
+const WORLD_WALK = 650;   // дальше игрок не пройдёт (горы)
+const _nSeed = (WORLD_SEED ^ 0x9E3779B9) | 0;
+function _hash2(ix, iz) {
+  let h = (Math.imul(ix, 374761393) + Math.imul(iz, 668265263) + _nSeed) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+function _vnoise(x, z) { // гладкий шум 0..1
+  const ix = Math.floor(x), iz = Math.floor(z), fx = x - ix, fz = z - iz;
+  const u = fx * fx * (3 - 2 * fx), v = fz * fz * (3 - 2 * fz);
+  const a = _hash2(ix, iz), b = _hash2(ix + 1, iz), c = _hash2(ix, iz + 1), d = _hash2(ix + 1, iz + 1);
+  return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
+}
+function rawTerrainY(x, z) { // высота земли без озёр
+  const edge = Math.max(Math.abs(x), Math.abs(z));
+  if (edge <= FLAT_HALF) return 0;
+  const d = edge - FLAT_HALF;
+  const k = Math.min(1, d / 80), ramp = k * k * (3 - 2 * k);          // плавный подъём от границы зоны
+  let n = 0, amp = 1, f = 1 / 240, sum = 0;
+  for (let o = 0; o < 4; o++) { n += _vnoise(x * f, z * f) * amp; sum += amp; amp *= 0.5; f *= 2.1; }
+  n /= sum;
+  let h = ramp * n * n * (24 + 36 * Math.min(1, d / 300));            // холмы, дальше от центра выше
+  const round = Math.pow(Math.pow(Math.abs(x), 8) + Math.pow(Math.abs(z), 8), 0.125); // скруглённый край: горы без шва по диагонали
+  const w = Math.max(0, (round - 500) / 200);
+  return h + w * w * 55;                                              // стена гор у края мира
+}
+
+// --- Озёра (1.9.0): впадины в диких землях за ровной зоной ---
+// Места и размеры считаются из зерна мира без Math.random, поэтому у всех игроков комнаты озёра одинаковые, а мир из старых сохранений не сдвигается.
+const WATER_Y = -0.45;           // уровень воды
+const SWIM_Y = WATER_Y - 1.05;   // глубже ноги не опускаются: игрок плывёт у поверхности
+const LAKE_BEACH = 1.6;          // пляж тянется от берега (q = 1) до q = 1.6
+const LAKES = [];                // { x, z, r, asp, rot, nx, nz, depth, reach, reach2 }
+function lakeQ(l, x, z) {        // < 1 - вода, 1 - берег, дальше - пляж; берег неровный
+  const dx = x - l.x, dz = z - l.z, c = Math.cos(l.rot), s = Math.sin(l.rot);
+  const u = (dx * c + dz * s) / (l.r * l.asp), v = (-dx * s + dz * c) / l.r;
+  return Math.hypot(u, v) / (1 + 0.28 * (_vnoise(x / 22 + l.nx, z / 22 + l.nz) * 2 - 1));
+}
+(function pickLakes() {
+  for (let i = 0; i < 700 && LAKES.length < 7; i++) {
+    const x = (_hash2(i * 3 + 101, 7) * 2 - 1) * 430, z = (_hash2(i * 5 + 7, 211) * 2 - 1) * 430;
+    const pond = i % 3 === 2, r = pond ? 9 + _hash2(i, 977) * 6 : 20 + _hash2(i, 977) * 17;
+    const asp = 0.75 + _hash2(i, 31) * 0.55, rot = _hash2(i, 57) * Math.PI;
+    const reach = r * Math.max(asp, 1) * LAKE_BEACH * 1.4;
+    const edge = Math.max(Math.abs(x), Math.abs(z)), round = Math.pow(Math.pow(Math.abs(x), 8) + Math.pow(Math.abs(z), 8), 0.125);
+    if (edge - reach < FLAT_HALF + 12 || round + reach > 470) continue;      // не заходит в ровную зону и в горы
+    if (rawTerrainY(x, z) > 7) continue;
+    let steep = false; for (let k = 0; k < 8; k++) { const an = k / 8 * Math.PI * 2; if (rawTerrainY(x + Math.cos(an) * reach * 0.7, z + Math.sin(an) * reach * 0.7) > 16) steep = true; }
+    if (steep) continue;                                                       // на крутых холмах озёра не копаем
+    if (LAKES.some(o => Math.hypot(o.x - x, o.z - z) < (o.reach + reach) * 0.8)) continue;
+    LAKES.push({ x, z, r, asp, rot, nx: _hash2(i, 401) * 100, nz: _hash2(i, 503) * 100, depth: 2.0 + r * 0.06, reach, reach2: reach * reach });
+  }
+})();
+function terrainY(x, z) { // высота земли в точке (с озёрами)
+  const h = rawTerrainY(x, z);
+  if (!LAKES.length || Math.max(Math.abs(x), Math.abs(z)) <= FLAT_HALF) return h;
+  let out = h;
+  for (const l of LAKES) {
+    const dx = x - l.x, dz = z - l.z; if (dx * dx + dz * dz > l.reach2) continue;
+    const q = lakeQ(l, x, z); if (q >= LAKE_BEACH) continue;
+    let v;
+    if (q >= 1) { const t = (q - 1) / (LAKE_BEACH - 1), k = t * t * (3 - 2 * t); v = WATER_Y + (h - WATER_Y) * k; }
+    else v = WATER_Y - l.depth * (1 - q * q);
+    if (v < out) out = v;
+  }
+  return out;
+}
+function lakeShore(x, z) { // наименьшее q среди озёр (для песка и ила на земле, тростника)
+  let m = 99;
+  for (const l of LAKES) { const dx = x - l.x, dz = z - l.z; if (dx * dx + dz * dz > l.reach2) continue; const q = lakeQ(l, x, z); if (q < m) m = q; }
+  return m;
+}
+// Деревья и валуны дикой местности: коллайдеры лежат в сетке, чтобы проверять только соседние клетки
+const WILD_CELL = 24, wildGrid = new Map();
+const wildKey = (ix, iz) => ix * 4096 + iz;
 
 // --- Сцена ---
 const scene = new THREE.Scene();
@@ -97,15 +191,40 @@ const groundTex = (() => { // пиксельная трава
   for (let i = 0; i < 32; i++) for (let j = 0; j < 32; j++) { x.fillStyle = cols[Math.floor(Math.random() * cols.length)]; x.fillRect(i, j, 1, 1); }
   for (let k = 0; k < 24; k++) { x.fillStyle = 'rgba(40,32,18,.22)'; x.fillRect(Math.floor(Math.random() * 32), Math.floor(Math.random() * 32), 2, 1); }
   const t = new THREE.CanvasTexture(c);
-  t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(100, 100);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(WORLD_HALF / 2, WORLD_HALF / 2); // клетка 4 м, как раньше
   t.magFilter = THREE.NearestFilter; t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4;
   return t;
 })();
+// Земля: сетка 3,3 м, высоты из terrainY; цвет вершин: трава внизу, серая порода на крутых склонах и вершинах
+const groundGeo = new THREE.PlaneGeometry(WORLD_HALF * 2, WORLD_HALF * 2, 420, 420);
+groundGeo.rotateX(-Math.PI / 2);
+{
+  const pos = groundGeo.attributes.position, colors = new Float32Array(pos.count * 3), shore = new Float32Array(pos.count * 2); // shore: песок, ил
+  const rockCol = new THREE.Color(0.58, 0.56, 0.54), c = new THREE.Color();
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i), z = pos.getZ(i), h = terrainY(x, z);
+    pos.setY(i, h);
+    const slope = Math.hypot(terrainY(x + 3, z) - h, terrainY(x, z + 3) - h) / 3;
+    const rocky = Math.min(1, Math.max(0, (slope - 0.3) / 0.5) + Math.max(0, (h - 45) / 40));
+    c.setRGB(1, 1, 1).lerp(rockCol, rocky).multiplyScalar(0.94 + _vnoise(x / 35, z / 35) * 0.12); // светлые и тёмные пятна
+    colors[i * 3] = c.r; colors[i * 3 + 1] = c.g; colors[i * 3 + 2] = c.b;
+    if (LAKES.length) { const q = lakeShore(x, z); shore[i * 2] = q < 1.1 ? 1 : Math.max(0, (LAKE_BEACH - q) / (LAKE_BEACH - 1.1)); shore[i * 2 + 1] = q < 1 ? Math.min(1, (1 - q) / 0.4) : 0; }
+  }
+  groundGeo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  groundGeo.setAttribute('shore', new THREE.BufferAttribute(shore, 2));
+  groundGeo.computeVertexNormals();
+}
 const ground = new THREE.Mesh(
-  new THREE.PlaneGeometry(400, 400),
-  new THREE.MeshStandardMaterial({ color: 0xffffff, map: groundTex, roughness: 1 })
+  groundGeo,
+  new THREE.MeshStandardMaterial({ color: 0xffffff, map: groundTex, roughness: 1, vertexColors: true })
 );
-ground.rotation.x = -Math.PI / 2;
+ground.material.onBeforeCompile = sh => { // песок на пляжах и тёмный ил на дне озёр поверх травяной текстуры
+  sh.vertexShader = 'attribute vec2 shore;\nvarying vec2 vShore;\n' + sh.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>\nvShore = shore;');
+  sh.fragmentShader = 'varying vec2 vShore;\n' + sh.fragmentShader.replace('#include <color_fragment>', `#include <color_fragment>
+    float gl = dot(diffuseColor.rgb, vec3(0.33));
+    diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.74, 0.66, 0.47) * (0.7 + gl * 1.1), vShore.x * 0.92);
+    diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.20, 0.22, 0.17) * (0.7 + gl * 0.8), vShore.y);`);
+};
 scene.add(ground);
 
 // --- Небо: градиент, солнце, звёзды ночью, облака ---
@@ -181,10 +300,9 @@ const box = (w, h, d, color, x, y, z, solid = false) => {
   return m;
 };
 
-// Выталкивает позицию из всех препятствий (r - радиус тела)
-function resolveCollisions(pos, r) {
-  const feet = pos.y !== undefined ? pos.y - 1.7 : 0; // высота ног: стоя на крыше стены ниже ног не мешают
-  for (const c of colliders) {
+// Выталкивает позицию из препятствий списка (r - радиус тела)
+function resolveAgainst(list, pos, r, feet) {
+  for (const c of list) {
     if (c.top !== undefined && feet > c.top - 0.3) continue;
     const px = Math.max(c.minX, Math.min(pos.x, c.maxX));
     const pz = Math.max(c.minZ, Math.min(pos.z, c.maxZ));
@@ -203,6 +321,18 @@ function resolveCollisions(pos, r) {
       else if (m === right) pos.x = c.maxX + r;
       else if (m === up) pos.z = c.minZ - r;
       else pos.z = c.maxZ + r;
+    }
+  }
+}
+// Выталкивает позицию из всех препятствий (r - радиус тела)
+function resolveCollisions(pos, r) {
+  const feet = pos.y !== undefined ? pos.y - 1.7 : 0; // высота ног: стоя на крыше стены ниже ног не мешают
+  resolveAgainst(colliders, pos, r, feet);
+  if (Math.abs(pos.x) > FLAT_HALF - 4 || Math.abs(pos.z) > FLAT_HALF - 4) { // дикая местность: смотрим только соседние клетки
+    const ix = Math.floor(pos.x / WILD_CELL), iz = Math.floor(pos.z / WILD_CELL);
+    for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) {
+      const l = wildGrid.get(wildKey(ix + a, iz + b));
+      if (l) resolveAgainst(l, pos, r, feet);
     }
   }
 }
@@ -230,131 +360,340 @@ for (let i = 0; i < 150; i++) {
 }
 
 // --- Дома: стены с окнами, дверь с южной стороны (+Z), двускатная крыша, крыльцо, мебель ---
+// Каждый дом собирается из сотен коробок, но склеивается в 4 меша (стены, крыша, мелочи, стёкла): видеокарте почти не тяжело.
+// Повреждения, ставни, цвета считаются из координат дома, а не через Math.random: мир из сохранений не сдвигается.
 const housePositions = [];
 const HOUSE_STYLES = [
-  { wall: 0xd8cdb4, trim: 0x5a4632, roof: 0x8a3b2e, door: 0x5a3a20, base: 0x7d7b75, floor: 0x8a6a45 }, // светлый дом с красной крышей
-  { wall: 0x8a6a45, trim: 0x3f2c1a, roof: 0x3b3f44, door: 0x3a2614, base: 0x6a645c, floor: 0x7a5a38 }, // деревянный сруб
-  { wall: 0xa9b0ad, trim: 0x4a4f50, roof: 0x4d6a46, door: 0x6a4a2a, base: 0x77797a, floor: 0x806343 }, // серый дом с зелёной крышей
+  { wall: 0xd8cdb4, trim: 0x5a4632, roof: 0x8a3b2e, door: 0x5a3a20, base: 0x7d7b75, floor: 0x8a6a45, accent: 0x3f5f7a }, // светлый дом с красной крышей
+  { wall: 0x8a6a45, trim: 0x3f2c1a, roof: 0x3b3f44, door: 0x3a2614, base: 0x6a645c, floor: 0x7a5a38, accent: 0x4a6a3a }, // деревянный сруб
+  { wall: 0xa9b0ad, trim: 0x4a4f50, roof: 0x4d6a46, door: 0x6a4a2a, base: 0x77797a, floor: 0x806343, accent: 0x8a3b2e }, // серый дом с зелёной крышей
 ];
 const glassMat = new THREE.MeshStandardMaterial({ color: 0x9fd0e8, roughness: 0.2, metalness: 0.1, transparent: true, opacity: 0.3, depthWrite: false });
+const houseMat = new THREE.MeshStandardMaterial({ color: 0xffffff, vertexColors: true, roughness: 0.92 });
 
-function addBox(w, h, d, color, x, y, z, bullet) { // bullet=false - декор, пули летят сквозь
-  const m = box(w, h, d, color, x, y, z, false);
-  if (bullet !== false) blockers.push(m);
-  return m;
+// Матрицы 4x4 по столбцам, как в three.js: сдвиг + поворот Эйлера XYZ
+function m4(px, py, pz, rx = 0, ry = 0, rz = 0) {
+  const a = Math.cos(rx), b = Math.sin(rx), c = Math.cos(ry), d = Math.sin(ry), e = Math.cos(rz), f = Math.sin(rz);
+  const ae = a * e, af = a * f, be = b * e, bf = b * f;
+  return [c * e, af + be * d, bf - ae * d, 0, -c * f, ae - bf * d, be + af * d, 0, d, -b * c, a * c, 0, px, py, pz, 1];
 }
-
-// Стена с проёмами. along: 'x' или 'z'. openings: { c (центр), w, sill, h, door }
-function wallLine(cx, cz, along, H, color, trim, openings) {
-  const T = 0.4, L = 8;
-  const at = s => along === 'x' ? [cx + s, cz] : [cx, cz + s];
-  const dims = (len, h, th) => along === 'x' ? [len, h, th] : [th, h, len];
-  const piece = (s0, s1, y0, y1) => {
-    const len = s1 - s0, h = y1 - y0;
-    if (len < 0.01 || h < 0.01) return;
-    const [px, pz] = at((s0 + s1) / 2), [w, hh, d] = dims(len, h, T);
-    addBox(w, hh, d, color, px, (y0 + y1) / 2, pz);
-  };
-  let cur = -L / 2;
-  for (const o of openings.slice().sort((a, b) => a.c - b.c)) {
-    const a = o.c - o.w / 2, b = o.c + o.w / 2;
-    piece(cur, a, 0, H);
-    if (o.door) piece(a, b, o.h, H);
-    else {
-      piece(a, b, 0, o.sill);
-      piece(a, b, o.sill + o.h, H);
-      const [gx, gz] = at(o.c), gy = o.sill + o.h / 2;
-      const [gw, gh, gd] = dims(o.w, o.h, 0.04);
-      const glass = new THREE.Mesh(new THREE.BoxGeometry(gw, gh, gd), glassMat);
-      glass.position.set(gx, gy, gz); scene.add(glass);
-      const fr = (len, h, dx, dy) => { // деталь рамы
-        const [px, pz] = at(o.c + dx), [w, hh, d] = dims(len, h, T + 0.1);
-        addBox(w, hh, d, trim, px, gy + dy, pz, false);
-      };
-      fr(o.w + 0.2, 0.1, 0, o.h / 2 + 0.05); fr(o.w + 0.2, 0.1, 0, -o.h / 2 - 0.05);
-      fr(0.1, o.h, o.w / 2 + 0.05, 0); fr(0.1, o.h, -o.w / 2 - 0.05, 0);
-      fr(0.05, o.h, 0, 0); fr(o.w, 0.05, 0, 0);
-    }
-    cur = b;
+function m4mul(A, B) {
+  const o = new Array(16);
+  for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) {
+    let s = 0; for (let k = 0; k < 4; k++) s += A[k * 4 + r] * B[c * 4 + k];
+    o[c * 4 + r] = s;
   }
-  piece(cur, L / 2, 0, H);
+  return o;
+}
+const mulCol = (hex, f) => { // осветлить или затемнить цвет
+  const r = Math.min(255, Math.round((hex >> 16 & 255) * f)), g = Math.min(255, Math.round((hex >> 8 & 255) * f)), b = Math.min(255, Math.round((hex & 255) * f));
+  return r << 16 | g << 8 | b;
+};
+
+// Набор для сборки дома: коробки складываются в четыре кучи, из каждой получается один меш.
+// solid - стены (держат пули), roof - крыша (держит пули), decor - мелочи (пули летят сквозь), glass - стёкла.
+function houseKit(ox, oz) {
+  const bk = () => ({ p: [], n: [], c: [] });
+  const B = { solid: bk(), roof: bk(), decor: bk(), glass: bk() };
+  const cc = new THREE.Color();
+  let count = 0;
+  const jitter = () => { count++; const s = Math.sin((count + ox * 0.37 + oz * 0.71) * 12.9898) * 43758.5453; return 1 + ((s - Math.floor(s)) - 0.5) * 0.06; };
+  const ao = y => 0.78 + 0.22 * Math.min(1, Math.max(0, y / 1.4)); // низ темнее: грязь и тень у земли
+  function face(b, pts, cen, rgb) { // грань из точек по кругу; нормаль направляем от центра тела
+    const ux = pts[1][0] - pts[0][0], uy = pts[1][1] - pts[0][1], uz = pts[1][2] - pts[0][2];
+    const vx = pts[2][0] - pts[0][0], vy = pts[2][1] - pts[0][1], vz = pts[2][2] - pts[0][2];
+    let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+    const l = Math.hypot(nx, ny, nz) || 1; nx /= l; ny /= l; nz /= l;
+    let mx = 0, my = 0, mz = 0; pts.forEach(p => { mx += p[0]; my += p[1]; mz += p[2]; });
+    mx /= pts.length; my /= pts.length; mz /= pts.length;
+    if (nx * (mx - cen[0]) + ny * (my - cen[1]) + nz * (mz - cen[2]) < 0) { pts = pts.slice().reverse(); nx = -nx; ny = -ny; nz = -nz; }
+    for (let i = 1; i < pts.length - 1; i++) for (const p of [pts[0], pts[i], pts[i + 1]]) {
+      b.p.push(p[0], p[1], p[2]); b.n.push(nx, ny, nz);
+      const k = ao(p[1]); b.c.push(rgb[0] * k, rgb[1] * k, rgb[2] * k);
+    }
+  }
+  const CORNERS = [[-1, -1, -1], [1, -1, -1], [1, 1, -1], [-1, 1, -1], [-1, -1, 1], [1, -1, 1], [1, 1, 1], [-1, 1, 1]];
+  const QUADS = [[1, 2, 6, 5], [0, 4, 7, 3], [3, 7, 6, 2], [0, 1, 5, 4], [4, 5, 6, 7], [0, 3, 2, 1]];
+  function addM(b, w, h, d, color, M) {
+    cc.setHex(color); const j = jitter(), rgb = [cc.r * j, cc.g * j, cc.b * j];
+    const P = CORNERS.map(([sx, sy, sz]) => {
+      const x = sx * w / 2, y = sy * h / 2, z = sz * d / 2;
+      return [M[0] * x + M[4] * y + M[8] * z + M[12] + ox, M[1] * x + M[5] * y + M[9] * z + M[13], M[2] * x + M[6] * y + M[10] * z + M[14] + oz];
+    });
+    const cen = [M[12] + ox, M[13], M[14] + oz];
+    for (const q of QUADS) face(b, q.map(i => P[i]), cen, rgb);
+  }
+  const at = b => (w, h, d, color, x, y, z, rx, ry, rz) => addM(b, w, h, d, color, m4(x, y, z, rx, ry, rz));
+  const atM = b => (w, h, d, color, M) => addM(b, w, h, d, color, M);
+  function prism(b, x0, x1, yb, zh, rise, color) { // фронтон: треугольник в плоскости YZ, выдавленный по X
+    cc.setHex(color); const j = jitter(), rgb = [cc.r * j, cc.g * j, cc.b * j];
+    const P = (x, y, z) => [x + ox, y, z + oz];
+    const A = P(x0, yb, -zh), Bb = P(x0, yb, zh), C = P(x0, yb + rise, 0), A2 = P(x1, yb, -zh), B2 = P(x1, yb, zh), C2 = P(x1, yb + rise, 0);
+    const cen = [(x0 + x1) / 2 + ox, yb + rise / 3, oz];
+    [[A, Bb, C], [A2, B2, C2], [A, Bb, B2, A2], [A, C, C2, A2], [Bb, C, C2, B2]].forEach(f => face(b, f, cen, rgb));
+  }
+  function finish() {
+    const make = (b, mat, part, blocks) => {
+      if (!b.p.length) return;
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.Float32BufferAttribute(b.p, 3));
+      g.setAttribute('normal', new THREE.Float32BufferAttribute(b.n, 3));
+      if (mat === houseMat) g.setAttribute('color', new THREE.Float32BufferAttribute(b.c, 3));
+      const m = new THREE.Mesh(g, mat);
+      m.userData.part = part;
+      scene.add(m);
+      if (part === 'decor') m.castShadow = false; // тени от мелочей слишком дорогие
+      if (blocks) blockers.push(m);
+    };
+    make(B.solid, houseMat, 'walls', true); make(B.roof, houseMat, 'roof', true);
+    make(B.decor, houseMat, 'decor', false); make(B.glass, glassMat, 'glass', false);
+  }
+  return { sol: at(B.solid), rf: at(B.roof), dc: at(B.decor), gl: at(B.glass), solM: atM(B.solid), rfM: atM(B.roof), dcM: atM(B.decor), prism: (...a) => prism(B.solid, ...a), finish };
 }
 
 function buildHouse(x, z, st) {
-  const H = 3.4, S = HOUSE_STYLES[st];
+  const H = 3.4, T = 0.4, L = 8, S = HOUSE_STYLES[st];
+  const { sol, rf, dc, gl, solM, rfM, dcM, prism, finish } = houseKit(x, z);
+  const hs = n => { const s = Math.sin(n * 127.1 + x * 12.9898 + z * 78.233) * 43758.5453; return s - Math.floor(s); }; // 0..1 из координат дома
   const col = (minX, maxX, minZ, maxZ) => colliders.push({ minX, maxX, minZ, maxZ });
+  const dmg = hs(1);                       // насколько дом разрушен
+  const sx = st % 2 ? 1 : -1;              // сторона, где стоит камин
+  const trimLight = mulCol(S.trim, 1.35);
+  const wallDark = mulCol(S.wall, 0.86), wallLight = mulCol(S.wall, 1.08);
+  const woodOld = 0x6b5438;
+  let wi = 0;                              // номер окна: от него зависят ставни, доски, занавески
+
+  // Стена с проёмами. along: 'x' или 'z'; out: куда смотрит наружу (+1 или -1). openings: { c, w, sill, h, door }
+  function wall(cx, cz, along, out, openings) {
+    const pos = (s, d) => along === 'x' ? [cx + s, cz + d * out] : [cx + d * out, cz + s]; // s - вдоль стены, d - от стены наружу
+    const dims = (len, h, th) => along === 'x' ? [len, h, th] : [th, h, len];
+    const rot = a => along === 'x' ? [0, 0, a] : [a, 0, 0];                                  // поворот вокруг нормали стены
+    const piece = (s0, s1, y0, y1) => {
+      const len = s1 - s0, h = y1 - y0;
+      if (len < 0.01 || h < 0.01) return;
+      const [px, pz] = pos((s0 + s1) / 2, 0), [w, hh, d] = dims(len, h, T);
+      sol(w, hh, d, S.wall, px, (y0 + y1) / 2, pz);
+    };
+    const strip = (s0, s1, y, h, th, d, color) => { // горизонтальная полоса обшивки
+      if (s1 - s0 < 0.05) return;
+      const [px, pz] = pos((s0 + s1) / 2, d), [w, hh, dd] = dims(s1 - s0, h, th);
+      dc(w, hh, dd, color, px, y, pz);
+    };
+    const free = y => { // свободные от проёмов участки стены на высоте y
+      let segs = [[-L / 2, L / 2]];
+      for (const o of openings) {
+        const lo = o.door ? 0 : o.sill - 0.12, hi = o.door ? o.h + 0.15 : o.sill + o.h + 0.12;
+        if (y < lo || y > hi) continue;
+        const a = o.c - o.w / 2 - 0.08, b = o.c + o.w / 2 + 0.08, next = [];
+        for (const [s0, s1] of segs) { if (b <= s0 || a >= s1) next.push([s0, s1]); else { if (a > s0) next.push([s0, a]); if (b < s1) next.push([b, s1]); } }
+        segs = next;
+      }
+      return segs;
+    };
+    // обшивка снаружи: доски (дом 0), брёвна (сруб), рейки (дом 2)
+    if (st === 0) for (let y = 0.55; y < H - 0.1; y += 0.36) free(y).forEach(([a, b]) => strip(a, b, y, 0.04, 0.04, T / 2 + 0.015, wallDark));
+    if (st === 1) for (let y = 0.3; y < H - 0.1; y += 0.3) {
+      free(y).forEach(([a, b]) => { strip(a, b, y, 0.05, 0.04, T / 2 + 0.015, mulCol(S.wall, 0.7)); strip(a, b, y, 0.05, 0.04, -T / 2 - 0.015, mulCol(S.wall, 0.7)); });
+    }
+    if (st === 2) for (let s = -L / 2 + 0.5; s < L / 2 - 0.3; s += 0.66) {
+      if (openings.some(o => Math.abs(o.c - s) < o.w / 2 + 0.15)) continue;
+      const [px, pz] = pos(s, T / 2 + 0.015), [w, hh, d] = dims(0.07, H - 0.5, 0.04);
+      dc(w, hh, d, wallDark, px, 0.35 + (H - 0.5) / 2, pz);
+    }
+    // проёмы
+    let cur = -L / 2;
+    for (const o of openings.slice().sort((a, b) => a.c - b.c)) {
+      const a = o.c - o.w / 2, b = o.c + o.w / 2;
+      piece(cur, a, 0, H);
+      if (o.door) { piece(a, b, o.h, H); cur = b; continue; }
+      piece(a, b, 0, o.sill);
+      piece(a, b, o.sill + o.h, H);
+      const i = wi++, gy = o.sill + o.h / 2;
+      const broken = hs(100 + i) < 0.18 + dmg * 0.3, boarded = hs(200 + i) < 0.1 + dmg * 0.4, shut = hs(300 + i) < 0.55, curtain = hs(400 + i) < 0.5 && !broken;
+      if (!broken) { const [px, pz] = pos(o.c, 0), [w, hh, d] = dims(o.w, o.h, 0.04); gl(w, hh, d, 0x9fd0e8, px, gy, pz); }
+      else { // осколки по краям рамы
+        for (let k = 0; k < 3; k++) { const [px, pz] = pos(o.c + (k - 1) * o.w * 0.3, 0.02), [w, hh, d] = dims(0.16, 0.22 + k * 0.08, 0.02); dc(w, hh, d, 0xbfdce6, px, o.sill + 0.15 + k * 0.04, pz); }
+      }
+      const fr = (len, h, dx, dy, th = T + 0.1) => { const [px, pz] = pos(o.c + dx, 0), [w, hh, d] = dims(len, h, th); dc(w, hh, d, S.trim, px, gy + dy, pz); };
+      fr(o.w + 0.2, 0.1, 0, o.h / 2 + 0.05); fr(o.w + 0.2, 0.1, 0, -o.h / 2 - 0.05);
+      fr(0.1, o.h, o.w / 2 + 0.05, 0); fr(0.1, o.h, -o.w / 2 - 0.05, 0);
+      if (!broken) { fr(0.05, o.h, 0, 0); fr(o.w, 0.05, 0, 0); }
+      { const [px, pz] = pos(o.c, T / 2 + 0.1), [w, hh, d] = dims(o.w + 0.34, 0.07, 0.26); dc(w, hh, d, trimLight, px, o.sill - 0.04, pz); } // подоконник
+      { const [px, pz] = pos(o.c, T / 2 + 0.04), [w, hh, d] = dims(o.w + 0.36, 0.13, 0.14); dc(w, hh, d, S.trim, px, o.sill + o.h + 0.17, pz); } // перемычка
+      if (curtain) { const [px, pz] = pos(o.c, -T / 2 + 0.03), [w, hh, d] = dims(o.w * 0.92, o.h * 0.85, 0.03); dc(w, hh, d, [0xb55a4a, 0xd9cfae, 0x6a8aa5][i % 3], px, gy + 0.05, pz); }
+      if (boarded) for (let k = 0; k < 3; k++) {
+        const [px, pz] = pos(o.c, T / 2 + 0.12), [w, hh, d] = dims(o.w + 0.5, 0.14, 0.05), r = rot((k % 2 ? -1 : 1) * (0.22 + k * 0.06));
+        dc(w, hh, d, mulCol(woodOld, 0.85 + k * 0.12), px, gy + (k - 1) * o.h * 0.32, pz, r[0], r[1], r[2]);
+      } else if (shut) for (const sg of [-1, 1]) { // ставни; один висит на одной петле
+        const hang = sg === 1 && hs(500 + i) < 0.35 ? 0.55 : 0, [px, pz] = pos(o.c + sg * (o.w / 2 + 0.3), T / 2 + 0.07), [w, hh, d] = dims(0.52, o.h + 0.05, 0.05), r = rot(hang * sg);
+        dc(w, hh, d, S.accent, px, gy - hang * 0.12, pz, r[0], r[1], r[2]);
+      }
+      if (!boarded && o.sill < 1.1 && out === 1 && st !== 1) { // ящик с цветами на южных окнах
+        const dead = hs(600 + i) < 0.5, [px, pz] = pos(o.c, T / 2 + 0.22), [w, hh, d] = dims(o.w * 0.9, 0.17, 0.26);
+        dc(w, hh, d, 0x5a4026, px, o.sill - 0.17, pz);
+        dc(w * 0.94, 0.07, d * 0.8, dead ? 0x6b5a3a : 0x3f7a34, px, o.sill - 0.06, pz);
+      }
+      cur = b;
+    }
+    piece(cur, L / 2, 0, H);
+  }
+
+  // Пол: доски, плинтус, каменный цоколь снаружи
+  dc(7.2, 0.03, 7.2, S.floor, 0, 0.015, 0);
+  for (let i = -7; i <= 7; i++) dc(0.03, 0.012, 7.2, mulCol(S.floor, 0.82), i * 0.48, 0.036, 0);
+  [[0, -3.58, 7.2, 0.04], [0, 3.58, 7.2, 0.04], [-3.58, 0, 0.04, 7.2], [3.58, 0, 0.04, 7.2]].forEach(([px, pz, w, d]) => dc(w, 0.14, d, trimLight, px, 0.1, pz));
+  { // цоколь из камней: сегменты по ~0.9 м разного оттенка; перед дверью проход
+    const stone = (cx, cz, w, d, k) => dc(w, 0.34, d, mulCol(S.base, 0.88 + hs(700 + k) * 0.26), cx, 0.17, cz);
+    let k = 0;
+    for (let s = -4.15; s < 4.15 - 0.2; s += 0.92) { const w = Math.min(0.92, 4.15 - s); stone(s + w / 2, -3.925, w, 0.45, k++); if (!(s + w / 2 > -1.1 && s + w / 2 < 1.1)) stone(s + w / 2, 3.925, w, 0.45, k++); }
+    for (let s = -3.7; s < 3.7 - 0.1; s += 0.92) { const w = Math.min(0.92, 3.7 - s); stone(-3.925, s + w / 2, 0.45, w, k++); stone(3.925, s + w / 2, 0.45, w, k++); }
+    dc(2.0, 0.08, 0.6, mulCol(S.base, 1.1), 0, 0.04, 3.85); // порог
+  }
+
+  // Стены с окнами, колонны в углах
   const win = c => ({ c, w: 1.4, sill: 1.0, h: 1.2 });
-
-  // Пол и каменный цоколь
-  addBox(7.2, 0.03, 7.2, S.floor, x, 0.015, z, false);
-  addBox(9, 0.14, 0.5, S.base, x, 0.07, z - 4.1, false);
-  addBox(0.5, 0.14, 8.2, S.base, x - 4.1, 0.07, z, false);
-  addBox(0.5, 0.14, 8.2, S.base, x + 4.1, 0.07, z, false);
-
-  // Стены с окнами
-  wallLine(x, z - 3.8, 'x', H, S.wall, S.trim, [win(-2.2), win(2.2)]);
-  wallLine(x - 3.8, z, 'z', H, S.wall, S.trim, [win(0)]);
-  wallLine(x + 3.8, z, 'z', H, S.wall, S.trim, [win(0)]);
-  wallLine(x, z + 3.8, 'x', H, S.wall, S.trim, [{ c: 0, w: 2, h: 2.4, door: true }, { c: -2.6, w: 1.2, sill: 1.0, h: 1.2 }, { c: 2.6, w: 1.2, sill: 1.0, h: 1.2 }]);
+  wall(0, -3.8, 'x', -1, [win(-2.2), win(2.2)]);
+  wall(-3.8, 0, 'z', -1, [win(0)]);
+  wall(3.8, 0, 'z', 1, [win(0)]);
+  wall(0, 3.8, 'x', 1, [{ c: 0, w: 2, h: 2.4, door: true }, { c: -2.6, w: 1.2, sill: 1.0, h: 1.2 }, { c: 2.6, w: 1.2, sill: 1.0, h: 1.2 }]);
   col(x - 4, x + 4, z - 4, z - 3.6);
   col(x - 4, x - 3.6, z - 4, z + 4);
   col(x + 3.6, x + 4, z - 4, z + 4);
   col(x - 4, x - 1, z + 3.6, z + 4);
   col(x + 1, x + 4, z + 3.6, z + 4);
-  [[-1, -1], [1, -1], [-1, 1], [1, 1]].forEach(([sx, sz]) => addBox(0.5, H, 0.5, S.trim, x + sx * 4, H / 2, z + sz * 4, false)); // угловые столбы
+  [[-1, -1], [1, -1], [-1, 1], [1, 1]].forEach(([a, b]) => {
+    sol(0.5, H, 0.5, S.trim, a * 4, H / 2, b * 4);
+    if (st === 1) for (let y = 0.15; y < H; y += 0.3) { // торцы брёвен выступают из углов
+      const o = (y * 10 | 0) % 2 ? 0.2 : -0.2;
+      dc(0.36, 0.26, 0.36, mulCol(S.wall, 1.15), a * 4 + a * 0.12, y, b * 4 + b * 0.12 + o * 0.2);
+    }
+  });
 
-  // Дверь: рама и открытая створка
-  addBox(0.12, 2.4, 0.5, S.trim, x - 1.06, 1.2, z + 3.8, false);
-  addBox(0.12, 2.4, 0.5, S.trim, x + 1.06, 1.2, z + 3.8, false);
-  const leaf = new THREE.Group();
-  const leafMesh = new THREE.Mesh(new THREE.BoxGeometry(1.0, 2.3, 0.08), new THREE.MeshStandardMaterial({ color: S.door, roughness: 0.9 }));
-  leafMesh.position.set(-0.5, 1.15, 0);
-  const knob = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.08, 0.14), new THREE.MeshStandardMaterial({ color: 0xc9a227, metalness: 0.8, roughness: 0.4 }));
-  knob.position.set(-0.85, 1.05, 0);
-  leaf.add(leafMesh, knob);
-  leaf.position.set(x + 1.0, 0, z + 3.8); leaf.rotation.y = 1.3;
-  scene.add(leaf);
+  // Дверь: рама, перемычка, створка с филёнками, ручка, петли
+  dc(0.12, 2.4, 0.5, S.trim, -1.06, 1.2, 3.8); dc(0.12, 2.4, 0.5, S.trim, 1.06, 1.2, 3.8);
+  dc(2.3, 0.14, 0.5, S.trim, 0, 2.47, 3.8);
+  { const P = m4(1.0, 0, 3.8, 0, 1.3, 0), at2 = (px, py, pz) => m4mul(P, m4(px, py, pz));
+    dcM(1.0, 2.3, 0.08, S.door, at2(-0.5, 1.15, 0));
+    [[1.7, 0.8], [0.6, 0.7]].forEach(([py, h]) => [-1, 1].forEach(sg => dcM(0.7, h, 0.02, mulCol(S.door, 1.25), at2(-0.5, py, sg * 0.045))));
+    dcM(0.08, 0.08, 0.14, 0xc9a227, at2(-0.85, 1.05, 0));
+    [0.4, 1.8].forEach(py => dcM(0.12, 0.1, 0.12, 0x2f3236, at2(-0.04, py, 0)));
+    if (hs(4) < 0.6) { // краска на стене: красный крест, «проверено»
+      dc(0.8, 0.07, 0.02, 0xb02020, -1.58, 1.55, 4.03, 0, 0, Math.PI / 4); dc(0.8, 0.07, 0.02, 0xb02020, -1.58, 1.55, 4.03, 0, 0, -Math.PI / 4);
+    }
+  }
 
-  // Двускатная крыша, конёк, фронтоны, труба
+  // Двускатная крыша: плиты, черепица рядами, свесы, коньковая доска, желоба, фронтоны
   const rise = 1.8, half = 4.5, ang = Math.atan2(rise, half), slope = Math.hypot(half, rise) + 0.3;
   [-1, 1].forEach(sg => {
-    const slab = addBox(9.6, 0.18, slope, S.roof, x, H + rise / 2 + 0.05, z + sg * half / 2);
-    slab.rotation.x = sg * ang;
+    const M = m4(0, H + rise / 2 + 0.05, sg * half / 2, sg * ang, 0, 0);
+    rfM(9.6, 0.18, slope, mulCol(S.roof, 0.75), M);
+    const rows = 10, rowH = slope / rows, miss = 0.03 + dmg * 0.12;
+    for (let r = 0; r < rows; r++) for (let t = 0; t < 8; t++) {
+      const off = (r % 2) * 0.6, lx = -4.2 + t * 1.2 + off;
+      if (Math.abs(lx) + 0.58 > 4.82) continue;
+      const q = hs(800 + sg * 100 + r * 9 + t);
+      if (q < miss) continue; // выпавшая черепица
+      dcM(1.16, 0.05, rowH * 0.92, mulCol(S.roof, 0.88 + q * 0.28), m4mul(M, m4(lx, 0.115, -slope / 2 + rowH * (r + 0.5))));
+    }
+    dcM(9.8, 0.24, 0.08, S.trim, m4mul(M, m4(0, 0, sg * slope / 2)));              // доска на краю свеса
+    dcM(9.5, 0.1, 0.14, 0x5a5f61, m4mul(M, m4(0, -0.12, sg * (slope / 2 + 0.08)))); // водосточный желоб
+    [-1, 1].forEach(e => dcM(0.08, 0.24, slope, S.trim, m4mul(M, m4(e * 4.82, 0.03, 0)))); // боковые доски
+    if (hs(8) < 0.45 && sg === (hs(9) < 0.5 ? -1 : 1)) { // синий брезент на дыре
+      const px = (hs(10) - 0.5) * 4.5;
+      dcM(2.4, 0.04, 1.8, 0x3a6f9a, m4mul(M, m4(px, 0.15, -0.3)));
+      dcM(2.5, 0.05, 0.05, 0x2a2a2a, m4mul(M, m4(px, 0.17, 0.4))); dcM(2.5, 0.05, 0.05, 0x2a2a2a, m4mul(M, m4(px, 0.17, -1.0)));
+    }
   });
-  addBox(9.8, 0.14, 0.3, S.trim, x, H + rise + 0.12, z, false);
-  const tri = new THREE.Shape([new THREE.Vector2(-4.2, 0), new THREE.Vector2(4.2, 0), new THREE.Vector2(0, rise + 0.05)]);
-  [-1, 1].forEach(sx => {
-    const g = new THREE.ExtrudeGeometry(tri, { depth: 0.4, bevelEnabled: false });
-    g.translate(0, 0, -0.2); g.rotateY(Math.PI / 2);
-    const m = new THREE.Mesh(g, new THREE.MeshStandardMaterial({ color: S.wall, roughness: 0.9 }));
-    m.position.set(x + sx * 3.8, H, z); scene.add(m); blockers.push(m);
+  rf(9.8, 0.14, 0.3, S.trim, 0, H + rise + 0.12, 0);
+  [-1, 1].forEach(e => {
+    prism(e * 3.8 - 0.2, e * 3.8 + 0.2, H, 4.2, rise + 0.05, S.wall);
+    for (let zz = -3.3; zz <= 3.3; zz += 0.6) { // вертикальные доски на фронтоне
+      const hh = (rise + 0.05) * (1 - Math.abs(zz) / 4.2) - 0.1;
+      if (hh > 0.1) dc(0.05, hh, 0.06, wallDark, e * 4.02, H + hh / 2, zz);
+    }
+    dc(0.08, 0.7, 0.6, S.trim, e * 4.02, H + 0.85, 0); dc(0.1, 0.62, 0.52, 0x1f2326, e * 4.04, H + 0.85, 0); // чердачное окно
   });
-  const cx = (st % 2 ? 2.6 : -2.6);
-  addBox(0.8, 2.4, 0.8, 0x77716a, x + cx, H + 1.5, z + 1.2, false);
-  addBox(1.0, 0.12, 1.0, 0x55504a, x + cx, H + 2.74, z + 1.2, false);
 
-  // Крыльцо с навесом
-  addBox(3.4, 0.14, 1.8, S.floor, x, 0.07, z + 4.7, false);
-  addBox(2.0, 0.07, 0.4, S.floor, x, 0.035, z + 5.8, false);
-  [-1, 1].forEach(sx => addBox(0.16, 2.5, 0.16, S.trim, x + sx * 1.55, 1.25, z + 5.5, false));
-  const awn = addBox(3.8, 0.12, 2.1, S.roof, x, 2.75, z + 4.8, false); awn.rotation.x = 0.1;
+  // Камень снаружи у фронтона: кирпичная труба с оголовком
+  { const cz = st === 2 ? -2.3 : 2.4, cxx = sx * 4.55;
+    for (let y = 0; y < 5.9; y += 0.5) { const w = y < 1.0 ? 1.1 : 0.9; dc(w, 0.5, w, mulCol(0x77716a, 0.82 + hs(900 + (y * 2 | 0)) * 0.3), cxx, y + 0.25, cz); }
+    dc(1.15, 0.12, 1.15, 0x55504a, cxx, 5.96, cz); dc(0.5, 0.3, 0.5, 0x3a3835, cxx, 6.17, cz);
+    col(x + cxx - 0.55, x + cxx + 0.55, z + cz - 0.55, z + cz + 0.55);
+  }
 
-  // Мебель: кровать у юго-западного угла, стол или стеллаж
-  addBox(1.0, 0.35, 1.9, S.trim, x - 3.0, 0.175, z + 2.55, false);
-  addBox(0.9, 0.18, 1.7, 0xb9b2a0, x - 3.0, 0.44, z + 2.55, false);
-  addBox(0.7, 0.12, 0.35, 0xe6e0d0, x - 3.0, 0.58, z + 3.2, false);
+  // Крыльцо: настил, ступени, столбы с перилами, навес на подкосах
+  dc(3.4, 0.14, 1.8, S.floor, 0, 0.07, 4.7);
+  for (let i = -3; i <= 3; i++) dc(0.03, 0.02, 1.8, mulCol(S.floor, 0.8), i * 0.48, 0.15, 4.7);
+  dc(2.0, 0.07, 0.4, S.floor, 0, 0.035, 5.8); dc(2.2, 0.07, 0.35, mulCol(S.floor, 0.92), 0, 0.105, 5.65);
+  [-1, 1].forEach(e => {
+    dc(0.16, 2.5, 0.16, S.trim, e * 1.55, 1.25, 5.5);
+    dc(0.07, 0.07, 1.5, S.trim, e * 1.62, 0.95, 4.75); // поручень
+    for (let k = 0; k < 6; k++) dc(0.05, 0.8, 0.05, trimLight, e * 1.62, 0.55, 4.1 + k * 0.28);
+    dc(0.06, 0.06, 0.8, S.trim, e * 1.4, 2.2, 5.1, 0.7, 0, 0); // подкос навеса
+  });
+  rf(3.8, 0.12, 2.1, S.roof, 0, 2.75, 4.8, 0.1); // навес над крыльцом
+  dc(3.8, 0.2, 0.08, S.trim, 0, 2.66, 5.85);
+  dc(1.2, 0.02, 0.7, 0x4a3a2a, 0, 0.16, 4.7); // коврик
+  { const d2 = hs(11); if (d2 < 0.5) { dc(0.5, 0.45, 0.5, 0x7a4a32, -1.2, 0.37, 5.2); dc(0.42, 0.06, 0.42, 0x3a2a1e, -1.2, 0.62, 5.2); } } // горшок
+
+  // Бочка для дождя с водостоком
+  dc(0.1, 3.0, 0.1, 0x5a5f61, 4.2, 1.9, -4.7); dc(0.1, 0.1, 0.4, 0x5a5f61, 4.2, 0.55, -4.85);
+  dc(0.62, 0.9, 0.62, 0x3d5a6b, 4.2, 0.45, -5.0); dc(0.62, 0.9, 0.62, 0x3d5a6b, 4.2, 0.45, -5.0, 0, Math.PI / 4, 0);
+  dc(0.66, 0.06, 0.66, 0x2a2a2a, 4.2, 0.3, -5.0); dc(0.66, 0.06, 0.66, 0x2a2a2a, 4.2, 0.7, -5.0);
+
+  // Плющ на стене и оборванные провода: больше разрухи у сильно повреждённых домов
+  if (hs(12) < 0.6) for (let k = 0; k < 7; k++) {
+    const vx = -3.8 + hs(1000 + k) * 0.5, vy = 0.5 + k * 0.38;
+    dc(0.5 + hs(1100 + k) * 0.4, 0.3, 0.06, [0x3f6a2f, 0x4a7a35, 0x355a28][k % 3], vx, vy, -4.04 - 0.03, 0, 0, (hs(1200 + k) - 0.5) * 0.8);
+  }
+
+  // Балки под крышей и лампа
+  [-2.8, 0, 2.8].forEach(px => dc(0.18, 0.22, 7.8, S.trim, px, H - 0.12, 0));
+  dc(0.02, 0.9, 0.02, 0x222222, 0, H - 0.57, -0.4); dc(0.34, 0.2, 0.34, 0xd9c27a, 0, H - 1.1, -0.4);
+
+  // Мебель: кровать с изголовьем и тумбой, стол со стульями или печь, стеллаж или кресло, шкаф, кухонный уголок
+  dc(1.0, 0.3, 1.95, S.trim, -3.0, 0.15, 2.55);
+  dc(0.92, 0.16, 1.8, 0xb9b2a0, -3.0, 0.38, 2.55);
+  dc(0.94, 0.06, 1.1, [0x7a3a3a, 0x3a5a7a, 0x5a6a3a][(hs(13) * 3 | 0) % 3], -3.0, 0.5, 2.25);
+  dc(0.6, 0.12, 0.35, 0xe6e0d0, -3.0, 0.55, 3.2);
+  dc(1.0, 0.85, 0.08, S.trim, -3.0, 0.65, 3.55);
   col(x - 3.5, x - 2.5, z + 1.6, z + 3.5);
-  if (st !== 1) { // стол
-    addBox(1.0, 0.08, 1.0, 0x7a5a38, x + 2.9, 0.78, z + 2.8, false);
-    [[-1, -1], [1, -1], [-1, 1], [1, 1]].forEach(([a, b]) => addBox(0.08, 0.75, 0.08, 0x5a4026, x + 2.9 + a * 0.42, 0.375, z + 2.8 + b * 0.42, false));
+  dc(0.45, 0.5, 0.45, S.trim, -2.15, 0.25, 3.3); dc(0.38, 0.03, 0.01, 0x222222, -2.15, 0.35, 3.07); dc(0.12, 0.2, 0.12, 0xd9c27a, -2.15, 0.6, 3.3);
+  col(x - 2.38, x - 1.92, z + 3.07, z + 3.53);
+  if (st !== 1) { // стол и два стула
+    dc(1.0, 0.08, 1.0, 0x7a5a38, 2.9, 0.78, 2.8);
+    [[-1, -1], [1, -1], [-1, 1], [1, 1]].forEach(([a, b]) => dc(0.08, 0.75, 0.08, 0x5a4026, 2.9 + a * 0.42, 0.375, 2.8 + b * 0.42));
     col(x + 2.4, x + 3.4, z + 2.3, z + 3.3);
+    dc(0.4, 0.05, 0.4, 0x6a4a2a, 2.0, 0.45, 2.8); dc(0.05, 0.5, 0.4, 0x6a4a2a, 1.82, 0.72, 2.8);
+    [[-1, -1], [1, -1], [-1, 1], [1, 1]].forEach(([a, b]) => dc(0.04, 0.45, 0.04, 0x5a4026, 2.0 + a * 0.17, 0.225, 2.8 + b * 0.17));
+    dc(0.4, 0.05, 0.4, 0x6a4a2a, 2.9, 0.45, 1.95); dc(0.4, 0.5, 0.05, 0x6a4a2a, 2.9, 0.72, 1.77);
+    [[-1, -1], [1, -1], [-1, 1], [1, 1]].forEach(([a, b]) => dc(0.04, 0.45, 0.04, 0x5a4026, 2.9 + a * 0.17, 0.225, 1.95 + b * 0.17));
+    dc(0.35, 0.18, 0.35, 0xc9c0a8, 2.9, 0.91, 2.8); // тарелка с чем-то
+  } else { // дровяная печь с трубой через крышу
+    dc(0.7, 0.8, 0.7, 0x2a2a2c, 3.0, 0.4, 2.8); dc(0.5, 0.35, 0.02, 0x6a3a1a, 2.64, 0.4, 2.8, 0, Math.PI / 2, 0); dc(0.74, 0.05, 0.74, 0x3a3a3c, 3.0, 0.82, 2.8);
+    dc(0.14, 4.3, 0.14, 0x2a2a2c, 3.0, 3.0, 2.8); dc(0.3, 0.12, 0.3, 0x2a2a2c, 3.0, 5.2, 2.8);
+    col(x + 2.65, x + 3.35, z + 2.45, z + 3.15);
   }
   if (st !== 0) { // стеллаж с банками
-    [0.3, 0.8, 1.3, 1.8].forEach(yy => addBox(0.5, 0.06, 2.0, 0x6a4a2a, x - 3.3, yy, z - 2.0, false));
-    [-1, 1].forEach(sz => addBox(0.5, 1.85, 0.06, 0x5a4026, x - 3.3, 0.92, z - 2.0 + sz, false));
-    for (let i = 0; i < 7; i++) addBox(0.12, 0.16, 0.12, [0xc2552a, 0x6b8f3a, 0xc9a227][i % 3], x - 3.3, 0.38 + (i % 3) * 0.5, z - 2.7 + i * 0.22, false);
+    [0.3, 0.8, 1.3, 1.8].forEach(yy => dc(0.5, 0.06, 2.0, 0x6a4a2a, -3.3, yy, -2.0));
+    [-1, 1].forEach(sz => dc(0.5, 1.85, 0.06, 0x5a4026, -3.3, 0.92, -2.0 + sz));
+    for (let i = 0; i < 7; i++) dc(0.12, 0.16, 0.12, [0xc2552a, 0x6b8f3a, 0xc9a227][i % 3], -3.3, 0.38 + (i % 3) * 0.5, -2.7 + i * 0.22);
     col(x - 3.55, x - 3.05, z - 3.0, z - 1.0);
+  } else { // кресло и торшер
+    dc(0.8, 0.4, 0.8, [0x6a4a3a, 0x4a5a3a, 0x5a3a3a][(hs(14) * 3 | 0) % 3], -3.0, 0.2, -2.2); dc(0.15, 0.75, 0.8, 0x5a3a2a, -3.35, 0.65, -2.2); dc(0.8, 0.3, 0.12, 0x5a3a2a, -3.0, 0.5, -1.85);
+    dc(0.05, 1.5, 0.05, 0x2a2a2a, -3.4, 0.75, -3.1); dc(0.35, 0.3, 0.35, 0xd9c27a, -3.4, 1.6, -3.1);
+    col(x - 3.4, x - 2.6, z - 2.6, z - 1.8);
   }
+  dc(0.8, 1.9, 1.3, 0x5a4026, 3.15, 0.95, -2.9); dc(0.02, 1.8, 0.6, 0x4a3420, 2.74, 0.95, -3.2); dc(0.02, 1.8, 0.6, 0x4a3420, 2.74, 0.95, -2.6);
+  dc(0.05, 0.14, 0.05, 0xc9a227, 2.72, 1.0, -2.95); dc(0.05, 0.14, 0.05, 0xc9a227, 2.72, 1.0, -2.85);
+  col(x + 2.75, x + 3.55, z - 3.55, z - 2.25);
+  dc(1.5, 0.88, 0.6, 0x6a5a48, 1.95, 0.44, -3.3); dc(1.56, 0.05, 0.66, 0xb9b2a0, 1.95, 0.9, -3.3); dc(0.5, 0.02, 0.36, 0x2f3236, 1.6, 0.935, -3.3);
+  dc(0.04, 0.2, 0.04, 0x9aa0a4, 1.6, 1.05, -3.45); dc(0.3, 0.02, 0.3, 0x2a2a2a, 2.35, 0.935, -3.3);
+  col(x + 1.2, x + 2.7, z - 3.6, z - 3.0);
+  dc(3.0, 0.02, 2.0, [0x6a2f2a, 0x2f4a5a, 0x4a4a2a][(hs(15) * 3 | 0) % 3], 0.2, 0.04, 0.3); dc(2.8, 0.025, 1.8, 0xc9b38a, 0.2, 0.045, 0.3); // ковёр
+  dc(0.04, 0.6, 0.8, 0x4a3a2a, 3.56, 1.7, 0.6); dc(0.045, 0.5, 0.7, 0x7a8a6a, 3.57, 1.7, 0.6); // картина на стене
+
+  finish();
 }
 
 for (let i = 0; i < 8; i++) {
@@ -366,7 +705,7 @@ for (let i = 0; i < 8; i++) {
     const t = trees[k];
     if (Math.abs(t.trunk.position.x - x) < 6.5 && Math.abs(t.trunk.position.z - z) < 7.5) {
       scene.remove(t.trunk); scene.remove(t.crown);
-      colliders.splice(colliders.indexOf(t.collider), 1); blockers.splice(blockers.indexOf(t.trunk), 1);
+      removeFrom(colliders, t.collider); removeFrom(blockers, t.trunk);
       trees.splice(k, 1);
     }
   }
@@ -418,64 +757,331 @@ function pickZombieType(night) { // ночью больше опасных
   if (night) return r < 0.4 ? 'normal' : r < 0.65 ? 'runner' : r < 0.8 ? 'brute' : r < 0.92 ? 'bloater' : 'normal';
   return r < 0.65 ? 'normal' : r < 0.82 ? 'runner' : r < 0.9 ? 'brute' : r < 0.97 ? 'bloater' : 'normal';
 }
+// --- Зомби: части тела склеены в меши с цветами вершин, материалы общие для всех зомби ---
+// Вариации (волосы, раны, рюкзак, босые ноги) считаются из чисел, которые spawnZombie и так получает от Math.random:
+// количество и порядок вызовов Math.random не менялись, поэтому мир из сохранений не сдвигается.
+const zombieMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.92, flatShading: true });
+const zombieEyeMat = new THREE.MeshBasicMaterial({ vertexColors: true });
+const bellyGeo = new THREE.SphereGeometry(0.5, 10, 8);
+const bellyMat = new THREE.MeshStandardMaterial({ color: 0xc8d45a, roughness: 0.5, flatShading: true });
+[zombieMat, zombieEyeMat, bellyGeo, bellyMat].forEach(o => { o.userData.shared = true; }); // их не освобождаем вместе с зомби
+
+const Z_CORNERS = [[-1, -1, -1], [1, -1, -1], [1, 1, -1], [-1, 1, -1], [-1, -1, 1], [1, -1, 1], [1, 1, 1], [-1, 1, 1]];
+const Z_QUADS = [[1, 2, 6, 5], [0, 4, 7, 3], [3, 7, 6, 2], [0, 1, 5, 4], [4, 5, 6, 7], [0, 3, 2, 1]];
+function zBoxes(rnd, ao) { // набор коробок одной части тела -> один меш; ao(y) затемняет низ части (грязь)
+  const P = [], N = [], C = [], cc = new THREE.Color();
+  function face(pts, cen, rgb) { // нормаль наружу, порядок вершин против часовой
+    const ux = pts[1][0] - pts[0][0], uy = pts[1][1] - pts[0][1], uz = pts[1][2] - pts[0][2];
+    const vx = pts[2][0] - pts[0][0], vy = pts[2][1] - pts[0][1], vz = pts[2][2] - pts[0][2];
+    let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+    const l = Math.hypot(nx, ny, nz) || 1; nx /= l; ny /= l; nz /= l;
+    let mx = 0, my = 0, mz = 0; pts.forEach(p => { mx += p[0]; my += p[1]; mz += p[2]; });
+    mx /= pts.length; my /= pts.length; mz /= pts.length;
+    if (nx * (mx - cen[0]) + ny * (my - cen[1]) + nz * (mz - cen[2]) < 0) { pts = pts.slice().reverse(); nx = -nx; ny = -ny; nz = -nz; }
+    for (let i = 1; i < pts.length - 1; i++) for (const p of [pts[0], pts[i], pts[i + 1]]) {
+      P.push(p[0], p[1], p[2]); N.push(nx, ny, nz);
+      const k = ao ? ao(p[1]) : 1; C.push(rgb[0] * k, rgb[1] * k, rgb[2] * k);
+    }
+  }
+  const api = {
+    base: null, // общая матрица (для зданий и техники: можно собрать деталь в своих осях и повернуть целиком)
+    boxM(w, h, d, color, M) { // коробка по готовой матрице 4x4 (нужна для деталей вдоль произвольного направления)
+      if (api.base) M = m4mul(api.base, M);
+      const j = 1 + (rnd() - 0.5) * 0.08;
+      cc.setHex(color); const rgb = [cc.r * j, cc.g * j, cc.b * j];
+      const pts = Z_CORNERS.map(([sx, sy, sz]) => {
+        const px = sx * w / 2, py = sy * h / 2, pz = sz * d / 2;
+        return [M[0] * px + M[4] * py + M[8] * pz + M[12], M[1] * px + M[5] * py + M[9] * pz + M[13], M[2] * px + M[6] * py + M[10] * pz + M[14]];
+      });
+      for (const q of Z_QUADS) face(q.map(i => pts[i]), [M[12], M[13], M[14]], rgb);
+    },
+    box(w, h, d, color, x, y, z, rx = 0, ry = 0, rz = 0) { api.boxM(w, h, d, color, m4(x, y, z, rx, ry, rz)); },
+    prism(pts, depth, color, x, y, z, rx = 0, ry = 0, rz = 0) { // многоугольник (выпуклый или звёздчатый) в плоскости XY, выдавленный на depth по Z
+      let M = m4(x, y, z, rx, ry, rz); if (api.base) M = m4mul(api.base, M);
+      const j = 1 + (rnd() - 0.5) * 0.08;
+      cc.setHex(color); const rgb = [cc.r * j, cc.g * j, cc.b * j];
+      const tr = (u, v, w) => [M[0] * u + M[4] * v + M[8] * w + M[12], M[1] * u + M[5] * v + M[9] * w + M[13], M[2] * u + M[6] * v + M[10] * w + M[14]];
+      let cu = 0, cv = 0; pts.forEach(q => { cu += q[0]; cv += q[1]; }); cu /= pts.length; cv /= pts.length;
+      const cen = [M[12] + M[4] * cv + M[0] * cu, M[13] + M[5] * cv + M[1] * cu, M[14] + M[6] * cv + M[2] * cu], hd = depth / 2;
+      for (let i = 0; i < pts.length; i++) {
+        const a = pts[i], b = pts[(i + 1) % pts.length];
+        face([tr(cu, cv, hd), tr(a[0], a[1], hd), tr(b[0], b[1], hd)], cen, rgb);
+        face([tr(cu, cv, -hd), tr(a[0], a[1], -hd), tr(b[0], b[1], -hd)], cen, rgb);
+        face([tr(a[0], a[1], hd), tr(b[0], b[1], hd), tr(b[0], b[1], -hd), tr(a[0], a[1], -hd)], cen, rgb);
+      }
+    },
+    frustum(r0, r1, h, seg, color, M, cap = true) { // усечённый конус вдоль оси Y, центр в начале M (r1 = 0 даёт конус)
+      if (api.base) M = m4mul(api.base, M);
+      const j = 1 + (rnd() - 0.5) * 0.08;
+      cc.setHex(color); const rgb = [cc.r * j, cc.g * j, cc.b * j];
+      const tr = (px, py, pz) => [M[0] * px + M[4] * py + M[8] * pz + M[12], M[1] * px + M[5] * py + M[9] * pz + M[13], M[2] * px + M[6] * py + M[10] * pz + M[14]];
+      const cen = [M[12], M[13], M[14]], hh = h / 2;
+      for (let i = 0; i < seg; i++) {
+        const a0 = i / seg * Math.PI * 2, a1 = (i + 1) / seg * Math.PI * 2, c0 = Math.cos(a0), s0 = Math.sin(a0), c1 = Math.cos(a1), s1 = Math.sin(a1);
+        const b0 = tr(c0 * r0, -hh, s0 * r0), b1 = tr(c1 * r0, -hh, s1 * r0), t0 = tr(c0 * r1, hh, s0 * r1), t1 = tr(c1 * r1, hh, s1 * r1);
+        face([b0, b1, t1, t0], cen, rgb);
+        if (cap) { if (r1 > 0) face([tr(0, hh, 0), t0, t1], cen, rgb); if (r0 > 0) face([tr(0, -hh, 0), b0, b1], cen, rgb); }
+      }
+    },
+    cyl(r, h, color, x, y0, z, seg = 10, cap = true) { api.frustum(r, r, h, seg, color, m4(x, y0 + h / 2, z), cap); }, // вертикальный цилиндр, y0 - низ
+    cone(r0, r1, h, color, x, y0, z, seg = 10) { api.frustum(r0, r1, h, seg, color, m4(x, y0 + h / 2, z)); },
+    cylX(r, len, color, x, y, z, seg = 10, cap = true) { api.frustum(r, r, len, seg, color, m4(x, y, z, 0, 0, Math.PI / 2), cap); }, // лежит вдоль X, центр в (x,y,z)
+    cylZ(r, len, color, x, y, z, seg = 10, cap = true) { api.frustum(r, r, len, seg, color, m4(x, y, z, Math.PI / 2, 0, 0), cap); }, // лежит вдоль Z
+    tube(p1, p2, r, color, seg = 6, cap = false) { // труба или стержень между двумя точками
+      const dx = p2[0] - p1[0], dy = p2[1] - p1[1], dz = p2[2] - p1[2], len = Math.hypot(dx, dy, dz);
+      if (len < 1e-6) return;
+      const y = [dx / len, dy / len, dz / len], hp = Math.abs(y[1]) < 0.95 ? [0, 1, 0] : [1, 0, 0];
+      let x = [hp[1] * y[2] - hp[2] * y[1], hp[2] * y[0] - hp[0] * y[2], hp[0] * y[1] - hp[1] * y[0]]; const lx = Math.hypot(x[0], x[1], x[2]); x = x.map(v => v / lx);
+      const zz = [x[1] * y[2] - x[2] * y[1], x[2] * y[0] - x[0] * y[2], x[0] * y[1] - x[1] * y[0]];
+      api.frustum(r, r, len, seg, color, [x[0], x[1], x[2], 0, y[0], y[1], y[2], 0, zz[0], zz[1], zz[2], 0, (p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2, (p1[2] + p2[2]) / 2, 1], cap);
+    },
+    gable(W, D, rise, color, x, y, z, ov = 0) { // призма двускатной крыши: коньком вдоль X, низ на высоте y
+      api.prism([[-D / 2 - ov, 0], [D / 2 + ov, 0], [0, rise]], W, color, x, y, z, 0, Math.PI / 2, 0);
+    },
+    blob(r, color, M, sx = 1, sy = 1, sz = 1, detail = 0, jit = 0.18) { // бугристый шар (кроны, кусты, валуны); color - число или функция(ny, номер грани) -> число
+      if (api.base) M = m4mul(api.base, M);
+      const gp = new THREE.IcosahedronGeometry(1, detail).attributes.position, vs = [];
+      for (let i = 0; i < gp.count; i++) {
+        const x = gp.getX(i), y = gp.getY(i), z = gp.getZ(i), hh = Math.sin(x * 127.1 + y * 311.7 + z * 74.7) * 43758.5453, k = r * (1 + ((hh - Math.floor(hh)) - 0.5) * 2 * jit);
+        const px = x * k * sx, py = y * k * sy, pz = z * k * sz;
+        vs.push([M[0] * px + M[4] * py + M[8] * pz + M[12], M[1] * px + M[5] * py + M[9] * pz + M[13], M[2] * px + M[6] * py + M[10] * pz + M[14]]);
+      }
+      const cen = [M[12], M[13], M[14]];
+      for (let i = 0; i < vs.length; i += 3) {
+        const a = vs[i], b = vs[i + 1], c = vs[i + 2];
+        const ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2], vx = c[0] - a[0], vy = c[1] - a[1], vz = c[2] - a[2];
+        let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx; const l = Math.hypot(nx, ny, nz) || 1; ny /= l;
+        const mx = (a[0] + b[0] + c[0]) / 3 - cen[0], my = (a[1] + b[1] + c[1]) / 3 - cen[1], mz = (a[2] + b[2] + c[2]) / 3 - cen[2];
+        if (nx * mx + ny * l * my + nz * mz < 0) ny = -ny;
+        const hex = typeof color === 'function' ? color(ny, i / 3) : color, hh = Math.sin(i * 12.9898 + vs[i][0] * 78.233) * 43758.5453, j = 0.93 + (hh - Math.floor(hh)) * 0.14;
+        cc.setHex(hex); face([a, b, c], cen, [cc.r * j, cc.g * j, cc.b * j]);
+      }
+    },
+    count() { return P.length / 3; },
+    mesh(mat) {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(P, 3));
+      geo.setAttribute('normal', new THREE.Float32BufferAttribute(N, 3));
+      geo.setAttribute('color', new THREE.Float32BufferAttribute(C, 3));
+      return new THREE.Mesh(geo, mat);
+    },
+  };
+  return api;
+}
+function mulberry(seed) { // маленький генератор случайных чисел: не трогает Math.random
+  return () => {
+    seed = (seed + 0x6D2B79F5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// Собирает зомби: g -> torso (голова и руки на нём, наклоняются вместе) и ноги. Начало координат у ног, лицо смотрит в +Z.
+function buildZombie(type, rnd, skinHex, shirtHex, pantsHex, eyeHex) {
+  const g = new THREE.Group();
+  g.rotation.order = 'YXZ'; // наклон при падении считается относительно направления взгляда, а не мировой оси
+  const isRun = type === 'runner', isBrute = type === 'brute', isSold = type === 'soldier', isBloat = type === 'bloater';
+  const sk = skinHex, skD = mulCol(sk, 0.7), skL = mulCol(sk, 1.12);
+  const shD = mulCol(shirtHex, 0.72), shL = mulCol(shirtHex, 1.22), pnD = mulCol(pantsHex, 0.72);
+  const BONE = 0xd8d0b8, BLOOD = 0x6a1010, BLOOD_D = 0x3f0a0a;
+  const pick = arr => arr[Math.floor(rnd() * arr.length)];
+  const grp = (x, y, z) => { const o = new THREE.Group(); o.position.set(x, y, z); return o; };
+  const dirt = lo => y => lo + (1 - lo) * Math.min(1, Math.max(0, (y + 0.95) / 0.95)); // внизу темнее
+  const lw = isRun ? 0.82 : 1; // бегун худой
+
+  // --- Торс (начало координат на уровне y=1.45) ---
+  const torso = grp(0, 1.45, 0), T = zBoxes(rnd, y => 0.84 + 0.16 * Math.min(1, Math.max(0, (y + 0.55) / 1.1)));
+  const cw = isRun ? 0.62 : isSold ? 0.74 : 0.7;
+  if (isRun) { // тощий: рёбра и позвоночник, лохмотья вместо рубашки
+    T.box(cw, 0.56, 0.38, sk, 0, 0.2, 0); T.box(cw - 0.08, 0.46, 0.34, skD, 0, -0.26, 0);
+    for (let k = 0; k < 4; k++) T.box(cw - 0.14, 0.04, 0.02, BONE, 0, 0.38 - k * 0.12, 0.2);
+    for (let k = 0; k < 5; k++) T.box(0.07, 0.06, 0.05, BONE, 0, 0.42 - k * 0.15, -0.2);
+    [-1, 0, 1].forEach(k => T.box(0.14, 0.34 + rnd() * 0.2, 0.04, shirtHex, k * 0.2, 0.15, 0.19)); // лохмотья спереди
+    T.box(0.5, 0.3, 0.04, shD, -0.04, 0.2, -0.19);
+  } else {
+    T.box(cw, 0.56, 0.4, shirtHex, 0, 0.2, 0); T.box(cw - 0.08, isBloat ? 0.3 : 0.46, 0.36, shirtHex, 0, isBloat ? -0.18 : -0.26, 0);
+    [-1, 1].forEach(sd => T.box(0.27, 0.18, 0.32, shirtHex, sd * 0.4, 0.42, 0));     // плечи
+    T.box(0.16, 0.14, 0.02, shL, -0.2, 0.1, 0.205);                                    // карман
+    T.box(0.22, 0.3, 0.02, skD, 0.18, -0.05, 0.205); T.box(0.12, 0.18, 0.02, BLOOD, 0.18, -0.05, 0.215); T.box(0.14, 0.03, 0.02, BONE, 0.18, 0.04, 0.222); // дыра в рубашке, рана
+    T.box(0.16, 0.14, 0.02, sk, -0.2, 0.36, 0.205);                                    // дыра на плече
+    for (let k = 0; k < 3; k++) T.box(0.1 + rnd() * 0.14, 0.1 + rnd() * 0.16, 0.02, BLOOD_D, (rnd() - 0.5) * 0.5, (rnd() - 0.5) * 0.6, 0.208); // кровь
+    for (let k = -3; k <= 3; k++) T.box(0.1, 0.05 + rnd() * 0.12, 0.38, shD, k * 0.095, -0.5, 0);        // рваный подол
+  }
+  T.box(0.34, 0.08, 0.3, isRun ? sk : shD, 0, 0.5, 0.02); T.box(0.2, 0.16, 0.2, sk, 0, 0.58, 0.02);   // воротник, шея
+  if (!isBloat) { T.box(cw + 0.02, 0.1, 0.4, 0x1f2a1f, 0, -0.52, 0); T.box(0.1, 0.07, 0.02, 0xc9a227, 0, -0.52, 0.21); } // ремень
+  if (isSold) { // бронежилет, подсумки, рюкзак со скаткой
+    T.box(0.8, 0.62, 0.46, 0x2f3a22, 0, 0.1, 0); T.box(0.42, 0.3, 0.05, 0x3a4a32, 0, 0.2, 0.25);
+    [-1, 1].forEach(sd => { T.box(0.16, 0.14, 0.08, 0x55603a, sd * 0.2, -0.14, 0.26); T.box(0.12, 0.1, 0.44, 0x2f3a22, sd * 0.25, 0.44, 0); });
+    T.box(0.5, 0.5, 0.24, 0x3a4228, 0, 0.05, -0.34); T.box(0.5, 0.14, 0.14, 0x55603a, 0, 0.42, -0.4);
+  } else if (isBrute) { // горб, цепь вместо ремня, наплечники с шипами
+    T.box(0.56, 0.32, 0.3, shirtHex, 0, 0.5, -0.28);
+    T.box(0.78, 0.06, 0.44, 0x555555, 0, -0.2, 0); T.box(0.1, 0.16, 0.04, 0x666666, 0.2, -0.3, 0.22);
+    [-1, 1].forEach(sd => { T.box(0.4, 0.22, 0.4, 0x2a2a2a, sd * 0.52, 0.52, 0); T.box(0.07, 0.2, 0.07, 0xa0a0a0, sd * 0.52, 0.72, 0); T.box(0.05, 0.14, 0.05, 0xa0a0a0, sd * 0.62, 0.68, 0.08, 0, 0, sd * -0.5); });
+  } else if (!isRun && !isBloat && rnd() < 0.3) { // рюкзак
+    T.box(0.5, 0.52, 0.22, pick([0x4a3a2a, 0x3a4a5a, 0x5a2a2a]), 0, 0.1, -0.3); T.box(0.04, 0.4, 0.04, 0x1a1a1a, -0.18, 0.2, 0.2); T.box(0.04, 0.4, 0.04, 0x1a1a1a, 0.18, 0.2, 0.2);
+  }
+  torso.add(T.mesh(zombieMat));
+
+  // --- Голова (центр головы, локально от торса y=+0.7) ---
+  const head = grp(0, 0.7, 0.02), Hd = zBoxes(rnd), Ey = zBoxes(rnd);
+  Hd.box(0.44, 0.36, 0.44, sk, 0, 0.04, 0);
+  if (isRun) Hd.box(0.36, 0.2, 0.34, skL, 0.04, -0.22, 0.05, 0, 0, 0.12); // вывихнутая челюсть
+  else Hd.box(0.38, 0.15, 0.38, skL, 0, -0.18, 0.03);
+  Hd.box(0.46, 0.06, 0.08, skD, 0, 0.1, 0.22);                              // надбровья
+  [-1, 1].forEach(sd => { Hd.box(0.14, 0.1, 0.04, 0x1a0f0f, sd * 0.11, 0.04, 0.225); Hd.box(0.03, 0.14, 0.02, mulCol(sk, 0.6), sd * 0.19, -0.08, 0.222); }); // глазницы, вены
+  Hd.box(0.07, 0.12, 0.08, skD, 0, -0.04, 0.235);                           // нос
+  [-1, 1].forEach(sd => { if (sd === 1 && rnd() < 0.35) Hd.box(0.05, 0.1, 0.07, BLOOD, 0.245, -0.02, 0); else Hd.box(0.05, 0.12, 0.09, sk, sd * 0.245, -0.02, 0); }); // уши, одно может быть оторвано
+  Hd.box(0.26, 0.08, 0.04, 0x1a0f0f, 0, -0.17, 0.205);                      // рот
+  for (let k = 0; k < 4; k++) Hd.box(0.04, 0.05, 0.03, 0xe6dfc8, -0.09 + k * 0.06, -0.14, 0.2);
+  for (let k = 0; k < 3; k++) Hd.box(0.04, 0.04, 0.03, 0xe6dfc8, -0.06 + k * 0.06, -0.2, 0.2);
+  Hd.box(0.12, 0.16, 0.03, BLOOD, (rnd() - 0.5) * 0.1, -0.3, 0.2);          // кровь на подбородке
+  if (rnd() < 0.3) Hd.box(0.16, 0.1, 0.02, BONE, (rnd() - 0.5) * 0.2, 0.2, 0.225); // видна кость
+  Ey.box(0.1, 0.07, 0.03, eyeHex, -0.11, 0.04, 0.245); Ey.box(0.1, 0.07, 0.03, eyeHex, 0.11, 0.04, 0.245);
+  if (isBrute) { [-1, 1].forEach(sd => Hd.box(0.05, 0.14, 0.05, 0xe0d8c0, sd * 0.1, -0.22, 0.22)); Hd.box(0.04, 0.3, 0.02, 0x7a2a2a, 0.18, 0.1, 0.228); } // клыки, шрам
+  if (isBloat) { for (let k = 0; k < 3; k++) Hd.box(0.08, 0.08, 0.06, 0xd8d060, (k - 1) * 0.14, 0.18 - k * 0.04, 0.23); }       // нарывы
+  if (isSold) { // каска, ремешок, козырёк
+    Hd.box(0.52, 0.2, 0.52, 0x3f4a2c, 0, 0.27, 0); Hd.box(0.54, 0.06, 0.56, 0x343d24, 0, 0.18, 0.02); Hd.box(0.4, 0.06, 0.04, 0x14181a, 0, 0.14, 0.27);
+    [-1, 1].forEach(sd => Hd.box(0.04, 0.2, 0.04, 0x14181a, sd * 0.2, -0.06, 0.18));
+  } else {
+    const hair = pick([0x2b2118, 0x1a1a1a, 0x4a3a28, 0x6a5a3a, 0x7a7a72]), style = isRun ? 2 : Math.floor(rnd() * 4);
+    if (style === 1 || style === 2) { Hd.box(0.48, 0.1, 0.48, hair, 0, 0.25, 0); Hd.box(0.5, 0.2, 0.1, hair, 0, 0.14, -0.21); }
+    if (style === 2) { Hd.box(0.46, 0.5, 0.08, hair, 0, -0.08, -0.25); [-1, 1].forEach(sd => Hd.box(0.06, 0.4, 0.14, hair, sd * 0.25, -0.02, -0.08)); }
+    if (style === 3) { Hd.box(0.3, 0.08, 0.3, hair, (rnd() - 0.5) * 0.15, 0.25, 0); }
+    if (style === 0) { [-1, 1].forEach(sd => Hd.box(0.05, 0.1, 0.1, hair, sd * 0.24, 0.1, -0.02)); }
+  }
+  head.add(Hd.mesh(zombieMat), Ey.mesh(zombieEyeMat));
+  torso.add(head);
+
+  // --- Руки: плечо с рукавом и предплечье с кистью на локте; вращаются вокруг плеча и локтя ---
+  const arm = sd => {
+    const a = grp(sd * (0.46 * (isBrute ? 1.04 : 1)), 0.37, 0), fo = grp(0, -0.36, 0);
+    const A = zBoxes(rnd, dirt(0.7)), F = zBoxes(rnd, y => dirt(0.7)(y - 0.36)), short = !isSold && rnd() < 0.3;
+    const sleeve = isRun ? skD : shirtHex;
+    A.box(0.2 * lw, 0.36, 0.2 * lw, short ? sk : sleeve, 0, -0.18, 0);
+    if (short) A.box(0.22 * lw, 0.12, 0.22 * lw, sleeve, 0, -0.06, 0);
+    else A.box(0.22 * lw, 0.06, 0.22 * lw, shD, 0, -0.33, 0);                    // рваный край рукава
+    F.box(0.17 * lw, 0.12, 0.17 * lw, sk, 0, 0, 0);                                // локоть: скрывает стык
+    F.box(0.17 * lw, 0.36, 0.17 * lw, sk, 0, -0.18, 0);
+    if (rnd() < 0.5) { F.box(0.19 * lw, 0.12, 0.19 * lw, BLOOD, 0, -0.14, 0); F.box(0.05, 0.14, 0.05, BONE, 0.04, -0.3, 0.06); } // рана с костью
+    const hand = isSold ? 0x1a1a1a : sk, hs = isBrute ? 1.35 : 1;
+    F.box(0.15 * hs, 0.14, 0.15 * hs, hand, 0, -0.41, 0);
+    for (let k = 0; k < 3; k++) F.box(0.035 * hs, 0.12, 0.04 * hs, isSold ? 0x111111 : skD, (-0.045 + k * 0.045) * hs, -0.54, 0.03, 0.35, 0, 0);
+    if (isBrute) { F.box(0.24, 0.08, 0.24, 0x3a3a3a, 0, -0.34, 0); F.box(0.05, 0.16, 0.05, 0x555555, 0, -0.46, 0.14); } // кандалы
+    fo.add(F.mesh(zombieMat)); a.add(A.mesh(zombieMat), fo); a.fore = fo; torso.add(a); return a;
+  };
+  const armL = arm(-1), armR = arm(1);
+  g.add(torso);
+
+  // --- Ноги: бедро и голень на колене; штанины, дыры на коленях, ботинки или босые ступни ---
+  const leg = sd => {
+    const l = grp(sd * 0.17, 0.95, 0), sh = grp(0, -0.5, 0);
+    const L = zBoxes(rnd, dirt(0.62)), S2 = zBoxes(rnd, y => dirt(0.62)(y - 0.5)), shorts = isBrute || rnd() < 0.15, bare = !isSold && rnd() < 0.2;
+    L.box(0.27 * lw, 0.5, 0.29 * lw, pantsHex, 0, -0.25, 0);
+    S2.box(0.26 * lw, 0.1, 0.28 * lw, shorts ? sk : pantsHex, 0, 0, 0);          // колено: скрывает стык
+    S2.box(0.25 * lw, 0.4, 0.27 * lw, shorts ? sk : pantsHex, 0, -0.2, 0);
+    if (!shorts) { S2.box(0.2, 0.13, 0.02, sk, 0, -0.04, 0.145 * lw); S2.box(0.28 * lw, 0.06, 0.3 * lw, pnD, 0, -0.36, 0); }
+    if (isSold) S2.box(0.27, 0.15, 0.08, 0x2a2e24, 0, 0, 0.17);                    // наколенник
+    if (bare) { S2.box(0.26, 0.1, 0.34, sk, 0, -0.41, 0.04); for (let k = 0; k < 3; k++) S2.box(0.06, 0.05, 0.06, skD, -0.08 + k * 0.08, -0.43, 0.23); }
+    else { S2.box(0.28, 0.14, 0.38, isSold ? 0x14110d : 0x1a1410, 0, -0.4, 0.05); S2.box(0.29, 0.04, 0.39, 0x0e0a08, 0, -0.46, 0.05); }
+    sh.add(S2.mesh(zombieMat)); l.add(L.mesh(zombieMat), sh); l.shin = sh; g.add(l); return l;
+  };
+  const legL = leg(-1), legR = leg(1);
+
+  const parts = { body: torso, head, headY: 0.7, armL, armR, legL, legR };
+  armL.rotation.x = armR.rotation.x = -1.35;
+  if (isBloat) { // раздутый живот и светящиеся волдыри
+    const belly = new THREE.Mesh(bellyGeo, bellyMat);
+    belly.position.set(0, 1.25, 0.1); belly.scale.set(1.2, 1, 0.9); g.add(belly); parts.belly = belly;
+    const G = zBoxes(rnd);
+    [[-0.3, 1.4, 0.5], [0.25, 1.1, 0.52], [0.05, 1.55, 0.45], [0.38, 1.35, 0.4], [-0.15, 1.15, 0.56]].forEach(([bx, by, bz]) => G.box(0.14, 0.14, 0.14, 0xe8f08a, bx, by, bz, 0.5, 0.6, 0));
+    [-0.32, 0.3].forEach(bx => G.box(0.03, 0.22, 0.03, 0x9acc2a, bx, 0.95, 0.5)); // стекающая слизь
+    g.add(G.mesh(zombieEyeMat));
+  }
+  return { group: g, parts };
+}
 function spawnZombie(ax, az, forcedType) {
   const type = forcedType && ZTYPES[forcedType] ? forcedType : pickZombieType(false);
   const cfg = ZTYPES[type];
-  const g = new THREE.Group();
-  const M = (c, r) => new THREE.MeshStandardMaterial({ color: c, roughness: r || 0.9, flatShading: true });
-  const part = (w, h, d, mat, x, y, z, parent) => { const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat); m.position.set(x, y, z); (parent || g).add(m); return m; };
   const shirts = type === 'runner' ? [0x7a2f2f, 0x5a2a2a, 0x6a3a2a] : type === 'soldier' ? [0x4a5230, 0x55603a] : type === 'brute' ? [0x3a3a3a, 0x4a3a2a] : type === 'bloater' ? [0x6a6a3a, 0x7a7a4a] : [0x3a4a6a, 0x6a3a3a, 0x4a5a3a, 0x55504a, 0x3a3a55];
   const skin = new THREE.Color(cfg.skin).offsetHSL((Math.random() - 0.5) * 0.05, 0, (Math.random() - 0.5) * 0.08);
-  const skinM = M(skin), shirtM = M(shirts[Math.floor(Math.random() * shirts.length)]), pantsM = M(type === 'soldier' ? 0x3f4a2c : 0x2a2a2a);
-  const body = part(0.7, 0.95, 0.38, shirtM, 0, 1.45, 0);
-  part(0.72, 0.16, 0.4, M(0x1f2a1f), 0, 1.0, 0);                       // ремень
-  part(0.2, 0.3, 0.02, skinM, 0.18, 1.3, 0.2);                           // дыра в рубашке
-  const head = part(0.46, 0.46, 0.46, skinM, 0, 2.15, 0.02);
-  const eye = new THREE.MeshBasicMaterial({ color: cfg.eye });
-  part(0.1, 0.07, 0.03, eye, -0.11, 2.2, 0.245); part(0.1, 0.07, 0.03, eye, 0.11, 2.2, 0.245);
-  part(0.22, 0.07, 0.03, M(0x1a0f0f), 0, 2.03, 0.245);                  // рот
-  part(0.48, 0.1, 0.48, M(0x2b2118), 0, 2.4, 0);                        // волосы
-  const arm = side => { const p = new THREE.Group(); p.position.set(side * 0.46, 1.82, 0); part(0.2, 0.4, 0.2, shirtM, 0, -0.2, 0, p); part(0.18, 0.4, 0.18, skinM, 0, -0.6, 0, p); g.add(p); return p; };
-  const leg = side => { const p = new THREE.Group(); p.position.set(side * 0.17, 0.95, 0); part(0.26, 0.9, 0.28, pantsM, 0, -0.45, 0, p); part(0.28, 0.12, 0.34, M(0x1a1410), 0, -0.9, 0.03, p); g.add(p); return p; };
-  const parts = { body, head, armL: arm(-1), armR: arm(1), legL: leg(-1), legR: leg(1) };
-  parts.armL.rotation.x = parts.armR.rotation.x = -1.35;
-  if (type === 'soldier') { // каска, жилет, подсумки
-    part(0.54, 0.2, 0.54, M(0x3f4a2c, 0.6), 0, 2.42, 0); part(0.46, 0.07, 0.04, M(0x14181a), 0, 2.26, 0.27);
-    part(0.78, 0.62, 0.44, M(0x2f3a22), 0, 1.55, 0);
-    [-1, 1].forEach(sd => part(0.16, 0.14, 0.08, M(0x55603a), sd * 0.2, 1.38, 0.26));
-  } else if (type === 'brute') { // наплечники, клыки, шрам
-    [-1, 1].forEach(sd => { part(0.34, 0.2, 0.34, M(0x2a2a2a, 0.6), sd * 0.5, 1.98, 0); part(0.05, 0.12, 0.05, M(0xe0d8c0), sd * 0.1, 2.0, 0.24); });
-    part(0.04, 0.3, 0.02, M(0x7a2a2a), 0.18, 2.2, 0.235);
-  } else if (type === 'bloater') { // раздутый живот с волдырями
-    const belly = new THREE.Mesh(new THREE.SphereGeometry(0.5, 10, 8), M(0xc8d45a, 0.5));
-    belly.position.set(0, 1.25, 0.1); belly.scale.set(1.2, 1, 0.9); g.add(belly); parts.belly = belly;
-    const glow = new THREE.MeshBasicMaterial({ color: 0xe8f08a });
-    [[-0.3, 1.4, 0.5], [0.25, 1.1, 0.52], [0.05, 1.55, 0.45], [0.38, 1.35, 0.4]].forEach(([bx, by, bz]) => { const b = new THREE.Mesh(new THREE.SphereGeometry(0.09, 6, 5), glow); b.position.set(bx, by, bz); g.add(b); });
-  } else if (type === 'runner') { // торчащие рёбра
-    [0, 1, 2].forEach(k => part(0.5, 0.06, 0.02, M(0xd8d0c0), 0, 1.3 + k * 0.14, 0.2));
-  }
-  g.scale.set(cfg.sx, cfg.sy, cfg.sx);
+  const shirt = shirts[Math.floor(Math.random() * shirts.length)];
   const a = Math.random() * Math.PI * 2, r = 25 + Math.random() * 40;
-  if (ax !== undefined) g.position.set(ax, 0, az); else g.position.set(Math.cos(a) * r, 0, Math.sin(a) * r);
+  const phase = Math.random() * 6;           // порядок и число вызовов Math.random прежние (мир из сохранений от них зависит)
+  const rnd = mulberry((Math.imul(Math.floor(a * 1e6), 2654435761) ^ Math.floor(phase * 1e6) ^ (Math.floor(r * 1e4) << 7) ^ Math.imul(zombieUid, 40503)) >>> 0);
+  const model = buildZombie(type, rnd, skin.getHex(), shirt, type === 'soldier' ? 0x3f4a2c : 0x2a2a2a, cfg.eye);
+  const g = model.group;
+  g.scale.set(cfg.sx, cfg.sy, cfg.sx);
+  if (ax !== undefined) g.position.set(ax, terrainY(ax, az), az); else g.position.set(Math.cos(a) * r, 0, Math.sin(a) * r);
   resolveCollisions(g.position, 0.6 * cfg.sx);
   scene.add(g);
-  const zo = { mesh: g, hp: cfg.hp, cooldown: 0, parts, phase: Math.random() * 6, id: zombieUid++, mv: 0, type, cfg };
+  const zo = { mesh: g, hp: cfg.hp, cooldown: 0, parts: model.parts, phase, id: zombieUid++, mv: 0, type, cfg };
   zombies.push(zo);
   return zo;
 }
-function animateZombie(z, moving, dt) { // походка: ноги шагают, руки качаются; бегун быстрее, вздутый дышит
-  const p = z.parts, cfg = z.cfg;
-  z.phase += dt * (moving ? 7 * Math.max(0.7, Math.min(2.0, cfg.speed / 2)) : 1.5);
-  const s = Math.sin(z.phase), amp = moving ? (z.type === 'runner' ? 0.95 : 0.7) : 0.08;
-  p.legL.rotation.x = s * amp; p.legR.rotation.x = -s * amp;
-  p.armL.rotation.x = -1.35 + Math.sin(z.phase * 0.9) * 0.12;
-  p.armR.rotation.x = -1.35 - Math.sin(z.phase * 0.9) * 0.12;
-  p.body.rotation.x = moving ? (z.type === 'runner' ? 0.3 : 0.12) : 0.05;
-  p.head.position.y = 2.15 + (moving ? Math.abs(s) * 0.03 : 0);
-  if (p.belly) { const k = 1 + 0.06 * Math.sin(z.phase * 1.3); p.belly.scale.set(1.2 * k, k, 0.9 * k); }
+// Походка по типам: stride - размах ног, knee - сгиб колена, lean - наклон вперёд, bob - подпрыгивание корпуса, arm - размах рук, speed - темп шага
+const ZGAIT = {
+  normal:  { stride: 0.55, knee: 0.8,  lean: 0.12, bob: 0.03,  arm: 0.12, speed: 1.0 },
+  runner:  { stride: 0.95, knee: 1.25, lean: 0.34, bob: 0.05,  arm: 0.45, speed: 1.0 },
+  brute:   { stride: 0.42, knee: 0.55, lean: 0.10, bob: 0.06,  arm: 0.08, speed: 0.8 },
+  bloater: { stride: 0.40, knee: 0.5,  lean: 0.06, bob: 0.04,  arm: 0.10, speed: 0.8 },
+  soldier: { stride: 0.55, knee: 0.9,  lean: 0.07, bob: 0.025, arm: 0.10, speed: 1.0 },
+};
+const ssm = (a, b, x) => { const u = Math.min(1, Math.max(0, (x - a) / (b - a))); return u * u * (3 - 2 * u); }; // плавная ступенька
+const ZOMBIE_ATTACK = 0.55; // длительность замаха и удара
+function animateZombie(z, moving, dt) { // ходьба с коленями и локтями, раскачивание, взгляд по сторонам, замах при укусе, вздрагивание от попаданий
+  const p = z.parts, cfg = z.cfg, G = ZGAIT[z.type] || ZGAIT.normal;
+  z.phase += dt * (moving ? 7 * Math.max(0.7, Math.min(2.0, cfg.speed / 2)) * G.speed : 1.5);
+  const ph = z.phase, s = Math.sin(ph), c = Math.cos(ph), m = moving ? 1 : 0;
+  let up = 0, hit = 0, flinch = 0;                       // замах (руки вверх), удар (руки вниз), вздрагивание
+  if (z.attackT > 0) { z.attackT -= dt; const t = 1 - Math.max(0, z.attackT) / ZOMBIE_ATTACK; up = ssm(0, 0.3, t) * (1 - ssm(0.3, 0.45, t)); hit = ssm(0.3, 0.45, t) * (1 - ssm(0.55, 1, t)); }
+  if (z.hitT > 0) { z.hitT -= dt; flinch = Math.max(0, z.hitT) / 0.28; }
+  // ноги: бедро качается, колено сгибается, когда нога идёт вперёд
+  p.legL.rotation.x = s * G.stride * m + 0.02 * Math.sin(ph * 0.5) * (1 - m);
+  p.legR.rotation.x = -s * G.stride * m;
+  p.legL.shin.rotation.x = 0.06 + Math.max(0, -c) * G.knee * m;
+  p.legR.shin.rotation.x = 0.06 + Math.max(0, c) * G.knee * m;
+  // корпус: наклон, покачивание, скручивание; при ударе подаётся вперёд
+  p.body.position.y = 1.45 + (moving ? Math.abs(s) * G.bob : Math.sin(ph) * 0.008);
+  p.body.rotation.x = (moving ? G.lean : 0.05) + 0.28 * hit - 0.2 * up - 0.3 * flinch + (moving ? 0 : Math.sin(ph * 1.3) * 0.012);
+  p.body.rotation.z = moving ? s * 0.06 : Math.sin(ph * 0.7) * 0.025;
+  p.body.rotation.y = moving ? s * 0.09 : 0;
+  // голова: свешена вперёд, в покое осматривается, при ударе бросается вперёд
+  p.head.position.y = p.headY + (moving ? Math.abs(s) * 0.03 : 0);
+  p.head.rotation.x = (moving ? 0.12 : 0.22) + 0.4 * hit - 0.3 * up - 0.5 * flinch;
+  p.head.rotation.z = Math.sin(ph * 0.6) * 0.07 + (moving ? s * 0.05 : 0);
+  p.head.rotation.y = moving ? 0 : Math.sin(ph * 0.35) * 0.35;
+  // руки: тянутся вперёд (бегун бежит с согнутыми и качает ими в такт ногам)
+  const run = z.type === 'runner' && moving, base = run ? -0.95 : -1.35, flex = run ? -1.15 : -0.22, act = G.arm * (moving ? 1 : 0.6);
+  [[p.armL, 1, 0], [p.armR, -1, 0.5]].forEach(([a, sd, off]) => {
+    const w = run ? -s * sd : Math.sin(ph * 0.9 + off * 3);
+    a.rotation.x = base + w * act - 0.9 * up + 0.75 * hit + 0.45 * flinch;
+    a.rotation.z = -sd * (0.06 + 0.05 * w);
+    a.fore.rotation.x = flex + w * 0.1 - 0.5 * up + 0.35 * hit - 0.3 * flinch;
+  });
+  if (p.belly) { const k = 1 + 0.06 * Math.sin(ph * 1.3); p.belly.scale.set(1.2 * k, k, 0.9 * k); }
+}
+// Тела убитых зомби падают, лежат несколько секунд и уходят в землю (сам зомби из игры убирается сразу)
+const corpses = [];
+function startCorpse(z) {
+  if (corpses.length >= 10) { const o = corpses.shift(); scene.remove(o.mesh); disposeObject(o.mesh); }
+  corpses.push({ mesh: z.mesh, parts: z.parts, cfg: z.cfg, t: 0, y0: z.mesh.position.y, side: z.id % 2 ? 1 : -1 });
+}
+function updateCorpses(dt) {
+  for (let i = corpses.length - 1; i >= 0; i--) {
+    const c = corpses[i], m = c.mesh, p = c.parts, t = (c.t += dt), f = Math.min(1, t / 0.6), e = f * f, l = Math.min(1, t / 0.8);
+    m.rotation.x = -Math.PI / 2 * e * 0.98; m.rotation.z = c.side * 0.18 * e;           // падает на спину
+    m.position.y = c.y0 + 0.18 * c.cfg.sy * e - (t > 5 ? (t - 5) * 0.6 : 0);             // потом уходит в землю
+    p.body.rotation.set(0.05 * (1 - l), 0, 0); p.head.rotation.set(0.22 - 0.5 * l, 0, 0);
+    p.armL.rotation.set(-1.35 + 1.1 * l, 0, -0.6 * l); p.armR.rotation.set(-1.35 + 1.1 * l, 0, 0.6 * l);
+    p.armL.fore.rotation.x = p.armR.fore.rotation.x = -0.2 * (1 - l);
+    p.legL.rotation.set(0.1 * l, 0, -0.18 * l); p.legR.rotation.set(-0.1 * l, 0, 0.22 * l);
+    p.legL.shin.rotation.x = p.legR.shin.rotation.x = 0.15 * l;
+    if (t > 6.6) { scene.remove(m); disposeObject(m); corpses.splice(i, 1); }
+  }
 }
 function hitDamage(z, y) { // в голову сильнее; броня солдата гасит попадания в тело
-  const head = y > 1.8 * z.cfg.sy;
+  const head = y - z.mesh.position.y > 1.8 * z.cfg.sy; // высота над ногами зомби, а не над нулём: на холме он стоит выше
   let d = head ? 2 : 1;
   if (z.cfg.armor && !head) d = 0.4;
   return d;
@@ -506,6 +1112,7 @@ for (let i = 0; i < 12; i++) spawnZombie();
 // --- Игрок ---
 let health = 100, hunger = 100, thirst = 100;
 let yaw = 0, pitch = 0, kills = 0;
+let shotCount = 0, axeCount = 0; // счётчики выстрелов и ударов топором: по ним другие игроки видят отдачу и замах
 const MAG = 7;                       // патронов в магазине
 const RELOAD = 2.4;                  // длительность перезарядки, сек
 let ammo = MAG, reserve = 21, reloading = false;
@@ -1023,31 +1630,72 @@ function createMilCase() {
   return { root, lid, loot, latches, L, H, D };
 }
 
-// Топор: модель из кода
-function createAxe() {
-  const root = new THREE.Group();
-  const m = (c, r, mt) => new THREE.MeshStandardMaterial({ color: c, roughness: r, metalness: mt, flatShading: true });
-  const wood = m(0x7a5230, 0.85, 0), woodD = m(0x4e3119, 0.9, 0), steel = m(0x9aa1a8, 0.35, 0.8), steelD = m(0x6c7279, 0.45, 0.7);
-  const skin = m(0xd9a67a, 0.9, 0), sleeve = m(0x3a4a6a, 0.95, 0);
-  const box = (w, h, d, mat, x, y, z) => { const b = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat); b.position.set(x, y, z); root.add(b); return b; };
-  box(0.045, 0.8, 0.045, wood, 0, 0.4, 0);          // рукоять
-  box(0.065, 0.07, 0.065, woodD, 0, 0.015, 0);      // набалдашник
-  box(0.054, 0.2, 0.054, woodD, 0, 0.2, 0);         // обмотка
-  const shape = new THREE.Shape([[-0.035, 0.66], [-0.035, 0.78], [0.03, 0.80], [0.13, 0.88], [0.17, 0.86], [0.17, 0.56], [0.13, 0.54], [0.03, 0.60]].map(p => new THREE.Vector2(p[0], p[1])));
-  const hg = new THREE.ExtrudeGeometry(shape, { depth: 0.035, bevelEnabled: true, bevelThickness: 0.004, bevelSize: 0.004, bevelSegments: 1 });
-  hg.translate(0, 0, -0.0175); hg.rotateY(Math.PI / 2);
-  root.add(new THREE.Mesh(hg, steel));                // головка (лезвие смотрит вперёд, в -Z)
-  box(0.038, 0.3, 0.01, steelD, 0, 0.71, -0.172);    // кромка лезвия
-  box(0.045, 0.075, 0.05, steelD, 0, 0.72, 0.06);    // обух
-  const limb = (sx, sy, sz, dx, dy, dz) => {
-    const dir = new THREE.Vector3(dx, dy, dz).normalize(), q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), dir);
-    [[0.2, 0, 0.08, skin], [0.8, 0.2, 0.12, sleeve]].forEach(([len, off, w, mt]) => {
-      const c = new THREE.Vector3(sx, sy, sz).addScaledVector(dir, off + len / 2);
-      const b = box(w, w, len, mt, c.x, c.y, c.z); b.quaternion.copy(q);
-    });
+// --- Топор: самодельный, но добротный. Изогнутая рукоять с обмоткой, головка с бородой и скошенным лезвием, кисти с пальцами ---
+// Модель склеена из коробок в 3-4 меша. Лезвие смотрит вперёд, в -Z, рукоять вдоль +Y, начало у нижнего конца рукояти.
+const axeWoodMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.85, metalness: 0, flatShading: true });
+const axeSteelMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.38, metalness: 0.75, flatShading: true });
+const axeSoftMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.92, metalness: 0, flatShading: true });
+const weaponMixMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.6, metalness: 0.35, flatShading: true }); // оружие в руках других игроков
+[axeWoodMat, axeSteelMat, axeSoftMat, weaponMixMat].forEach(m => { m.userData.shared = true; });
+
+function dirM(c, d) { // матрица 4x4: ось Z вдоль направления d, начало в точке c (для деталей вдоль руки)
+  const l = Math.hypot(d[0], d[1], d[2]), z = [d[0] / l, d[1] / l, d[2] / l];
+  let x = [z[2], 0, -z[0]]; const lx = Math.hypot(x[0], x[2]) || 1; x = [x[0] / lx, 0, x[2] / lx];
+  const y = [z[1] * x[2] - z[2] * x[1], z[2] * x[0] - z[0] * x[2], z[0] * x[1] - z[1] * x[0]];
+  return [x[0], x[1], x[2], 0, y[0], y[1], y[2], 0, z[0], z[1], z[2], 0, c[0], c[1], c[2], 1];
+}
+function createAxe(opts) {
+  opts = opts || {};
+  const root = new THREE.Group(), rnd = mulberry(20240731);
+  const W = zBoxes(rnd, y => 0.78 + 0.22 * Math.min(1, Math.max(0, y / 0.35))); // дерево: низ темнее от грязи
+  const S = zBoxes(rnd), K = zBoxes(rnd), Hn = zBoxes(rnd);                     // сталь, обмотки, кисти
+  const WOOD = 0x7a5230, WOOD_D = 0x4e3119, STEEL = 0x9aa1a8, STEEL_D = 0x6c7279, STEEL_L = 0xc7ced4;
+  const SKIN = 0xd9a67a, SKIN_D = 0xc08e63, SKIN_L = 0xe7b88e, SLEEVE = 0x3a4a6a, SLEEVE_D = 0x2c3a56;
+
+  // рукоять: овальное сечение, лёгкий изгиб, утолщение у низа
+  for (let i = 0; i < 8; i++) {
+    const t = i / 7, sw = 1 + 0.4 * Math.max(0, 0.3 - t) / 0.3;
+    W.box(0.034 * sw, 0.1, 0.05 * sw, WOOD, 0, i * 0.1 + 0.05, -0.016 * Math.sin(Math.PI * t));
+  }
+  W.box(0.064, 0.05, 0.072, WOOD_D, 0, 0.018, 0); W.box(0.05, 0.02, 0.058, WOOD_D, 0, -0.004, 0); // набалдашник
+  [-1, 1].forEach(sd => W.box(0.003, 0.4, 0.04, WOOD_D, sd * 0.0175, 0.58, -0.006));              // волокна дерева
+  W.box(0.012, 0.014, 0.05, WOOD_D, 0, 0.808, 0);                                                    // клин в проушине
+  for (let k = 0; k < 8; k++) K.box(0.054, 0.022, 0.068, k % 2 ? 0x2a2a2a : 0x3a3a3a, 0, 0.11 + k * 0.034, -0.004); // обмотка изолентой
+  K.box(0.012, 0.11, 0.012, 0x4a3320, 0.032, -0.03, 0.025, 0.2, 0, 0.3);                           // кожаная петля
+  for (let k = 0; k < 4; k++) K.box(0.058, 0.012, 0.062, 0x8a7a50, 0, 0.596 + k * 0.014, 0);         // бечёвка под головкой
+
+  // головка: проушина, обух, щека, лезвие с бородой, блик на кромке
+  S.box(0.054, 0.19, 0.115, STEEL_D, 0, 0.71, 0.016);
+  S.box(0.056, 0.17, 0.045, STEEL, 0, 0.71, 0.085);
+  S.prism([[-0.04, 0.80], [-0.10, 0.885], [-0.125, 0.865], [-0.125, 0.545], [-0.10, 0.525], [-0.04, 0.62]], 0.036, STEEL, 0, 0, 0, 0, -Math.PI / 2, 0);   // щека
+  S.prism([[-0.12, 0.885], [-0.15, 0.915], [-0.19, 0.865], [-0.205, 0.765], [-0.205, 0.665], [-0.185, 0.575], [-0.145, 0.515], [-0.12, 0.54]], 0.014, STEEL, 0, 0, 0, 0, -Math.PI / 2, 0); // лезвие
+  const edge = [[-0.19, 0.865], [-0.205, 0.765], [-0.205, 0.665], [-0.185, 0.575], [-0.145, 0.515]];
+  for (let i = 0; i < edge.length - 1; i++) {
+    const [z0, y0] = edge[i], [z1, y1] = edge[i + 1], dz = z1 - z0, dy = y1 - y0, len = Math.hypot(dz, dy);
+    S.box(0.017, 0.012, len + 0.004, STEEL_L, 0, (y0 + y1) / 2, (z0 + z1) / 2, Math.atan2(-dy, dz), 0, 0);
+  }
+  S.box(0.0025, 0.07, 0.09, 0x5a1a14, 0.0082, 0.72, -0.165); S.box(0.0025, 0.07, 0.09, 0x5a1a14, -0.0082, 0.66, -0.15); // кровь на лезвии
+  S.box(0.0025, 0.03, 0.03, 0x6a4a32, 0.0195, 0.6, -0.08); S.box(0.0025, 0.03, 0.03, 0x6a4a32, -0.0195, 0.78, -0.09);   // ржавчина
+  S.box(0.018, 0.022, 0.012, STEEL_D, 0, 0.705, -0.205); S.box(0.018, 0.016, 0.012, STEEL_D, 0, 0.8, -0.18);           // зазубрины
+  [-1, 1].forEach(sd => S.box(0.01, 0.016, 0.016, STEEL_L, sd * 0.03, 0.745, 0.016));                                    // заклёпки
+
+  // кисти: тыльная сторона к камере, пальцы обхватывают рукоять; предплечья идут к камере
+  const hand = (y0, dir) => {
+    Hn.box(0.084, 0.076, 0.036, SKIN, 0, y0, 0.05);                                      // тыльная сторона ладони
+    [-1, 1].forEach(sd => Hn.box(0.024, 0.076, 0.075, SKIN_D, sd * 0.043, y0, 0.0));      // пальцы по бокам рукояти
+    Hn.box(0.092, 0.076, 0.03, SKIN_D, 0, y0, -0.045);                                    // кончики пальцев спереди
+    for (let k = 0; k < 3; k++) Hn.box(0.094, 0.003, 0.032, 0x8a5a38, 0, y0 - 0.025 + k * 0.025, -0.046); // складки между пальцами
+    for (let k = 0; k < 4; k++) Hn.box(0.016, 0.014, 0.018, SKIN_L, (k - 1.5) * 0.021, y0 + 0.042, 0.054); // костяшки
+    Hn.box(0.022, 0.024, 0.065, SKIN, 0.05, y0 + 0.022, 0.03, 0.5, 0, 0);                  // большой палец
+    const wrist = [0, y0 - 0.03, 0.04];
+    Hn.boxM(0.085, 0.085, 0.2, SKIN, dirM([wrist[0] + dir[0] / Math.hypot(...dir) * 0.1, wrist[1] + dir[1] / Math.hypot(...dir) * 0.1, wrist[2] + dir[2] / Math.hypot(...dir) * 0.1], dir));
+    const n = Math.hypot(...dir), at = o => [wrist[0] + dir[0] / n * o, wrist[1] + dir[1] / n * o, wrist[2] + dir[2] / n * o];
+    Hn.boxM(0.12, 0.12, 0.8, SLEEVE, dirM(at(0.2 + 0.4), dir));                           // рукав
+    Hn.boxM(0.13, 0.13, 0.035, SLEEVE_D, dirM(at(0.2 + 0.018), dir));                     // манжета
+    Hn.boxM(0.125, 0.125, 0.03, SLEEVE_D, dirM(at(0.55), dir));                           // складка
   };
-  box(0.09, 0.09, 0.09, skin, 0, 0.12, 0); limb(0, 0.09, 0.04, 0.3, -0.7, 0.65);    // правая рука внизу
-  box(0.09, 0.09, 0.09, skin, 0, 0.40, 0); limb(0, 0.37, 0.04, -0.5, -0.6, 0.6);    // левая рука выше
+  root.add(W.mesh(axeWoodMat), S.mesh(axeSteelMat), K.mesh(axeSoftMat));
+  if (opts.hands !== false) { hand(0.12, [0.3, -0.7, 0.65]); hand(0.4, [-0.5, -0.6, 0.6]); root.add(Hn.mesh(axeSoftMat)); }
   return { root };
 }
 const axeRig = createAxe().root;
@@ -1202,39 +1850,83 @@ function corrugated(base, dark, rep) { // гофрированный метал�
   t.magFilter = THREE.NearestFilter; t.colorSpace = THREE.SRGBColorSpace;
   return t;
 }
-function makeRack(cx, cz, along, len, solid) { // стеллаж с ящиками
-  const depth = 0.8, H = 3.4, g = new THREE.Group();
-  const metal = new THREE.MeshStandardMaterial({ color: 0x3c5a7a, roughness: 0.6, metalness: 0.5, flatShading: true });
-  const wood = new THREE.MeshStandardMaterial({ color: 0x7a5c34, roughness: 0.9, flatShading: true });
-  const crates = [0x7a5c34, 0x5e6b4a, 0x6b4f2e, 0x4a5a6a, 0x8a6a3a];
-  const add = (w, h, d, m, x, y, z) => { const o = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m); o.position.set(x, y, z); g.add(o); return o; };
-  [-len / 2, len / 2].forEach(px => [-depth / 2, depth / 2].forEach(pz => add(0.08, H, 0.08, metal, px, H / 2, pz)));
-  [0.45, 1.5, 2.55].forEach(y => {
-    add(len, 0.05, depth, wood, 0, y, 0);
-    let px = -len / 2 + 0.5;
-    while (px < len / 2 - 0.4) {
-      const w = 0.5 + Math.random() * 0.5, h = 0.35 + Math.random() * 0.4, d = 0.45 + Math.random() * 0.25;
-      if (px + w / 2 > len / 2 - 0.1) break;
-      if (Math.random() < 0.8) add(w, h, d, new THREE.MeshStandardMaterial({ color: crates[Math.floor(Math.random() * crates.length)], roughness: 0.9, flatShading: true }), px, y + 0.025 + h / 2, (Math.random() - 0.5) * 0.1);
-      px += w + 0.12;
-    }
+// --- Набор для сборки зданий и декора (1.9.0): тысячи деталей склеиваются в несколько мешей с цветами вершин ---
+// Все координаты мировые. Детали складываются в кучи: s - стены (держат пули), r - крыша (держит пули), d - мелочи (пули летят сквозь),
+// m - металл (мелочи), ms - металл (держит пули), g - светящееся (лампы), gl - стёкла. Из каждой кучи получается один меш.
+// Внешний вид считается из координат здания (mulberry и h01), а не через Math.random: мир из сохранений не сдвигается.
+const bMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.92, flatShading: true });
+const bMetalMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.45, metalness: 0.65, flatShading: true });
+const bGlowMat = new THREE.MeshBasicMaterial({ vertexColors: true });
+[bMat, bMetalMat, bGlowMat].forEach(m => { m.userData.shared = true; });
+const h01 = (n, a, b) => { const v = Math.sin(n * 127.1 + a * 12.9898 + b * 78.233) * 43758.5453; return v - Math.floor(v); }; // 0..1 из чисел, без Math.random
+function bKit(x, z, tag) {
+  const rnd = mulberry(((Math.round(x * 64) * 73856093) ^ (Math.round(z * 64) * 19349663) ^ ((tag || 0) * 83492791)) | 1);
+  const ao = y => 0.72 + 0.28 * Math.min(1, Math.max(0, y / 1.6)); // низ темнее: грязь и тень у земли
+  const bs = { s: zBoxes(rnd, ao), r: zBoxes(rnd, ao), d: zBoxes(rnd, ao), m: zBoxes(rnd, ao), ms: zBoxes(rnd, ao), g: zBoxes(rnd), gl: zBoxes(rnd) };
+  const list = Object.values(bs);
+  return Object.assign({ rnd, x, z }, bs, {
+    xf(M0, fn) { list.forEach(b => { b.base = M0; }); try { fn(); } finally { list.forEach(b => { b.base = null; }); } }, // собрать часть в своих осях и повернуть целиком
+    finish() {
+      const out = [];
+      const make = (b, mat, block, shadow) => {
+        if (!b.count()) return;
+        const mesh = b.mesh(mat); scene.add(mesh); mesh.castShadow = shadow;
+        if (block) blockers.push(mesh);
+        out.push(mesh);
+      };
+      make(bs.s, bMat, true, true); make(bs.r, bMat, true, true); make(bs.d, bMat, false, false);
+      make(bs.m, bMetalMat, false, false); make(bs.ms, bMetalMat, true, true); make(bs.g, bGlowMat, false, false); make(bs.gl, glassMat, false, false);
+      return out;
+    },
   });
-  g.position.set(cx, 0, cz);
-  if (along === 'z') g.rotation.y = Math.PI / 2;
-  scene.add(g);
+}
+const colBox = (cx, cz, hx, hz, top) => colliders.push({ minX: cx - hx, maxX: cx + hx, minZ: cz - hz, maxZ: cz + hz, top });
+function crateK(b, w, h, d, col, x, y0, z) { // деревянный ящик: каркас, рейки, крышка, трафарет
+  b.box(w, h, d, col, x, y0 + h / 2, z);
+  const dk = mulCol(col, 0.72);
+  [-1, 1].forEach(sx => [-1, 1].forEach(sz => b.box(0.05, h + 0.01, 0.05, dk, x + sx * (w / 2 - 0.02), y0 + h / 2, z + sz * (d / 2 - 0.02))));
+  b.box(w + 0.02, 0.04, d + 0.02, mulCol(col, 0.85), x, y0 + h + 0.005, z);
+  [0.3, 0.7].forEach(k => b.box(w + 0.015, 0.035, d + 0.015, dk, x, y0 + h * k, z));
+  b.box(w * 0.45, 0.07, 0.008, 0xd8d0b0, x, y0 + h * 0.5, z + d / 2 + 0.006);
+}
+function rackK(K, cx, cz, along, len, solid) { // стеллаж с ящиками. Случайные числа те же и в том же порядке, что в 1.8.0
+  const depth = 0.8, H = 3.4, crates = [0x7a5c34, 0x5e6b4a, 0x6b4f2e, 0x4a5a6a, 0x8a6a3a];
+  K.xf(m4(cx, 0, cz, 0, along === 'z' ? Math.PI / 2 : 0, 0), () => {
+    const { m, d } = K;
+    [-len / 2, len / 2].forEach(px => {
+      [-depth / 2, depth / 2].forEach(pz => { m.box(0.08, H, 0.08, 0x3c5a7a, px, H / 2, pz); m.box(0.16, 0.03, 0.16, 0x2c4260, px, 0.015, pz); });
+      m.tube([px, 0.3, -depth / 2], [px, 2.9, depth / 2], 0.016, 0x4a6a8a); m.tube([px, 0.3, depth / 2], [px, 2.9, -depth / 2], 0.016, 0x4a6a8a); // раскосы
+    });
+    m.box(len + 0.08, 0.05, 0.05, 0x3c5a7a, 0, H, -depth / 2); m.box(len + 0.08, 0.05, 0.05, 0x3c5a7a, 0, H, depth / 2);
+    [0.45, 1.5, 2.55].forEach(y => {
+      d.box(len, 0.05, depth, 0x7a5c34, 0, y, 0);
+      [-1, 1].forEach(sd => m.box(len, 0.08, 0.04, 0x3c5a7a, 0, y - 0.05, sd * depth / 2));
+      let px = -len / 2 + 0.5;
+      while (px < len / 2 - 0.4) {
+        const w = 0.5 + Math.random() * 0.5, h = 0.35 + Math.random() * 0.4, dd = 0.45 + Math.random() * 0.25;
+        if (px + w / 2 > len / 2 - 0.1) break;
+        if (Math.random() < 0.8) {
+          const col = crates[Math.floor(Math.random() * crates.length)], oz = (Math.random() - 0.5) * 0.1;
+          crateK(d, w, h, dd, col, px, y + 0.025, oz);
+        }
+        px += w + 0.12;
+      }
+    });
+  });
   if (solid) {
     const hw = along === 'x' ? len / 2 : depth / 2, hd = along === 'x' ? depth / 2 : len / 2;
     colliders.push({ minX: cx - hw, maxX: cx + hw, minZ: cz - hd, maxZ: cz + hd });
   }
-  return g;
 }
-function makeBarrels(cx, cz, n) { // бочки кучкой
-  const cols = [0x8a2b20, 0x2b4a7a, 0x4a5a3a, 0x6a6a2a];
+function barrelsK(K, cx, cz, n) { // бочки кучкой: рёбра жёсткости, крышка с пробкой, потёки
+  const cols = [0x8a2b20, 0x2b4a7a, 0x4a5a3a, 0x6a6a2a], { m } = K;
   for (let i = 0; i < n; i++) {
-    const b = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.3, 0.9, 10), new THREE.MeshStandardMaterial({ color: cols[i % cols.length], roughness: 0.6, metalness: 0.4, flatShading: true }));
-    b.position.set(cx + (i % 3) * 0.7, 0.45, cz + Math.floor(i / 3) * 0.7); scene.add(b);
-    const band = new THREE.Mesh(new THREE.CylinderGeometry(0.31, 0.31, 0.06, 10), new THREE.MeshStandardMaterial({ color: 0x2a2a2a, roughness: 0.5, metalness: 0.7 }));
-    band.position.set(b.position.x, 0.6, b.position.z); scene.add(band);
+    const bx = cx + (i % 3) * 0.7, bz = cz + Math.floor(i / 3) * 0.7, c = cols[i % cols.length];
+    m.cyl(0.3, 0.9, c, bx, 0, bz, 10);
+    m.cyl(0.304, 0.22, mulCol(c, 0.72), bx, 0, bz, 10);                                    // грязь у основания
+    [0.12, 0.45, 0.78].forEach(y => m.cyl(0.314, 0.05, 0x242424, bx, y - 0.025, bz, 10)); // рёбра
+    m.cyl(0.27, 0.03, mulCol(c, 0.65), bx, 0.9, bz, 10); m.cyl(0.04, 0.05, 0x151515, bx + 0.12, 0.93, bz - 0.06, 6);
+    if (h01(i, cx, cz) > 0.5) m.box(0.07, 0.42, 0.012, 0x3a2a1c, bx + 0.1, 0.62, bz + 0.305);   // потёк
   }
   colliders.push({ minX: cx - 0.4, maxX: cx + 0.7 * Math.min(n, 3) - 0.3, minZ: cz - 0.4, maxZ: cz + 0.7 * Math.ceil(n / 3) - 0.3 });
 }
@@ -1286,73 +1978,116 @@ function hitHatch(w) { // удар топором по люку
 }
 
 function buildWarehouse(x, z, idx) {
-  const W = 16, D = 12, H = 5.4, T = 0.4;
-  const wallMat = rep => new THREE.MeshStandardMaterial({ color: 0xffffff, map: corrugated('#8f9aa3', '#6c7780', rep), roughness: 0.85, metalness: 0.2 });
-  const concrete = new THREE.MeshStandardMaterial({ color: 0x6e6e68, roughness: 1, flatShading: true });
-  const dark = new THREE.MeshStandardMaterial({ color: 0x353a3f, roughness: 0.7, metalness: 0.4, flatShading: true });
-  const part = (w, h, d, mat, px, py, pz, solid, bullet) => {
-    const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
-    m.position.set(px, py, pz); scene.add(m);
-    if (solid) colliders.push({ minX: px - w / 2, maxX: px + w / 2, minZ: pz - d / 2, maxZ: pz + d / 2 });
-    if (solid || bullet) blockers.push(m);
-    return m;
-  };
-  // деревья внутри участка убираем
-  for (let i = trees.length - 1; i >= 0; i--) {
-    const t = trees[i], p = t.trunk.position;
-    if (Math.abs(p.x - x) < W / 2 + 5 && Math.abs(p.z - z) < D / 2 + 6) {
-      scene.remove(t.trunk); scene.remove(t.crown);
-      colliders.splice(colliders.indexOf(t.collider), 1); blockers.splice(blockers.indexOf(t.trunk), 1); trees.splice(i, 1);
+  const W = 16, D = 12, H = 5.4, T = 0.4, seg = (W - 5) / 2;
+  clearTrees(x, z, W / 2 + 5, D / 2 + 6); // деревья внутри участка убираем
+  const K = bKit(x, z, 1), { s, r, d, m, g } = K;
+  const WALL = 0x8f9aa3, RIB = 0x7d8892, CONC = 0x6e6e68, DARK = 0x353a3f, RUST = 0x7a5238;
+  // Гофрированная стена: основа, рёбра с обеих сторон, потёки ржавчины от стыков
+  function panel(along, cx, cz, len, y0, y1) {
+    const h = y1 - y0, cy = (y0 + y1) / 2, n = Math.floor(len / 0.5), off = (len - n * 0.5) / 2;
+    if (along === 'x') s.box(len, h, T, WALL, cx, cy, cz); else s.box(T, h, len, WALL, cx, cy, cz);
+    for (let i = 0; i < n; i++) {
+      const o = -len / 2 + off + 0.25 + i * 0.5, c = i % 2 ? RIB : mulCol(WALL, 1.06), streak = h01(i, cx, cz) > 0.72, sh = 0.5 + h01(i + 9, cx, cz) * 1.3;
+      if (along === 'x') { s.box(0.18, h - 0.04, T + 0.09, c, cx + o, cy, cz); if (streak) s.box(0.07, sh, T + 0.11, RUST, cx + o, y1 - sh / 2, cz); }
+      else { s.box(T + 0.09, h - 0.04, 0.18, c, cx, cy, cz + o); if (streak) s.box(T + 0.11, sh, 0.07, RUST, cx, y1 - sh / 2, cz + o); }
     }
   }
-  // стены (ворота 5 м посередине южной стены)
-  const seg = (W - 5) / 2;
-  part(W, H, T, wallMat(W), x, H / 2, z - D / 2, true);
-  part(T, H, D, wallMat(D), x - W / 2, H / 2, z, true);
-  part(T, H, D, wallMat(D), x + W / 2, H / 2, z, true);
-  part(seg, H, T, wallMat(seg), x - 2.5 - seg / 2, H / 2, z + D / 2, true);
-  part(seg, H, T, wallMat(seg), x + 2.5 + seg / 2, H / 2, z + D / 2, true);
-  part(5, H - 4.2, T, wallMat(5), x, 4.2 + (H - 4.2) / 2, z + D / 2, false, true);
-  // бетонный цоколь, угловые стойки, пол
-  part(W + 0.2, 1.0, T + 0.12, concrete, x, 0.5, z - D / 2, false);
-  part(T + 0.12, 1.0, D, concrete, x - W / 2, 0.5, z, false); part(T + 0.12, 1.0, D, concrete, x + W / 2, 0.5, z, false);
-  part(seg, 1.0, T + 0.12, concrete, x - 2.5 - seg / 2, 0.5, z + D / 2, false); part(seg, 1.0, T + 0.12, concrete, x + 2.5 + seg / 2, 0.5, z + D / 2, false);
-  [-1, 1].forEach(sx => [-1, 1].forEach(sz => part(0.6, H + 0.2, 0.6, dark, x + sx * W / 2, (H + 0.2) / 2, z + sz * D / 2, false)));
-  part(W - 0.4, 0.04, D - 0.4, concrete, x, 0.02, z, false);
-  // крыша-призма и конёк
-  const rs = new THREE.Shape(); rs.moveTo(-D / 2 - 0.7, 0); rs.lineTo(D / 2 + 0.7, 0); rs.lineTo(0, 2.5); rs.closePath();
-  const rg = new THREE.ExtrudeGeometry(rs, { depth: W + 1.4, bevelEnabled: false });
-  rg.translate(0, 0, -(W + 1.4) / 2); rg.rotateY(Math.PI / 2);
-  const roof = new THREE.Mesh(rg, new THREE.MeshStandardMaterial({ color: 0x7a4636, roughness: 0.9, metalness: 0.3, flatShading: true, side: THREE.DoubleSide }));
-  roof.position.set(x, H, z); scene.add(roof); blockers.push(roof);
-  part(W + 1.6, 0.14, 0.4, dark, x, H + 2.55, z, false);
-  // окна под крышей
-  const glass = new THREE.MeshStandardMaterial({ color: 0x1a232b, roughness: 0.1, metalness: 0.6 });
-  for (let i = -2; i <= 2; i++) {
-    part(1.7, 0.95, 0.08, dark, x + i * 3, 3.9, z - D / 2 - T / 2 - 0.04, false); part(1.5, 0.75, 0.1, glass, x + i * 3, 3.9, z - D / 2 - T / 2 - 0.05, false);
-  }
-  [-1, 1].forEach(sx => [-3.5, 0, 3.5].forEach(oz => {
-    part(0.08, 0.95, 1.7, dark, x + sx * (W / 2 + T / 2 + 0.04), 3.9, z + oz, false); part(0.1, 0.75, 1.5, glass, x + sx * (W / 2 + T / 2 + 0.05), 3.9, z + oz, false);
+  const band = (along, cx, cz, len) => [2.3, 4.0].forEach(y => along === 'x' ? m.box(len, 0.12, T + 0.16, 0x6c7780, cx, y, cz) : m.box(T + 0.16, 0.12, len, 0x6c7780, cx, y, cz));
+  const plinth = (along, cx, cz, len) => {
+    if (along === 'x') { s.box(len + 0.2, 1.0, T + 0.12, CONC, cx, 0.5, cz); s.box(len + 0.24, 0.06, T + 0.16, mulCol(CONC, 1.15), cx, 1.03, cz); }
+    else { s.box(T + 0.12, 1.0, len, CONC, cx, 0.5, cz); s.box(T + 0.16, 0.06, len, mulCol(CONC, 1.15), cx, 1.03, cz); }
+  };
+  panel('x', x, z - D / 2, W, 0, H); colBox(x, z - D / 2, W / 2, T / 2); band('x', x, z - D / 2, W); plinth('x', x, z - D / 2, W);
+  panel('z', x - W / 2, z, D, 0, H); colBox(x - W / 2, z, T / 2, D / 2); band('z', x - W / 2, z, D); plinth('z', x - W / 2, z, D);
+  panel('z', x + W / 2, z, D, 0, H); colBox(x + W / 2, z, T / 2, D / 2); band('z', x + W / 2, z, D); plinth('z', x + W / 2, z, D);
+  [-1, 1].forEach(sg => { const cx = x + sg * (2.5 + seg / 2); panel('x', cx, z + D / 2, seg, 0, H); colBox(cx, z + D / 2, seg / 2, T / 2); band('x', cx, z + D / 2, seg); plinth('x', cx, z + D / 2, seg); });
+  panel('x', x, z + D / 2, 5, 4.2, H); // перемычка над воротами
+  // угловые стойки, стойки ворот
+  [-1, 1].forEach(sx => [-1, 1].forEach(sz => {
+    const cx = x + sx * W / 2, cz = z + sz * D / 2;
+    m.box(0.6, H + 0.2, 0.6, DARK, cx, (H + 0.2) / 2, cz); m.box(0.8, 0.12, 0.8, 0x24282b, cx, 0.06, cz);
+    [1.2, 3.0, 4.8].forEach(y => [-1, 1].forEach(q => m.box(0.06, 0.06, 0.04, 0x9aa0a8, cx + q * 0.18, y, cz + sz * 0.31)));
   }));
-  // ворота: направляющая, сдвинутая створка, вывеска, пандус
-  part(8, 0.18, 0.2, dark, x - 1.5, 4.5, z + D / 2 + 0.3, false);
-  part(3.2, 4.0, 0.16, wallMat(3.2), x - 4.1, 2.0, z + D / 2 + 0.32, false);
+  [-2.5, 2.5].forEach(ox => { m.box(0.4, 4.4, 0.5, DARK, x + ox, 2.2, z + D / 2); m.box(0.5, 0.1, 0.6, 0x24282b, x + ox, 0.05, z + D / 2); });
+  // пол и разметка
+  d.box(W - 0.4, 0.04, D - 0.4, 0x5e5e58, x, 0.02, z);
+  [-2.6, 1.9].forEach(ox => d.box(0.12, 0.01, D - 1.4, 0xb89a24, x + ox, 0.045, z));
+  d.box(W - 1.6, 0.01, 0.12, 0xb89a24, x, 0.045, z + D / 2 - 1.0);
+  for (let i = 0; i < 5; i++) d.box(0.05, 0.01, 0.6 + h01(i, x, z) * 1.6, 0x3a3a36, x - 6 + i * 2.7 + h01(i + 4, x, z), 0.046, z - 3 + h01(i + 7, x, z) * 6, 0, h01(i + 2, x, z) - 0.5, 0); // трещины
+  // крыша: два ската из рифлёного листа, конёк, желоба, ржавые пятна
+  const hs = D / 2 + 0.7, rise = 2.5, a = Math.atan2(rise, hs), L = Math.hypot(hs, rise), RW = W + 1.4;
+  [-1, 1].forEach(sg => {
+    K.xf(m4(x, H + rise / 2, z + sg * hs / 2, sg * a, 0, 0), () => {
+      r.box(RW, 0.12, L, 0x7a4636, 0, 0, 0);
+      for (let i = 0; i < Math.floor(RW / 0.55); i++) r.box(0.1, 0.07, L, i % 2 ? 0x6a3a2c : 0x84503e, -RW / 2 + 0.3 + i * 0.55, 0.08, 0);
+      for (let i = 0; i < 4; i++) { const px = (h01(i, x + sg, z) - 0.5) * (RW - 3), pz = (h01(i + 5, x, z + sg) - 0.5) * (L - 2); r.box(0.8 + h01(i + 1, z, x), 0.02, 0.6 + h01(i + 3, z, x) * 0.8, 0x4a2a20, px, 0.075, pz); }
+      m.box(RW, 0.1, 0.2, 0x4a4f55, 0, -0.05, sg * L / 2); m.box(RW, 0.14, 0.04, 0x3a3f45, 0, 0.0, sg * (L / 2 + 0.1)); // желоб
+    });
+  });
+  m.box(W + 1.6, 0.14, 0.4, DARK, x, H + rise + 0.05, z);
+  [-1, 1].forEach(sx => s.prism([[-D / 2 - 0.02, 0], [D / 2 + 0.02, 0], [0, rise - 0.05]], T, WALL, x + sx * W / 2, H, z, 0, Math.PI / 2, 0)); // фронтоны
+  [[-1, -1], [1, 1]].forEach(([sx, sz]) => m.tube([x + sx * (W / 2 + 0.55), 0.2, z + sz * (D / 2 + 0.75)], [x + sx * (W / 2 + 0.55), H - 0.1, z + sz * (D / 2 + 0.75)], 0.07, 0x4a4f55, 6)); // водостоки
+  [-8, -4, 0, 4, 8].forEach(ox => { // турбинные вентиляторы на коньке
+    const vx = x + ox * 0.9, vy = H + rise + 0.12;
+    m.cyl(0.34, 0.12, 0x8a8f94, vx, vy - 0.1, z, 10); m.cyl(0.32, 0.45, 0x9aa0a8, vx, vy, z, 10);
+    for (let k = 0; k < 6; k++) { const an = k / 6 * Math.PI * 2; m.box(0.04, 0.42, 0.18, 0x6a6f75, vx + Math.cos(an) * 0.3, vy + 0.22, z + Math.sin(an) * 0.3, 0, -an, 0.0); }
+    m.cone(0.4, 0.04, 0.28, 0x7a8086, vx, vy + 0.45, z, 10);
+  });
+  // стропильные фермы, лампы
+  [-6, -2, 2, 6].forEach(tx => {
+    const fx = x + tx;
+    m.tube([fx, H - 0.15, z - D / 2 + 0.2], [fx, H - 0.15, z + D / 2 - 0.2], 0.05, 0x4a5058, 6);
+    [-1, 1].forEach(sg => m.tube([fx, H - 0.1, z + sg * (D / 2 - 0.1)], [fx, H + rise - 0.08, z], 0.05, 0x4a5058, 6));
+    m.tube([fx, H - 0.15, z], [fx, H + rise - 0.08, z], 0.045, 0x4a5058, 6);
+    [-3, 3].forEach(oz => {
+      m.tube([fx, H - 0.15, z + oz], [fx, H - 0.8, z + oz], 0.012, 0x1a1a1a, 4);
+      m.cone(0.42, 0.12, 0.26, 0x2a2d2a, fx, H - 1.05, z + oz, 10); g.box(0.22, 0.08, 0.22, 0xfff0cc, fx, H - 1.08, z + oz);
+    });
+  });
+  // окна под крышей: рама, тёмное стекло, часть разбита
+  const win = (px, pz, alongX, out, n) => {
+    const broken = h01(n, px, pz) > 0.62, ox = alongX ? 0 : out * 0.015, oz = alongX ? out * 0.015 : 0;
+    m.box(alongX ? 1.7 : 0.08, 0.95, alongX ? 0.08 : 1.7, DARK, px, 3.9, pz);
+    d.box(alongX ? 1.5 : 0.1, 0.75, alongX ? 0.1 : 1.5, broken ? 0x070b0e : 0x1a232b, px + ox, 3.9, pz + oz);
+    m.box(alongX ? 0.05 : 0.12, 0.75, alongX ? 0.12 : 0.05, DARK, px + ox, 3.9, pz + oz);
+    m.box(alongX ? 1.9 : 0.2, 0.06, alongX ? 0.2 : 1.9, 0x5a5f64, px + out * (alongX ? 0 : 0.06), 3.38, pz + out * (alongX ? 0.06 : 0));
+    if (!broken) d.box(alongX ? 0.7 : 0.11, 0.05, alongX ? 0.11 : 0.7, 0x3a4a58, px + ox, 4.0, pz + oz, 0, 0, 0.5);
+    else for (let k = 0; k < 3; k++) d.box(alongX ? 0.2 : 0.11, 0.05, alongX ? 0.11 : 0.2, 0x6a8090, px + ox + (alongX ? (k - 1) * 0.45 : 0), 3.6 + k * 0.05, pz + oz + (alongX ? 0 : (k - 1) * 0.45), 0, 0, 0.8 * (k - 1));
+  };
+  for (let i = -2; i <= 2; i++) win(x + i * 3, z - D / 2 - T / 2 - 0.04, true, -1, i + 3);
+  [-1, 1].forEach(sx => [-3.5, 0, 3.5].forEach((oz, k) => win(x + sx * (W / 2 + T / 2 + 0.04), z + oz, false, sx, k + 7)));
+  // ворота: направляющая, сдвинутая створка с рёбрами и роликами, пандус с полосами
+  const gz = z + D / 2 + 0.32;
+  m.box(8, 0.18, 0.2, DARK, x - 1.5, 4.5, z + D / 2 + 0.3);
+  [-4.6, -2.6, -0.6, 1.4, 2.4].forEach(ox => m.box(0.1, 0.3, 0.14, DARK, x + ox, 4.3, z + D / 2 + 0.26));
+  m.box(3.2, 4.0, 0.16, WALL, x - 4.1, 2.0, gz);
+  for (let i = 0; i < 6; i++) m.box(0.2, 3.9, 0.22, i % 2 ? RIB : mulCol(WALL, 1.06), x - 5.5 + i * 0.55, 2.0, gz);
+  [0.9, 2.4, 3.6].forEach(y => m.box(3.3, 0.14, 0.26, 0x6c7780, x - 4.1, y, gz));
+  m.box(0.1, 0.5, 0.1, 0x24282b, x - 2.8, 1.2, gz + 0.16); [-1.6, -0.2].forEach(o => m.cylZ(0.12, 0.1, 0x24282b, x - 4.1 + o - 0.1, 4.4, z + D / 2 + 0.3, 8));
+  m.box(7, 0.06, 0.2, 0x24282b, x - 2.1, 0.04, gz); // нижняя направляющая
   const sc = document.createElement('canvas'); sc.width = 256; sc.height = 64;
   const sx2 = sc.getContext('2d'); sx2.fillStyle = '#23282c'; sx2.fillRect(0, 0, 256, 64);
   sx2.fillStyle = '#e8dfc8'; sx2.font = 'bold 40px monospace'; sx2.textAlign = 'center'; sx2.fillText('СКЛАД №' + (idx + 1), 128, 46);
   const sign = new THREE.Mesh(new THREE.PlaneGeometry(3.6, 0.9), new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(sc) }));
   sign.position.set(x, 4.85, z + D / 2 + T / 2 + 0.02); scene.add(sign);
-  part(6, 0.2, 2.6, concrete, x, 0.1, z + D / 2 + 1.5, false);
-  // внутри: стеллажи, бочки, ящики
-  makeRack(x - W / 2 + 0.9, z - 3.4, 'z', 3.6, true); makeRack(x - W / 2 + 0.9, z + 0.5, 'z', 3.6, true);
-  makeRack(x + W / 2 - 0.9, z - 3.4, 'z', 3.6, true); makeRack(x + W / 2 - 0.9, z + 0.5, 'z', 3.6, true);
-  makeRack(x - 3.8, z - D / 2 + 0.9, 'x', 4.0, true); makeRack(x + 0.4, z - D / 2 + 0.9, 'x', 4.0, true);
-  makeBarrels(x + 5.4, z + 3.6, 5);
-  for (let i = 0; i < 2; i++) { // штабели ящиков
+  m.box(3.8, 1.1, 0.03, DARK, x, 4.85, z + D / 2 + T / 2 - 0.0); [-1.75, 1.75].forEach(o => m.box(0.06, 1.1, 0.1, 0x24282b, x + o, 4.85, z + D / 2 + T / 2 + 0.03));
+  s.box(6, 0.2, 2.6, CONC, x, 0.1, z + D / 2 + 1.5); s.box(6.1, 0.06, 2.7, mulCol(CONC, 1.12), x, 0.21, z + D / 2 + 1.5);
+  for (let i = 0; i < 15; i++) d.box(0.4, 0.012, 0.16, i % 2 ? 0x151515 : 0xe0b020, x - 2.8 + i * 0.4, 0.232, z + D / 2 + 2.75);
+  [[-3.2, 7.6], [3.2, 7.6], [-3.2, 9.6], [3.2, 9.6]].forEach(([ox, oz]) => { m.cyl(0.1, 0.9, 0xe0b020, x + ox, 0, z + oz, 8); m.cyl(0.104, 0.12, 0x151515, x + ox, 0.55, z + oz, 8); m.cyl(0.11, 0.03, 0x24282b, x + ox, 0.9, z + oz, 8); }); // столбики у ворот
+  // труба вдоль задней стены с кронштейнами, прожектор на столбе
+  m.cylX(0.07, 12, 0x6a6f75, x, 3.0, z - 6.5, 8); [-5, -1.7, 1.7, 5].forEach(ox => m.box(0.08, 0.08, 0.38, DARK, x + ox, 3.0, z - 6.35)); [-6, 6].forEach(ox => m.cylX(0.1, 0.12, 0x4a4f55, x + ox, 3.0, z - 6.5, 8));
+  m.tube([x - 10, 0, z + 7], [x - 10, 7, z + 7], 0.09, 0x4a4f55, 6); m.box(1.0, 0.12, 0.6, DARK, x - 10, 7.0, z + 6.9); g.box(0.9, 0.3, 0.5, 0xfff0cc, x - 10, 7.1, z + 6.8); colBox(x - 10, z + 7, 0.2, 0.2);
+  // внутри: стеллажи (порядок и числа как в 1.8.0), бочки, штабели ящиков
+  rackK(K, x - W / 2 + 0.9, z - 3.4, 'z', 3.6, true); rackK(K, x - W / 2 + 0.9, z + 0.5, 'z', 3.6, true);
+  rackK(K, x + W / 2 - 0.9, z - 3.4, 'z', 3.6, true); rackK(K, x + W / 2 - 0.9, z + 0.5, 'z', 3.6, true);
+  rackK(K, x - 3.8, z - D / 2 + 0.9, 'x', 4.0, true); rackK(K, x + 0.4, z - D / 2 + 0.9, 'x', 4.0, true);
+  barrelsK(K, x + 5.4, z + 3.6, 5);
+  for (let i = 0; i < 2; i++) { // штабели ящиков на поддонах
     const cx = x - 5.4 + i * 1.7, cz = z + 4.2;
-    part(1.4, 0.9, 1.2, new THREE.MeshStandardMaterial({ color: 0x7a5c34, roughness: 0.9, flatShading: true }), cx, 0.45, cz, true);
-    part(1.0, 0.7, 0.9, new THREE.MeshStandardMaterial({ color: 0x5e6b4a, roughness: 0.9, flatShading: true }), cx, 1.25, cz, false);
+    s.box(1.5, 0.1, 1.3, 0x8a6a3a, cx, 0.05, cz); crateK(s, 1.4, 0.8, 1.2, 0x7a5c34, cx, 0.1, cz); colBox(cx, cz, 0.7, 0.6);
+    crateK(d, 1.0, 0.7, 0.9, 0x5e6b4a, cx, 0.9, cz);
   }
+  K.finish();
   // люк в подвал
   const hx = x + 3.6, hz = z - 2.2;
   const hatch = makeHatch(); hatch.position.set(hx, 0.04, hz); scene.add(hatch);
@@ -1363,36 +2098,51 @@ function buildWarehouse(x, z, idx) {
 }
 
 function buildBasement(bx, bz) { // подземное помещение (далеко за краем карты, туда попадают через люк)
-  const W = 18, D = 12, H = 3.4, T = 0.5;
-  box(W + T, H, T, 0x5a5c58, bx, H / 2, bz - D / 2, true);
-  box(W + T, H, T, 0x5a5c58, bx, H / 2, bz + D / 2, true);
-  box(T, H, D, 0x5a5c58, bx - W / 2, H / 2, bz, true);
-  box(T, H, D, 0x5a5c58, bx + W / 2, H / 2, bz, true);
-  box(W, 0.1, D, 0x474846, bx, -0.05, bz, false);
-  box(W, 0.2, D, 0x3a3b3a, bx, H + 0.1, bz, false);
-  [-1, 1].forEach(sx => [-1, 1].forEach(sz => box(0.7, H, 0.7, 0x6a6c68, bx + sx * 4.5, H / 2, bz + sz * 1.8, true))); // колонны
-  for (let i = 0; i < 5; i++) box(0.35, 0.3, D, 0x2f302f, bx - 8 + i * 4, H - 0.15, bz, false);                       // балки
-  const pipeMat = new THREE.MeshStandardMaterial({ color: 0x6b5a48, roughness: 0.6, metalness: 0.6, flatShading: true });
-  [[-5.4, 2.85], [-5.4, 2.55], [5.4, 2.85]].forEach(([oz, y]) => {
-    const p = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, W - 1, 8), pipeMat);
-    p.rotation.z = Math.PI / 2; p.position.set(bx, y, bz + oz); scene.add(p);
+  const W = 18, D = 12, H = 3.4, T = 0.5, K = bKit(bx, bz, 3), { s, d, m, g } = K;
+  const WALL = 0x5a5c58;
+  [[bx, bz - D / 2, W + T, T], [bx, bz + D / 2, W + T, T], [bx - W / 2, bz, T, D], [bx + W / 2, bz, T, D]].forEach(([cx, cz, w, dd]) => {
+    s.box(w, H, dd, WALL, cx, H / 2, cz); colBox(cx, cz, w / 2, dd / 2);
   });
-  const lampMat = new THREE.MeshBasicMaterial({ color: 0xffd9a0 });
-  [-5, 0, 5].forEach(ox => {
-    const cord = new THREE.Mesh(new THREE.CylinderGeometry(0.01, 0.01, 0.5, 4), pipeMat); cord.position.set(bx + ox, H - 0.3, bz); scene.add(cord);
-    const shade = new THREE.Mesh(new THREE.ConeGeometry(0.32, 0.22, 8), new THREE.MeshStandardMaterial({ color: 0x2a2d2a, roughness: 0.6, metalness: 0.5, flatShading: true })); shade.position.set(bx + ox, H - 0.62, bz); scene.add(shade);
-    const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.08, 6, 5), lampMat); bulb.position.set(bx + ox, H - 0.72, bz); scene.add(bulb);
+  // следы опалубки, сырость, трещины на внутренних стенах
+  for (let i = -3; i <= 3; i++) {
+    [-1, 1].forEach(sd => d.box(0.1, H, 0.06, 0x4e504c, bx + i * 2.6, H / 2, bz + sd * (D / 2 - T / 2 - 0.02)));
+    if (h01(i, bx, bz) > 0.45) d.box(1.4 + h01(i + 3, bx, bz), 0.7 + h01(i + 5, bx, bz) * 0.6, 0.03, 0x3e4a3e, bx + i * 2.6 + 0.6, 0.4, bz - D / 2 + T / 2 + 0.02); // зелёная плесень внизу
+    if (h01(i + 8, bx, bz) > 0.55) m.tube([bx + i * 2.4, H - 0.1, bz + D / 2 - T / 2 - 0.03], [bx + i * 2.4 + 0.25, H - 1.0, bz + D / 2 - T / 2 - 0.03], 0.012, 0x24282b, 4);
+  }
+  d.box(W, 0.1, D, 0x474846, bx, -0.05, bz);
+  for (let i = 0; i < 6; i++) d.box(0.8 + h01(i, bx, bz) * 1.4, 0.012, 0.6 + h01(i + 4, bx, bz) * 0.9, 0x2e3436, bx - 6 + i * 2.3, 0.006, bz - 2 + h01(i + 2, bx, bz) * 4); // лужи
+  d.box(W, 0.2, D, 0x3a3b3a, bx, H + 0.1, bz);
+  d.box(0.9, 0.02, 0.9, 0x1a1c1a, bx + 2.5, 0.01, bz + 0.2); [-0.3, 0, 0.3].forEach(o => d.box(0.8, 0.02, 0.04, 0x55585a, bx + 2.5, 0.02, bz + 0.2 + o)); // сливная решётка
+  [-1, 1].forEach(sx => [-1, 1].forEach(sz => { // колонны с плинтусом, капителью и предупреждающей полосой
+    const cx = bx + sx * 4.5, cz = bz + sz * 1.8;
+    s.box(0.7, H, 0.7, 0x6a6c68, cx, H / 2, cz); colBox(cx, cz, 0.35, 0.35);
+    s.box(0.9, 0.18, 0.9, 0x5a5c58, cx, 0.09, cz); s.box(0.86, 0.22, 0.86, 0x5a5c58, cx, H - 0.11, cz);
+    for (let k = 0; k < 5; k++) d.box(0.74, 0.12, 0.74, k % 2 ? 0x151515 : 0xe0b020, cx, 1.0 + k * 0.12, cz);
+  }));
+  for (let i = 0; i < 5; i++) { s.box(0.35, 0.3, D, 0x2f302f, bx - 8 + i * 4, H - 0.15, bz); m.box(0.5, 0.04, D, 0x4a4b4a, bx - 8 + i * 4, H - 0.32, bz); } // балки
+  [[-5.4, 2.85], [-5.4, 2.55], [5.4, 2.85]].forEach(([oz, y]) => { // трубы с фланцами, кронштейнами и вентилем
+    m.cylX(0.08, W - 1, 0x6b5a48, bx, y, bz + oz, 8);
+    for (let k = -3; k <= 3; k++) { m.cylX(0.115, 0.06, 0x3a3a3a, bx + k * 2.5, y, bz + oz, 8); m.box(0.05, 0.05, 0.3, 0x2a2a2a, bx + k * 2.5 + 0.3, y, bz + oz + Math.sign(oz) * 0.15); }
   });
+  m.cyl(0.04, 0.3, 0x8a2b20, bx + 2.2, 2.95, bz - 5.4, 6); m.cylX(0.16, 0.05, 0x8a2b20, bx + 2.2, 3.25, bz - 5.4, 8);
+  m.tube([bx - 8.4, 2.85, bz - 5.4], [bx - 8.4, 0.1, bz - 5.4], 0.07, 0x6b5a48, 8); // стояк
+  [-5, 0, 5].forEach(ox => { // подвесные лампы
+    m.tube([bx + ox, H - 0.3, bz], [bx + ox, H - 0.5, bz], 0.01, 0x6b5a48, 4);
+    m.cone(0.34, 0.1, 0.24, 0x2a2d2a, bx + ox, H - 0.74, bz, 8); g.box(0.16, 0.12, 0.16, 0xffd9a0, bx + ox, H - 0.74, bz);
+  });
+  // щиток с проводами у западной стены
+  m.box(0.1, 0.9, 0.7, 0x4a5a4a, bx - W / 2 + T / 2 + 0.07, 1.5, bz - 3.2); m.box(0.04, 0.5, 0.5, 0x2a2d2a, bx - W / 2 + T / 2 + 0.14, 1.5, bz - 3.2); g.box(0.02, 0.04, 0.04, 0x3aff3a, bx - W / 2 + T / 2 + 0.17, 1.65, bz - 3.0);
   // лестница вверх у восточной стены и светлое пятно люка
   const lx = bx + W / 2 - 0.45;
-  const rail = new THREE.MeshStandardMaterial({ color: 0x7a5c34, roughness: 0.9, flatShading: true });
-  [-0.35, 0.35].forEach(oz => { const r = new THREE.Mesh(new THREE.BoxGeometry(0.07, H, 0.07), rail); r.position.set(lx, H / 2, bz + oz); scene.add(r); });
-  for (let i = 0; i < 9; i++) { const r = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.05, 0.7), rail); r.position.set(lx, 0.3 + i * 0.34, bz); scene.add(r); }
-  const lightQuad = new THREE.Mesh(new THREE.BoxGeometry(1.0, 0.02, 1.0), new THREE.MeshBasicMaterial({ color: 0xcfe6ff })); lightQuad.position.set(lx - 0.1, H - 0.01, bz); scene.add(lightQuad);
-  // стеллажи и бочки
-  makeRack(bx - 4.5, bz - 5.1, 'x', 4.2, true); makeRack(bx + 1.0, bz - 5.1, 'x', 4.2, true);
-  makeRack(bx - 4.5, bz + 5.1, 'x', 4.2, true); makeRack(bx + 1.0, bz + 5.1, 'x', 4.2, true);
-  makeBarrels(bx + 6.4, bz + 4.2, 4);
+  [-0.35, 0.35].forEach(oz => d.box(0.07, H, 0.07, 0x7a5c34, lx, H / 2, bz + oz));
+  for (let i = 0; i < 9; i++) d.box(0.05, 0.05, 0.7, 0x7a5c34, lx, 0.3 + i * 0.34, bz);
+  g.box(1.0, 0.02, 1.0, 0xcfe6ff, lx - 0.1, H - 0.01, bz);
+  m.box(1.3, 0.06, 0.1, 0x2f3236, lx - 0.1, H - 0.05, bz - 0.55); m.box(1.3, 0.06, 0.1, 0x2f3236, lx - 0.1, H - 0.05, bz + 0.55);
+  // стеллажи и бочки (порядок и числа как в 1.8.0)
+  rackK(K, bx - 4.5, bz - 5.1, 'x', 4.2, true); rackK(K, bx + 1.0, bz - 5.1, 'x', 4.2, true);
+  rackK(K, bx - 4.5, bz + 5.1, 'x', 4.2, true); rackK(K, bx + 1.0, bz + 5.1, 'x', 4.2, true);
+  barrelsK(K, bx + 6.4, bz + 4.2, 4);
+  K.finish();
   return { x: lx - 1.1, z: bz };
 }
 
@@ -1424,7 +2174,7 @@ function clearTrees(x, z, hw, hd) { // убираем деревья на уча
     const t = trees[i], p = t.trunk.position;
     if (Math.abs(p.x - x) < hw && Math.abs(p.z - z) < hd) {
       scene.remove(t.trunk); scene.remove(t.crown);
-      colliders.splice(colliders.indexOf(t.collider), 1); blockers.splice(blockers.indexOf(t.trunk), 1); trees.splice(i, 1);
+      removeFrom(colliders, t.collider); removeFrom(blockers, t.trunk); trees.splice(i, 1);
     }
   }
 }
@@ -1455,49 +2205,251 @@ function gable(W, D, rise, mat, x, y, z) { // двускатная крыша, �
   return m;
 }
 
+// --- Техника и мелкие конструкции (1.9.0): всё собирается в кучи деталей здания, у которого стоит ---
+const ctr = (a, z, rotY) => ({ al: Math.abs(Math.sin(rotY)) < 0.5, M: m4(a, 0, z, 0, rotY, 0) }); // ось техники: вдоль X (al) или вдоль Z
+function carK(K, x, z, rotY, color, flip) { // ржавый остов легковой машины: кузов, провалы окон, открытая дверь, одно колесо снято
+  const dark = 0x1a1a1a, rust = 0x6b4a2a, glass = 0x141b21, chrome = 0x777c82, { al } = ctr(x, z, rotY);
+  K.xf(m4(x, 0, z, 0, rotY, 0), () => {
+    const { ms, m, d } = K;
+    ms.box(1.8, 0.5, 4.2, color, 0, 0.62, 0); ms.box(1.7, 0.1, 4.0, mulCol(color, 0.7), 0, 0.3, 0);
+    ms.box(1.72, 0.1, 1.35, color, 0, 0.93, -1.45, -0.09, 0, 0); ms.box(1.72, 0.1, 0.9, color, 0, 0.93, 1.6, 0.05, 0, 0); // капот и багажник
+    ms.box(1.6, 0.5, 1.8, color, 0, 1.28, 0.1);                       // салон
+    d.box(1.52, 0.04, 1.6, rust, 0, 1.56, 0.1);                       // ржавая крыша
+    m.box(1.5, 0.46, 0.05, glass, 0, 1.3, -0.82, 0.45, 0, 0);          // лобовое (стекла нет)
+    [-1, 1].forEach(sd => { [-0.7, 0.1, 0.9].forEach(pz => m.box(0.07, 0.52, 0.07, mulCol(color, 0.8), sd * 0.78, 1.28, pz)); d.box(0.03, 0.4, 0.7, glass, sd * 0.805, 1.28, -0.3); d.box(0.03, 0.4, 0.7, glass, sd * 0.805, 1.28, 0.5); });
+    m.box(0.07, 0.5, 0.95, color, -1.28, 0.78, -0.15, 0, flip ? -1.0 : 1.0, 0);   // открытая дверь
+    m.box(1.9, 0.14, 0.2, 0x555a60, 0, 0.42, -2.15); m.box(1.9, 0.14, 0.2, 0x555a60, 0, 0.42, 2.15);
+    d.box(0.95, 0.22, 0.04, dark, 0, 0.74, -2.11); [-0.7, 0.7].forEach(sx => { d.box(0.28, 0.18, 0.06, 0x8a9096, sx, 0.75, -2.1); d.box(0.26, 0.14, 0.06, 0x6a1a14, sx, 0.78, 2.1); });
+    d.box(0.5, 0.12, 0.02, 0xc8c2a8, 0, 0.56, 2.115); d.box(0.3, 0.03, 0.02, 0x3a3a3a, 0, 0.56, 2.12);
+    [[-0.9, -1.3], [0.9, -1.3], [-0.9, 1.3]].forEach(([wx, wz]) => { m.cylX(0.38, 0.28, dark, wx, 0.38, wz, 10); m.cylX(0.2, 0.3, chrome, wx, 0.38, wz, 8); });
+    m.cylX(0.1, 0.18, 0x6a4a2a, 0.82, 0.38, 1.3, 8); m.cyl(0.38, 0.28, dark, 1.9, 0, 0.7, 10); m.cyl(0.2, 0.3, chrome, 1.9, 0, 0.7, 8); // ступица и снятое колесо рядом
+    d.box(0.5, 0.02, 0.8, rust, 0.4, 0.99, -1.3); d.box(0.6, 0.02, 0.5, rust, -0.5, 0.99, 1.7); d.box(0.04, 0.4, 0.9, rust, 0.9, 0.62, 0.6);
+  });
+  colBox(x, z, al ? 0.95 : 2.1, al ? 2.1 : 0.95);
+}
+function tankerK(K, x, z, rotY) { // ржавая цистерна на шасси (длинная ось Z при rotY = 0)
+  const silver = 0x8a9096, rust = 0x6b4a2a, dark = 0x1a1a1a, cab = 0xa83222, { al } = ctr(x, z, rotY);
+  K.xf(m4(x, 0, z, 0, rotY, 0), () => {
+    const { ms, m, d } = K;
+    ms.frustum(1.1, 1.1, 6.5, 14, silver, m4(0, 1.95, 0.6, Math.PI / 2, 0, 0));
+    [-2, 0, 2, 3.6].forEach(zz => ms.frustum(1.14, 1.14, 0.18, 14, rust, m4(0, 1.95, zz, Math.PI / 2, 0, 0)));
+    m.frustum(1.0, 0.8, 0.22, 14, 0x6a6f75, m4(0, 1.95, 3.9, Math.PI / 2, 0, 0)); m.frustum(0.8, 1.0, 0.22, 14, 0x6a6f75, m4(0, 1.95, -2.7, Math.PI / 2, 0, 0)); // днища
+    m.box(1.6, 0.35, 8.2, 0x2f3438, 0, 0.8, 0.4);
+    ms.box(2.1, 1.7, 1.9, cab, 0, 1.7, -4.2); ms.box(2.0, 0.5, 0.9, mulCol(cab, 0.85), 0, 0.9, -5.05); m.box(1.9, 0.6, 0.06, 0x1a232b, 0, 2.1, -5.17);
+    m.box(1.7, 0.3, 0.12, 0x555a60, 0, 0.55, -5.55); d.box(1.1, 0.4, 0.04, dark, 0, 1.0, -5.52);
+    [-0.7, 0.7].forEach(sx => { d.box(0.3, 0.2, 0.05, 0x9a9a88, sx, 1.15, -5.53); d.box(0.1, 0.4, 0.1, 0x3a3f45, sx * 1.6, 2.0, -5.1); });
+    m.tube([0.8, 0.9, -3.3], [0.8, 3.6, -3.3], 0.07, 0x555a60, 6);                         // выхлопная труба
+    m.cyl(0.32, 0.25, silver, 0, 3.0, 0.6, 10); m.cyl(0.36, 0.05, 0x444a50, 0, 3.22, 0.6, 10); // люк
+    [-1, 1].forEach(sd => m.tube([sd * 0.7, 0.9, 3.9], [sd * 0.7, 2.9, 3.9], 0.03, 0x6a6f75, 4));
+    for (let k = 0; k < 6; k++) m.tube([-0.65, 0.9 + k * 0.3, 3.95], [0.65, 0.9 + k * 0.3, 3.95], 0.02, 0x6a6f75, 4); // лесенка сзади
+    [-1, 1].forEach(sd => { d.box(0.02, 0.5, 0.5, 0xc9a227, sd * 1.11, 2.1, 0.6, Math.PI / 4, 0, 0); d.box(0.02, 0.12, 1.6, 0xd8d0b0, sd * 1.11, 1.45, 0.6); }); // знак опасности и полоса
+    [-3.9, -0.5, 1.1, 2.7].forEach(wz => [-1, 1].forEach(sx => { m.cylX(0.45, 0.32, dark, sx * 0.95, 0.45, wz, 10); m.cylX(0.22, 0.34, 0x6a6f75, sx * 0.95, 0.45, wz, 8); }));
+  });
+  colBox(x, z, al ? 1.2 : 4.6, al ? 4.6 : 1.2);
+}
+function milTruckK(K, x, z, rotY) { // военный грузовик-остов с тентом
+  const olive = 0x4a5230, tent = 0x55603a, dark = 0x1a1a1a, { al } = ctr(x, z, rotY);
+  K.xf(m4(x, 0, z, 0, rotY, 0), () => {
+    const { ms, m, d } = K;
+    ms.box(2.2, 1.5, 1.9, olive, 0, 1.55, -2.1); ms.box(1.9, 0.6, 0.9, mulCol(olive, 0.9), 0, 1.0, -3.4); m.box(1.9, 0.5, 0.06, 0x1a232b, 0, 1.9, -3.07);
+    m.box(2.0, 0.22, 0.2, 0x555a60, 0, 0.55, -3.9); [-0.7, 0.7].forEach(sx => d.box(0.26, 0.18, 0.05, 0x9a9a80, sx, 1.1, -3.87));
+    ms.box(2.3, 0.4, 4.4, 0x3a4226, 0, 0.95, 1.2);
+    for (let k = 0; k < 5; k++) ms.box(2.3, 1.7, 0.1, mulCol(tent, 0.9), 0, 2.0, -0.7 + k * 1.0); // каркас тента
+    ms.box(2.3, 1.6, 4.2, tent, 0, 2.0, 1.2); ms.box(2.2, 0.15, 4.2, mulCol(tent, 1.12), 0, 2.85, 1.2);
+    m.box(2.0, 0.9, 0.06, mulCol(tent, 0.7), 0, 1.8, 3.34); m.box(2.3, 0.06, 0.2, 0x555a60, 0, 0.7, 3.5);                // задний полог и подножка
+    [-1, 1].forEach(sd => d.box(0.02, 0.45, 0.45, 0xd8d0b0, sd * 1.11, 1.55, -2.1, Math.PI / 4, 0, 0));                    // звезда (знак)
+    m.cylX(0.3, 0.2, 0x3a3f45, 0, 0.8, -4.1, 8);                                                                          // лебёдка
+    [-3.0, 0.2, 2.2].forEach(wz => [-1, 1].forEach(sx => { m.cylX(0.5, 0.36, dark, sx * 1.05, 0.5, wz, 10); m.cylX(0.26, 0.38, 0x4a4f55, sx * 1.05, 0.5, wz, 8); }));
+    m.cyl(0.4, 0.3, dark, 1.5, 1.1, 3.2, 10);                                                                              // запаска
+  });
+  colBox(x, z, al ? 1.3 : 3.4, al ? 3.4 : 1.3);
+}
+function containerK(K, x, z, rotY, colors, stack) { // грузовой контейнер: гофра, угловые фитинги, запорные штанги; можно стопкой
+  const L = 6.0, W2 = 2.4, H2 = 2.6, c0 = parseInt(colors[0].slice(1), 16), c1 = parseInt(colors[1].slice(1), 16);
+  K.xf(m4(x, 0, z, 0, rotY, 0), () => {
+    const { ms, m, d } = K;
+    for (let k = 0; k < stack; k++) {
+      const y0 = k * H2;
+      ms.box(L, H2 - 0.14, W2 - 0.1, c0, 0, y0 + H2 / 2, 0);
+      for (let i = 0; i < 20; i++) [-1, 1].forEach(sd => ms.box(0.14, H2 - 0.3, 0.07, i % 2 ? c1 : mulCol(c0, 1.07), -L / 2 + 0.55 + i * 0.26, y0 + H2 / 2, sd * (W2 / 2 - 0.02))); // гофра
+      for (let i = 0; i < 8; i++) ms.box(0.14, 0.05, W2 - 0.2, i % 2 ? c1 : mulCol(c0, 1.07), -L / 2 + 0.8 + i * 0.6, y0 + H2 - 0.07, 0);                                          // гофра на крыше
+      [-1, 1].forEach(sx => [-1, 1].forEach(sz => [0.07, H2 - 0.07].forEach(yy => m.box(0.2, 0.14, 0.2, 0x2a2d30, sx * (L / 2 - 0.1), y0 + yy, sz * (W2 / 2 - 0.1)))));
+      [-1, 1].forEach(sd => { m.box(L, 0.1, 0.14, 0x2f3438, 0, y0 + 0.07, sd * (W2 / 2 - 0.05)); m.box(L, 0.1, 0.14, 0x2f3438, 0, y0 + H2 - 0.07, sd * (W2 / 2 - 0.05)); });
+      for (let i = 0; i < 4; i++) m.box(0.06, H2 - 0.3, 0.06, 0x8a8f94, -L / 2 - 0.02, y0 + H2 / 2, -0.8 + i * 0.53); // запорные штанги на торце
+      m.box(0.1, 0.18, 0.1, 0x2a2d30, -L / 2 - 0.05, y0 + 1.2, -0.8); m.box(0.1, 0.18, 0.1, 0x2a2d30, -L / 2 - 0.05, y0 + 1.2, 0.8);
+      d.box(0.02, 0.4, 0.9, 0xd8d0b0, 1.0, y0 + 1.9, W2 / 2 + 0.03); d.box(0.9, 0.04, 0.02, 0xd8d0b0, 1.0, y0 + 1.6, W2 / 2 + 0.03);          // маркировка
+      for (let i = 0; i < 3; i++) d.box(0.5 + h01(i + k, x, z) * 0.5, 0.9 + h01(i + 3, x, z) * 0.8, 0.012, 0x6a3a22, -2 + i * 1.7, y0 + 1.0, W2 / 2 + 0.035); // ржавые потёки
+    }
+  });
+  const al = Math.abs(Math.sin(rotY)) < 0.5; colBox(x, z, al ? L / 2 : W2 / 2, al ? W2 / 2 : L / 2);
+}
+function forkliftK(K, x, z, rotY) { // погрузчик: рама, защитная клетка, сиденье, руль, мачта с цепями, вилы, маячок
+  const yel = 0xd9a21b, blk = 0x1a1a1a, steel = 0x6a6f75, { al } = ctr(x, z, rotY);
+  K.xf(m4(x, 0, z, 0, rotY, 0), () => {
+    const { ms, m, d, g } = K;
+    ms.box(1.1, 0.7, 1.9, yel, 0, 0.75, 0.2); ms.box(1.1, 0.5, 0.7, blk, 0, 0.95, 1.2); ms.box(1.0, 0.35, 0.5, mulCol(yel, 0.85), 0, 1.15, 1.45);   // корпус, противовес
+    d.box(0.5, 0.1, 0.45, blk, 0, 1.15, 0.35); d.box(0.5, 0.4, 0.1, blk, 0, 1.4, 0.55);                                                              // сиденье
+    m.tube([0, 1.2, -0.2], [0, 1.6, -0.45], 0.025, blk, 5); m.cylX(0.16, 0.03, blk, 0, 1.62, -0.48, 10);                                               // руль
+    [-0.5, 0.5].forEach(sx => { m.box(0.06, 1.1, 0.06, steel, sx, 1.7, 0.1); m.box(0.06, 1.1, 0.06, steel, sx, 1.7, -0.5); });                        // клетка
+    m.box(1.15, 0.06, 0.7, steel, 0, 2.25, -0.2); [-0.5, 0, 0.5].forEach(sx => m.box(0.04, 0.04, 0.7, steel, sx, 2.29, -0.2));
+    g.box(0.16, 0.14, 0.16, 0xffa020, 0.45, 2.38, 0.0);                                                                                               // маячок
+    [-0.35, 0.35].forEach(sx => m.box(0.08, 2.4, 0.08, steel, sx, 1.4, -0.95)); m.box(0.9, 0.08, 0.1, steel, 0, 1.1, -0.9); m.box(0.9, 0.06, 0.1, steel, 0, 2.5, -0.95);
+    m.tube([-0.12, 2.5, -0.95], [-0.12, 1.3, -0.95], 0.012, 0x222222, 4); m.tube([0.12, 2.5, -0.95], [0.12, 1.3, -0.95], 0.012, 0x222222, 4);               // цепи
+    [-0.3, 0.3].forEach(sx => { m.box(0.12, 0.06, 1.2, steel, sx, 0.25, -1.55); m.box(0.12, 0.9, 0.05, steel, sx, 0.7, -0.98); });                   // вилы
+    m.tube([0.3, 0.9, 0.9], [0.3, 2.0, 0.9], 0.03, 0x444444, 5);
+    [[-0.55, -0.5], [0.55, -0.5], [-0.5, 1.0], [0.5, 1.0]].forEach(([wx, wz]) => { m.cylX(0.3, 0.22, blk, wx, 0.3, wz, 10); m.cylX(0.14, 0.24, 0x8a8f94, wx, 0.3, wz, 8); });
+  });
+  colBox(x, z, al ? 0.7 : 1.9, al ? 1.9 : 0.7);
+}
+function mastK(K, x, z, h) { // мачта связи: решётка, красная лампа, антенны и растяжки
+  const steel = 0x6a6f75, { m, g } = K;
+  [[-0.1, -0.1], [0.1, -0.1], [-0.1, 0.1], [0.1, 0.1]].forEach(([ox, oz]) => m.tube([x + ox, 0, z + oz], [x + ox * 0.5, h, z + oz * 0.5], 0.02, steel, 5));
+  for (let y = 0.8; y < h; y += 0.8) { const k = 1 - y / h * 0.5, q = 0.1 * k; m.tube([x - q, y, z - q], [x + q, y + 0.4, z - q], 0.012, steel, 4); m.tube([x - q, y, z + q], [x + q, y + 0.4, z + q], 0.012, steel, 4); }
+  m.box(0.3, 0.2, 0.3, 0x2a2d30, x, 0.1, z); g.box(0.14, 0.14, 0.14, 0xff2a1a, x, h + 0.1, z);
+  m.box(0.6, 0.04, 0.04, steel, x, h * 0.8, z); m.tube([x + 0.3, h * 0.8, z], [x + 0.3, h * 0.8 + 0.7, z], 0.01, steel, 4); m.cylX(0.3, 0.04, 0x9aa0a8, x - 0.3, h * 0.72, z, 10);
+  m.box(0.3, 0.4, 0.2, 0x4a5a4a, x + 0.3, 1.0, z);
+  [[1, 1], [-1, 1], [0, -1.4]].forEach(([dx, dz]) => m.tube([x, h * 0.85, z], [x + dx * 3, 0, z + dz * 3], 0.008, steel, 3));
+  colBox(x, z, 0.2, 0.2);
+}
+function sandWallK(K, x1, z1, x2, z2, h) { // стена из мешков с песком: ряды со сдвигом, завязки, местами осыпавшиеся верхние мешки
+  const L = Math.hypot(x2 - x1, z2 - z1), cx = (x1 + x2) / 2, cz = (z1 + z2) / 2, alongX = Math.abs(x2 - x1) > Math.abs(z2 - z1);
+  const rows = Math.max(3, Math.round(h / 0.27)), rh = h / rows, n = Math.max(1, Math.round(L / 0.62)), bl = L / n, sand = [0xb8a37a, 0xc7b285, 0xa8946a, 0x9a8a62];
+  for (let row = 0; row < rows; row++) {
+    const half = row % 2, cnt = n + half;
+    for (let i = 0; i < cnt; i++) {
+      let c0 = -L / 2 + (i - half * 0.5) * bl, c1 = c0 + bl; c0 = Math.max(c0, -L / 2); c1 = Math.min(c1, L / 2);
+      const len = c1 - c0; if (len < 0.15) continue;
+      if (row === rows - 1 && h01(row * 37 + i, cx, cz) > 0.9) continue;
+      const mid = (c0 + c1) / 2, col = sand[Math.floor(h01(row * 31 + i, cx, cz) * sand.length)], y = rh * (row + 0.5);
+      if (alongX) { K.s.box(len * 0.97, rh * 0.96, 0.7, col, cx + mid, y, cz); K.s.box(0.05, rh * 0.5, 0.5, mulCol(col, 0.7), cx + c1 - 0.03, y, cz); }
+      else { K.s.box(0.7, rh * 0.96, len * 0.97, col, cx, y, cz + mid); K.s.box(0.5, rh * 0.5, 0.05, mulCol(col, 0.7), cx, y, cz + c1 - 0.03); }
+    }
+  }
+  colliders.push({ minX: cx - (alongX ? L / 2 : 0.35), maxX: cx + (alongX ? L / 2 : 0.35), minZ: cz - (alongX ? 0.35 : L / 2), maxZ: cz + (alongX ? 0.35 : L / 2) });
+}
+function addRazorWire(segs, K) { // колючая проволока: колья, две нити и ряд витков одним объектом
+  const pts = [];
+  segs.forEach(([x1, z1, x2, z2]) => {
+    const L = Math.hypot(x2 - x1, z2 - z1), n = Math.round(L / 0.6);
+    for (let i = 0; i <= n; i++) pts.push([x1 + (x2 - x1) * i / n, z1 + (z2 - z1) * i / n, Math.abs(x2 - x1) > Math.abs(z2 - z1)]);
+    if (K) {
+      const ns = Math.max(1, Math.round(L / 3));
+      for (let i = 0; i <= ns; i++) K.m.tube([x1 + (x2 - x1) * i / ns, 0, z1 + (z2 - z1) * i / ns], [x1 + (x2 - x1) * i / ns, 1.5, z1 + (z2 - z1) * i / ns], 0.03, 0x4a4f55, 5);
+      [0.6, 1.1].forEach(y => K.m.tube([x1, y, z1], [x2, y, z2], 0.006, 0x6a6f75, 3));
+    }
+  });
+  const im = new THREE.InstancedMesh(new THREE.TorusGeometry(0.22, 0.012, 4, 10), std(0x8a9096, 0.4, 0.8), pts.length), dm = new THREE.Object3D();
+  pts.forEach((p, i) => { dm.position.set(p[0], 1.32, p[1]); dm.rotation.set(0, p[2] ? Math.PI / 2 : 0, 0); dm.updateMatrix(); im.setMatrixAt(i, dm.matrix); });
+  scene.add(im);
+}
+function fenceK(K, x1, z1, x2, z2, h, colorHex) { // забор из досок (часть выбита, лежит на земле), перекладины и столбы. Случайные числа те же, что в 1.8.0
+  const L = Math.hypot(x2 - x1, z2 - z1), n = Math.max(2, Math.round(L / 0.35)), rotY = Math.atan2(-(z2 - z1), x2 - x1), { d } = K;
+  const posts = Math.max(2, Math.round(L / 2.4) + 1);
+  K.xf(m4((x1 + x2) / 2, 0, (z1 + z2) / 2, 0, rotY, 0), () => {
+    for (let i = 0; i < n; i++) {
+      const t = i / (n - 1), sy = 0.85 + Math.random() * 0.3, gone = Math.random() < 0.12, lx = (t - 0.5) * (L);
+      if (!gone) { d.box(0.1, h * sy, 0.04, colorHex, lx, h * sy / 2, 0, 0, 0, (h01(i, x1, z1) - 0.5) * 0.04); if (h01(i + 3, x1, z1) > 0.7) d.box(0.1, 0.02, 0.05, mulCol(colorHex, 0.6), lx, h * sy - 0.1, 0); }
+      else d.box(0.1, h * 0.8, 0.04, mulCol(colorHex, 0.85), lx + 0.2, 0.03, 0.35, Math.PI / 2, 0.3, 0.1); // выбитая доска на земле
+    }
+    [0.3, 0.75].forEach(k => d.box(L, 0.08, 0.05, colorHex, 0, h * k, -0.045));
+    for (let i = 0; i < posts; i++) { const lx = (i / (posts - 1) - 0.5) * L; d.box(0.12, h + 0.12, 0.1, mulCol(colorHex, 0.8), lx, (h + 0.12) / 2, -0.08); d.box(0.14, 0.04, 0.12, mulCol(colorHex, 0.65), lx, h + 0.14, -0.08); }
+  });
+  colliders.push({ minX: (x1 + x2) / 2 - (Math.abs(x2 - x1) / 2 + 0.1), maxX: (x1 + x2) / 2 + (Math.abs(x2 - x1) / 2 + 0.1), minZ: (z1 + z2) / 2 - (Math.abs(z2 - z1) / 2 + 0.1), maxZ: (z1 + z2) / 2 + (Math.abs(z2 - z1) / 2 + 0.1), top: h });
+}
+
 function buildGasStation(x, z) {
-  const concrete = std(0x6e6e68, 1), red = std(0xb02a1a, 0.6, 0.2), white = std(0xe6e2d6, 0.7), steel = std(0x8a9096, 0.4, 0.7), dark = std(0x2c2e30, 1);
   clearTrees(x, z, 16, 14);
-  slab(26, 0.06, 20, dark, x, 0.03, z, false);                                            // асфальт
-  [-8, -4, 4, 8].forEach(ox => slab(0.12, 0.02, 2.4, white, x + ox, 0.07, z - 1.1, false)); // разметка парковки
-  // навес на четырёх опорах
-  [[-5.8, 1.2], [5.8, 1.2], [-5.8, 6.8], [5.8, 6.8]].forEach(([ox, oz]) => slab(0.5, 4.2, 0.5, white, x + ox, 2.1, z + oz, true));
-  slab(12.8, 0.45, 7.8, white, x, 4.45, z + 4, false, true);
-  slab(13.0, 0.5, 0.14, red, x, 4.45, z + 0.05, false); slab(13.0, 0.5, 0.14, red, x, 4.45, z + 7.95, false);
-  slab(0.14, 0.5, 7.9, red, x - 6.5, 4.45, z + 4, false); slab(0.14, 0.5, 7.9, red, x + 6.5, 4.45, z + 4, false);
-  const lampMat = new THREE.MeshBasicMaterial({ color: 0xfff6dd });
-  [-4, 0, 4].forEach(ox => { const l = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.05, 0.3), lampMat); l.position.set(x + ox, 4.2, z + 4); scene.add(l); });
-  // колонки
+  const K = bKit(x, z, 11), { s, r, d, m, ms, g } = K;
+  const WHITE = 0xe6e2d6, RED = 0xb02a1a, CONC = 0x6e6e68, STEEL = 0x8a9096, BLUE = 0x2f6fa8, WALL = 0xc9b99a;
+  // асфальт: трещины с травой, масляные пятна, стёртая разметка, бордюр с разрывами
+  d.box(26, 0.06, 20, 0x2c2e30, x, 0.03, z);
+  for (let i = 0; i < 9; i++) {
+    const px = x + (h01(i, x, z) - 0.5) * 22, pz = z + (h01(i + 11, x, z) - 0.5) * 17, rot = h01(i + 5, x, z) * 3, len = 1.5 + h01(i + 2, x, z) * 3;
+    d.box(0.05, 0.012, len, 0x16181a, px, 0.066, pz, 0, rot, 0);
+    if (i % 2) for (let k = 0; k < 3; k++) d.box(0.06, 0.16 + k * 0.04, 0.06, 0x4a6a34, px + Math.sin(rot) * (k - 1) * 0.5, 0.14, pz + Math.cos(rot) * (k - 1) * 0.5);
+  }
+  [[-4, 3.2], [0.5, 5.2], [4.2, 4.4], [8, -2], [-8, -3]].forEach(([ox, oz]) => d.box(1.4, 0.012, 1.0, 0x16181a, x + ox, 0.067, z + oz, 0, ox * 0.2, 0));
+  [-8, -4, 4, 8].forEach((ox, i) => d.box(0.12, 0.02, h01(i, x, z) > 0.7 ? 1.4 : 2.4, WHITE, x + ox, 0.07, z - 1.1));
+  [[0, -10, 26, 0.2], [0, 10, 26, 0.2]].forEach(([ox, oz, w, t]) => { for (let i = 0; i < 6; i++) if (h01(i + 20, x, z + oz) > 0.2) d.box(w / 6 - 0.2, 0.14, t, 0x8a8a84, x + ox - w / 2 + (i + 0.5) * w / 6, 0.07, z + oz); });
+  // навес на четырёх опорах: бетонные пятки, красные пояса, капители, красно-белый борт, лампы
+  [[-5.8, 1.2], [5.8, 1.2], [-5.8, 6.8], [5.8, 6.8]].forEach(([ox, oz]) => {
+    s.box(0.5, 4.2, 0.5, WHITE, x + ox, 2.1, z + oz); colBox(x + ox, z + oz, 0.25, 0.25);
+    s.box(0.8, 0.3, 0.8, CONC, x + ox, 0.15, z + oz); d.box(0.54, 0.22, 0.54, RED, x + ox, 1.1, z + oz); d.box(0.54, 0.22, 0.54, RED, x + ox, 3.7, z + oz);
+    m.box(0.72, 0.14, 0.72, 0x6a6f75, x + ox, 4.12, z + oz);
+  });
+  r.box(12.8, 0.45, 7.8, WHITE, x, 4.45, z + 4);
+  s.box(13.0, 0.5, 0.14, RED, x, 4.45, z + 0.05); s.box(13.0, 0.5, 0.14, RED, x, 4.45, z + 7.95); s.box(0.14, 0.5, 7.9, RED, x - 6.5, 4.45, z + 4); s.box(0.14, 0.5, 7.9, RED, x + 6.5, 4.45, z + 4);
+  d.box(13.0, 0.1, 0.02, WHITE, x, 4.45, z - 0.03); d.box(13.0, 0.1, 0.02, WHITE, x, 4.45, z + 8.03); // белая полоса на красном борту
+  d.box(12.4, 0.04, 7.4, 0xb8b4a8, x, 4.215, z + 4);
+  d.box(2.4, 0.02, 1.6, 0x7a4a32, x - 3, 4.69, z + 3); d.box(1.6, 0.02, 2.2, 0x5a3a2a, x + 3.5, 4.69, z + 5.5);
+  [-4, 0, 4].forEach(ox => [2.4, 5.6].forEach(oz => { g.box(0.9, 0.05, 0.3, 0xfff6dd, x + ox, 4.2, z + oz); m.box(1.0, 0.04, 0.4, 0x4a4f55, x + ox, 4.23, z + oz); }));
+  // колонки: остров, корпус, экран, пистолет, шланг
   const pumps = [];
-  [-4, 0, 4].forEach(ox => {
+  [-4, 0, 4].forEach((ox, k) => {
     const px = x + ox, pz = z + 4;
-    slab(1.6, 0.18, 1.1, concrete, px, 0.09, pz, true);
-    slab(0.7, 1.55, 0.45, red, px, 0.955, pz, false);
-    slab(0.78, 0.12, 0.52, white, px, 1.78, pz, false);
-    const scr = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.22, 0.02), new THREE.MeshBasicMaterial({ color: 0x6dff6d })); scr.position.set(px, 1.35, pz + 0.235); scene.add(scr);
-    slab(0.12, 0.34, 0.1, steel, px + 0.42, 1.0, pz, false);                           // держатель пистолета
-    const hose = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, 0.9, 6), std(0x1a1a1a, 0.8)); hose.position.set(px + 0.42, 0.65, pz); scene.add(hose);
+    s.box(1.6, 0.18, 1.1, CONC, px, 0.09, pz); colBox(px, pz, 0.8, 0.55); [-1, 1].forEach(sd => { d.box(1.62, 0.03, 0.08, 0xe0b020, px, 0.195, pz + sd * 0.52); d.box(0.08, 0.03, 1.12, 0xe0b020, px + sd * 0.77, 0.195, pz); }); // жёлтая кромка острова
+    m.box(0.8, 0.1, 0.55, 0x2a2d30, px, 0.23, pz);
+    m.box(0.7, 1.55, 0.45, RED, px, 0.955, pz); m.box(0.72, 0.5, 0.02, mulCol(RED, 0.8), px, 0.5, pz - 0.23); d.box(0.72, 0.14, 0.02, WHITE, px, 1.62, pz + 0.235);
+    m.box(0.78, 0.12, 0.52, WHITE, px, 1.78, pz); m.box(0.46, 0.3, 0.03, 0x1a1a1a, px, 1.35, pz + 0.235); g.box(0.4, 0.22, 0.02, 0x6dff6d, px, 1.35, pz + 0.255);
+    m.box(0.12, 0.34, 0.1, STEEL, px + 0.42, 1.0, pz); m.tube([px + 0.42, 1.15, pz], [px + 0.42, 0.88, pz + 0.06], 0.03, 0x2a2a2a, 5);
+    m.tube([px + 0.42, 0.88, pz + 0.06], [px + 0.55, 0.5, pz + 0.12], 0.02, 0x151515, 4); m.tube([px + 0.55, 0.5, pz + 0.12], [px + 0.35, 0.22, pz - 0.15], 0.02, 0x151515, 4);
+    d.box(0.2, 0.2, 0.02, 0xc9a227, px - 0.2, 0.75, pz + 0.235, 0, 0, Math.PI / 4);
     pumps.push({ x: px, z: pz, fuel: 300 });
   });
-  // магазин
-  const wall = std(0xc9b99a, 0.9), H = 3.4, T = 0.3, sz = z - 5.5;
-  slab(12, H, T, wall, x, H / 2, sz - 3, true);
-  slab(T, H, 6, wall, x - 6, H / 2, sz, true); slab(T, H, 6, wall, x + 6, H / 2, sz, true);
-  slab(5.1, H, T, wall, x - 3.45, H / 2, sz + 3, true); slab(5.1, H, T, wall, x + 3.45, H / 2, sz + 3, true);
-  slab(1.8, H - 2.6, T, wall, x, 2.6 + (H - 2.6) / 2, sz + 3, false, true);
-  slab(12.4, 0.3, 6.4, std(0x4a4d50, 0.9, 0.2), x, H + 0.15, sz, false, true);
-  const glass = std(0x1a232b, 0.1, 0.6);
-  [-3.45, 3.45].forEach(ox => slab(3.4, 1.4, 0.06, glass, x + ox, 1.9, sz + 3.18, false));
+  // магазин: стены с цоколем и пилястрами, крыша с парапетом, окна, навес, дверь
+  const H = 3.4, T = 0.3, sz = z - 5.5;
+  const sw = (cx, cz, w, dd) => { s.box(w, H, dd, WALL, cx, H / 2, cz); s.box(w + (w > dd ? 0 : 0.04), 1.0, dd + (w > dd ? 0.04 : 0), 0x8a6a55, cx, 0.5, cz); };
+  sw(x, sz - 3, 12, T); colBox(x, sz - 3, 6, T / 2);
+  sw(x - 6, sz, T, 6); colBox(x - 6, sz, T / 2, 3); sw(x + 6, sz, T, 6); colBox(x + 6, sz, T / 2, 3);
+  sw(x - 3.45, sz + 3, 5.1, T); colBox(x - 3.45, sz + 3, 2.55, T / 2); sw(x + 3.45, sz + 3, 5.1, T); colBox(x + 3.45, sz + 3, 2.55, T / 2);
+  s.box(1.8, H - 2.6, T, WALL, x, 2.6 + (H - 2.6) / 2, sz + 3);
+  for (let i = 0; i < 9; i++) { d.box(5.1, 0.03, T + 0.03, mulCol(WALL, 0.88), x - 3.45, 1.4 + i * 0.22, sz + 3); d.box(5.1, 0.03, T + 0.03, mulCol(WALL, 0.88), x + 3.45, 1.4 + i * 0.22, sz + 3); } // обшивка
+  [-1, 1].forEach(sx => [-1, 1].forEach(sg => s.box(0.4, H, 0.4, 0xa89878, x + sx * 6, H / 2, sz + sg * 3)));
+  r.box(12.4, 0.3, 6.4, 0x4a4d50, x, H + 0.15, sz);
+  r.box(12.6, 0.25, 0.2, 0x5a5d60, x, H + 0.42, sz - 3.1); r.box(12.6, 0.25, 0.2, 0x5a5d60, x, H + 0.42, sz + 3.1); r.box(0.2, 0.25, 6.4, 0x5a5d60, x - 6.2, H + 0.42, sz); r.box(0.2, 0.25, 6.4, 0x5a5d60, x + 6.2, H + 0.42, sz);
+  m.box(1.2, 0.7, 0.9, 0xb0b4b8, x + 3, H + 0.65, sz - 0.5); m.cyl(0.34, 0.04, 0x2a2d30, x + 3, H + 1.0, sz - 0.5, 10); m.box(1.0, 0.5, 0.8, 0xa0a4a8, x - 3.2, H + 0.55, sz + 0.8);
+  m.cyl(0.1, 0.8, 0x6a6f75, x - 1.2, H + 0.3, sz - 1.5, 6); m.cyl(0.16, 0.06, 0x4a4f55, x - 1.2, H + 1.1, sz - 1.5, 6); m.tube([x + 5, H + 0.3, sz + 2], [x + 5, H + 2.3, sz + 2], 0.02, 0x6a6f75, 4);
+  d.box(2.0, 0.02, 1.4, 0x2a2c2e, x - 4, H + 0.31, sz - 1.4);
+  [-3.45, 3.45].forEach((ox, k) => { // окна: рамы, средник, постеры, осколки
+    const wx = x + ox, wz = sz + 3.18;
+    d.box(3.4, 1.4, 0.06, 0x1a232b, wx, 1.9, wz); m.box(3.5, 0.08, 0.1, 0x3a3f45, wx, 2.62, wz); m.box(3.5, 0.08, 0.1, 0x3a3f45, wx, 1.18, wz);
+    [-1.7, 0, 1.7].forEach(o => m.box(0.08, 1.5, 0.1, 0x3a3f45, wx + o, 1.9, wz)); m.box(3.7, 0.06, 0.28, 0x7a6a55, wx, 1.1, wz + 0.1);
+    [[-0.8, 0xc9a227], [0.7, 0x2f6fa8], [1.1, 0xa02a1a]].forEach(([o, c], i) => { if ((i + k) % 2 === 0) d.box(0.5, 0.7, 0.01, c, wx + o, 1.95, wz - 0.04); });
+    if (k === 1) for (let i = 0; i < 3; i++) d.box(0.3, 0.04, 0.01, 0x6a8090, wx - 0.6 + i * 0.5, 1.5 + i * 0.2, wz + 0.04, 0, 0, 0.7 * (i - 1)); // выбитое стекло
+    for (let i = 0; i < 12; i++) r.box(0.28, 0.04, 1.2, i % 2 ? 0xb02a1a : 0xe6e2d6, wx - 1.54 + i * 0.28, 2.58 + 0.0, sz + 3.75, 0.16, 0, 0);  // полосатый навес
+    [-1.6, 1.6].forEach(o => m.tube([wx + o, 2.4, sz + 3.2], [wx + o, 2.65, sz + 4.3], 0.02, 0x4a4f55, 4));
+  });
+  m.box(0.1, 2.6, 0.2, 0x3a3f45, x - 0.9, 1.3, sz + 3); m.box(0.1, 2.6, 0.2, 0x3a3f45, x + 0.9, 1.3, sz + 3); m.box(1.9, 0.1, 0.2, 0x3a3f45, x, 2.6, sz + 3); // рама двери
+  m.box(0.85, 2.4, 0.05, 0x3a3f45, x - 0.5, 1.2, sz + 3.55, 0, -1.0, 0); d.box(0.6, 1.0, 0.03, 0x1a232b, x - 0.5, 1.7, sz + 3.55, 0, -1.0, 0);                      // дверь приоткрыта
+  [-2.1, 2.1].forEach(o => m.box(0.06, 0.9, 0.06, 0x3a3f45, x + o, 3.0, sz + 3.17)); m.box(4.5, 0.06, 0.06, 0x3a3f45, x, 3.45, sz + 3.17);
   textPlane('ЗАПРАВКА', 4.2, 0.8, '#b02a1a', '#fff6dd', x, 3.0, sz + 3.2, 0);
-  slab(3.0, 1.0, 0.8, std(0x7a5c34), x + 4, 0.5, sz - 0.5, true);                      // прилавок
-  makeRack(x - 4.6, sz - 2.5, 'x', 3.6, true); makeRack(x + 0.4, sz - 2.5, 'x', 3.6, true);
-  // табличка на столбе, мусорка, бочки, ржавая машина
-  slab(0.3, 7, 0.3, steel, x - 11.5, 3.5, z + 6, true);
-  slab(2.4, 1.7, 0.25, white, x - 11.5, 6.6, z + 6, false);
+  for (let i = 0; i < 6; i++) for (let j = 0; j < 12; j++) d.box(0.98, 0.02, 0.98, (i + j) % 2 ? 0xb8b0a0 : 0x8a8478, x - 5.5 + j, 0.012, sz - 2.5 + i); // плитка пола
+  s.box(3.0, 1.0, 0.8, 0x7a5c34, x + 4, 0.5, sz - 0.5); colBox(x + 4, sz - 0.5, 1.5, 0.4); // прилавок
+  d.box(3.1, 0.06, 0.9, 0x3a2a1a, x + 4, 1.03, sz - 0.5); for (let i = 0; i < 4; i++) d.box(0.7, 0.8, 0.02, mulCol(0x7a5c34, 0.8), x + 2.9 + i * 0.75, 0.5, sz - 0.08);
+  m.box(0.4, 0.25, 0.4, 0x2a2d30, x + 3.2, 1.2, sz - 0.5); d.box(0.3, 0.16, 0.02, 0x2a5a2a, x + 3.2, 1.34, sz - 0.3, -0.3, 0, 0); g.box(0.12, 0.04, 0.01, 0x6dff6d, x + 3.2, 1.35, sz - 0.29);
+  [0, 1, 2].forEach(i => { m.cyl(0.08, 0.2, [0xc9402a, 0x2f8a4a, 0xc9a227][i], x + 4.4 + i * 0.25, 1.06, sz - 0.4, 6); m.cyl(0.085, 0.03, 0x2a2a2a, x + 4.4 + i * 0.25, 1.26, sz - 0.4, 6); }); // банки со сладостями
+  rackK(K, x - 4.6, sz - 2.5, 'x', 3.6, true); rackK(K, x + 0.4, sz - 2.5, 'x', 3.6, true);
+  [-3, 0, 3].forEach(ox => { g.box(1.2, 0.04, 0.3, 0xfff6dd, x + ox, H - 0.08, sz); m.box(1.3, 0.05, 0.4, 0x4a4f55, x + ox, H - 0.04, sz); });
+  s.box(1.4, 0.9, 0.7, 0xe6e2d6, x + 5.2, 0.45, sz + 1.8); colBox(x + 5.2, sz + 1.8, 0.7, 0.35); d.box(1.3, 0.04, 0.6, 0x1a232b, x + 5.2, 0.92, sz + 1.8); // морозильный ларь
+  // столб с вывеской «ТОПЛИВО»
+  m.box(0.3, 7, 0.3, STEEL, x - 11.5, 3.5, z + 6); colBox(x - 11.5, z + 6, 0.15, 0.15); m.box(0.7, 0.2, 0.7, 0x3a3f45, x - 11.5, 0.1, z + 6);
+  m.box(2.4, 1.7, 0.25, WHITE, x - 11.5, 6.6, z + 6); m.box(2.5, 0.12, 0.3, RED, x - 11.5, 7.5, z + 6); m.box(2.5, 0.12, 0.3, RED, x - 11.5, 5.7, z + 6);
   textPlane('ТОПЛИВО', 2.2, 0.9, '#b02a1a', '#fff6dd', x - 11.5, 6.6, z + 6.14, 0);
-  slab(0.8, 1.0, 0.8, std(0x2f5a2a), x + 8.5, 0.5, z - 1.5, true);
-  makeBarrels(x + 9, z - 7, 4);
-  slab(1.9, 0.8, 4.0, std(0x6b4a2a, 1, 0.1), x - 9, 0.7, z - 3, true); slab(1.7, 0.7, 2.0, std(0x5a3f26, 1, 0.1), x - 9, 1.35, z - 3.4, false);
+  // мусорный бак, бочки, машина-остов, цистерна, воздух, телефон, стол
+  s.box(0.8, 0.8, 0.8, 0x2f5a2a, x + 8.5, 0.5, z - 1.5); s.box(0.8, 0.2, 0.8, 0x2f5a2a, x + 8.5, 0.9, z - 1.5); colBox(x + 8.5, z - 1.5, 0.4, 0.4);
+  m.box(0.86, 0.06, 0.86, 0x24401f, x + 8.5, 1.02, z - 1.5, -0.25, 0, 0); [-0.3, 0.3].forEach(o => m.cylX(0.07, 0.06, 0x151515, x + 8.5 + o, 0.07, z - 1.1, 6));
+  barrelsK(K, x + 9, z - 7, 4);
+  carK(K, x - 9, z - 3, 0, 0x6b4a2a);
+  tankerK(K, x + 12, z - 6, 0);
+  m.box(0.4, 1.3, 0.4, BLUE, x - 6.5, 0.65, z + 9); g.box(0.3, 0.3, 0.02, 0x6dff6d, x - 6.5, 1.1, z + 9.21); m.cylZ(0.1, 0.04, 0x1a1a1a, x - 6.5, 0.8, z + 9.22, 8); colBox(x - 6.5, z + 9, 0.3, 0.3);
+  m.tube([x - 6.3, 0.6, z + 9.2], [x - 6.0, 0.15, z + 9.5], 0.02, 0x151515, 4);
+  [-1, 1].forEach(sx => [-1, 1].forEach(sg => m.box(0.06, 2.2, 0.06, BLUE, x + 6.5 + sx * 0.42, 1.1, z + 9.5 + sg * 0.42)));                                      // телефонная будка
+  m.box(0.95, 0.1, 0.95, 0x24558a, x + 6.5, 2.25, z + 9.5); m.box(0.9, 0.1, 0.9, 0x24558a, x + 6.5, 0.05, z + 9.5);
+  d.box(0.7, 1.2, 0.04, 0x1a232b, x + 6.5, 1.3, z + 9.95); d.box(0.04, 1.2, 0.7, 0x1a232b, x + 6.95, 1.3, z + 9.5); d.box(0.04, 1.2, 0.7, 0x1a232b, x + 6.05, 1.3, z + 9.5);
+  m.box(0.2, 0.3, 0.1, 0x3a3f45, x + 6.5, 1.3, z + 9.1); colBox(x + 6.5, z + 9.5, 0.5, 0.5);
+  d.box(1.8, 0.1, 0.8, 0x7a5c34, x - 8, 0.8, z + 10); [-0.7, 0.7].forEach(ox => d.box(0.1, 0.8, 0.8, 0x5e4528, x - 8 + ox, 0.4, z + 10)); [-1, 1].forEach(sd => d.box(1.8, 0.08, 0.3, 0x7a5c34, x - 8, 0.45, z + 10 + sd * 0.7));
+  textPlane('ОТКРЫТО', 1.7, 0.5, '#0a2a0a', '#6dff6d', x + 4.3, 3.0, sz + 3.2, 0);
+  K.finish();
   const rec = { x, z, pumps, shopZ: sz };
   stations.push(rec);
   return rec;
@@ -1505,155 +2457,248 @@ function buildGasStation(x, z) {
 
 function buildGarage(x, z) {
   const W = 16, D = 10, H = 4.6, T = 0.4;
-  const brick = std(0x8a4a3a, 0.95), trim = std(0xdad4c4, 0.8), concrete = std(0x6e6e68, 1), dark = std(0x2f3438, 0.7, 0.3), metal = std(0x9aa0a8, 0.4, 0.6);
   clearTrees(x, z, W / 2 + 5, D / 2 + 8);
-  slab(W - 0.4, 0.04, D - 0.4, concrete, x, 0.02, z, false);
-  slab(18, 0.05, 6, std(0x2c2e30, 1), x, 0.025, z + D / 2 + 3.2, false);
-  slab(W, H, T, brick, x, H / 2, z - D / 2, true);
-  slab(T, H, D, brick, x - W / 2, H / 2, z, true); slab(T, H, D, brick, x + W / 2, H / 2, z, true);
-  slab(1.8, H, T, brick, x - 7.1, H / 2, z + D / 2, true); slab(4.0, H, T, brick, x, H / 2, z + D / 2, true); slab(1.8, H, T, brick, x + 7.1, H / 2, z + D / 2, true);
-  [-4.1, 4.1].forEach(ox => {
-    slab(4.2, H - 3.6, T, brick, x + ox, 3.6 + (H - 3.6) / 2, z + D / 2, false, true);
-    slab(4.3, 0.5, 0.14, metal, x + ox, 3.35, z + D / 2, false);                           // поднятые рулонные ворота
-    slab(0.18, 3.6, 0.2, trim, x + ox - 2.2, 1.8, z + D / 2 + 0.05, false); slab(0.18, 3.6, 0.2, trim, x + ox + 2.2, 1.8, z + D / 2 + 0.05, false);
+  const K = bKit(x, z, 12), { s, r, d, m, g } = K;
+  const BRICK = 0x8a4a3a, TRIM = 0xdad4c4, CONC = 0x6e6e68, DARK = 0x2f3438, METAL = 0x9aa0a8;
+  d.box(W - 0.4, 0.04, D - 0.4, CONC, x, 0.02, z); d.box(18, 0.05, 6, 0x2c2e30, x, 0.025, z + D / 2 + 3.2);
+  for (let i = 0; i < 4; i++) d.box(0.5, 0.012, 5 - i * 0.6, 0x16181a, x - 4.6 + i * 0.35 + (i > 1 ? 7 : 0), 0.056, z + D / 2 + 2.8, 0, (i - 1.5) * 0.04, 0); // следы шин
+  [[-2, -1.5], [3, 1.2]].forEach(([ox, oz]) => [[0, 0, 1.2, 0.8, 0], [0.4, 0.2, 0.8, 0.6, 0.6], [-0.3, -0.2, 0.7, 0.9, -0.4]].forEach(([a, b, w, dd, rot]) => d.box(w, 0.012, dd, 0x15171a, x + ox + a, 0.046, z + oz + b, 0, rot, 0))); // масляные пятна
+  // кирпичные стены: кладка рядами, выгоревшие кирпичи, цоколь
+  function brick(along, cx, cz, len, y0, y1) {
+    const h = y1 - y0, cy = (y0 + y1) / 2;
+    if (along === 'x') s.box(len, h, T, BRICK, cx, cy, cz); else s.box(T, h, len, BRICK, cx, cy, cz);
+    for (let y = y0 + (y0 === 0 ? 0.65 : 0.1); y < y1; y += 0.22) { if (along === 'x') d.box(len, 0.025, T + 0.03, 0xa89888, cx, y, cz); else d.box(T + 0.03, 0.025, len, 0xa89888, cx, y, cz); }
+    for (let i = 0; i < Math.max(2, Math.floor(len / 1.2)); i++) {
+      const o = (h01(i, cx, cz) - 0.5) * (len - 0.8), yy = y0 + 1.0 + h01(i + 6, cx, cz) * Math.max(0.2, h - 1.4), c = mulCol(BRICK, 0.78 + h01(i + 2, cx, cz) * 0.4);
+      if (along === 'x') d.box(0.5, 0.22, T + 0.045, c, cx + o, yy, cz); else d.box(T + 0.045, 0.22, 0.5, c, cx, yy, cz + o);
+    }
+    if (y0 === 0) { if (along === 'x') s.box(len + 0.1, 0.6, T + 0.1, CONC, cx, 0.3, cz); else s.box(T + 0.1, 0.6, len, CONC, cx, 0.3, cz); }
+  }
+  brick('x', x, z - D / 2, W, 0, H); colBox(x, z - D / 2, W / 2, T / 2);
+  brick('z', x - W / 2, z, D, 0, H); colBox(x - W / 2, z, T / 2, D / 2); brick('z', x + W / 2, z, D, 0, H); colBox(x + W / 2, z, T / 2, D / 2);
+  brick('x', x - 7.1, z + D / 2, 1.8, 0, H); colBox(x - 7.1, z + D / 2, 0.9, T / 2); brick('x', x, z + D / 2, 4.0, 0, H); colBox(x, z + D / 2, 2.0, T / 2); brick('x', x + 7.1, z + D / 2, 1.8, 0, H); colBox(x + 7.1, z + D / 2, 0.9, T / 2);
+  [-4.1, 4.1].forEach(ox => { // поднятые рулонные ворота: короб, барабан, планки, направляющие
+    brick('x', x + ox, z + D / 2, 4.2, 3.6, H);
+    m.box(4.3, 0.5, 0.14, METAL, x + ox, 3.35, z + D / 2); m.cylX(0.26, 4.1, 0x8a9096, x + ox, 3.4, z + D / 2 + 0.2, 10);
+    for (let k = 0; k < 4; k++) m.box(4.2, 0.05, 0.1, METAL, x + ox, 3.65 - k * 0.12, z + D / 2 + 0.02);
+    [-1, 1].forEach(sd => { d.box(0.18, 3.6, 0.2, TRIM, x + ox + sd * 2.2, 1.8, z + D / 2 + 0.05); m.box(0.08, 3.5, 0.1, 0x6a6f75, x + ox + sd * 2.05, 1.8, z + D / 2 + 0.12); });
+    d.box(4.2, 0.08, 0.6, CONC, x + ox, 0.04, z + D / 2 + 0.3);
   });
-  slab(W + 0.3, 0.3, T + 0.2, trim, x, H + 0.15, z - D / 2, false); slab(W + 0.3, 0.3, T + 0.2, trim, x, H + 0.15, z + D / 2, false);
-  [-1, 1].forEach(sx => [-1, 1].forEach(sz2 => slab(0.5, H, 0.5, std(0x6b3a2c), x + sx * W / 2, H / 2, z + sz2 * D / 2, false)));
-  gable(W, D, 1.4, std(0x4a4f55, 0.9, 0.3), x, H + 0.3, z);
+  s.box(W + 0.3, 0.3, T + 0.2, TRIM, x, H + 0.15, z - D / 2); s.box(W + 0.3, 0.3, T + 0.2, TRIM, x, H + 0.15, z + D / 2);
+  [-1, 1].forEach(sx => [-1, 1].forEach(sz2 => s.box(0.5, H, 0.5, 0x6b3a2c, x + sx * W / 2, H / 2, z + sz2 * D / 2)));
+  // крыша: два ската листового железа, фронтоны, конёк, желоба, труба, люк
+  const hs = D / 2 + 0.5, rise = 1.4, a = Math.atan2(rise, hs), L = Math.hypot(hs, rise), RW = W + 1;
+  [-1, 1].forEach(sg => K.xf(m4(x, H + 0.3 + rise / 2, z + sg * hs / 2, sg * a, 0, 0), () => {
+    r.box(RW, 0.12, L, 0x4a4f55, 0, 0, 0);
+    for (let i = 0; i < Math.floor(RW / 0.5); i++) r.box(0.08, 0.06, L, i % 2 ? 0x41464b : 0x555b61, -RW / 2 + 0.3 + i * 0.5, 0.08, 0);
+    r.box(2.2, 0.02, 1.6, 0x6a4a32, (sg > 0 ? -3 : 3), 0.075, 0.4); m.box(RW, 0.1, 0.2, 0x3a3f45, 0, -0.05, sg * L / 2);
+  }));
+  m.box(W + 1.1, 0.14, 0.4, 0x3a3f45, x, H + 0.3 + rise + 0.04, z);
+  [-1, 1].forEach(sx => s.prism([[-D / 2, 0], [D / 2, 0], [0, rise + 0.3 - 0.07]], T, BRICK, x + sx * W / 2, H, z, 0, Math.PI / 2, 0));
+  r.box(0.8, 1.9, 0.8, 0x7a3a2c, x - 5, H + 1.15, z - 1.5); r.box(1.0, 0.15, 1.0, 0x5a5d60, x - 5, H + 2.15, z - 1.5); m.cyl(0.18, 0.5, 0x3a3f45, x - 5, H + 2.2, z - 1.5, 8);
+  m.box(1.0, 0.1, 0.7, 0x3a3f45, x + 3, H + 0.95, z + 1.6, -0.2, 0, 0); d.box(0.8, 0.02, 0.5, 0x1a232b, x + 3, H + 1.0, z + 1.6, -0.2, 0, 0);
   textPlane('АВТОСЕРВИС', 3.6, 0.9, '#23282c', '#e8dfc8', x, 2.4, z + D / 2 + T / 2 + 0.02, 0);
-  const glass = std(0x1a232b, 0.1, 0.6);
-  [-1, 1].forEach(sx => slab(0.08, 0.9, 1.6, glass, x + sx * (W / 2 + T / 2 + 0.04), 2.6, z - 1.5, false));
-  const lampMat = new THREE.MeshBasicMaterial({ color: 0xfff6dd });
-  [-4.1, 0, 4.1].forEach(ox => { const l = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.05, 0.3), lampMat); l.position.set(x + ox, H - 0.1, z); scene.add(l); });
-  [[-2, -1.5], [3, 1.2]].forEach(([ox, oz]) => { const st = new THREE.Mesh(new THREE.CircleGeometry(0.6, 10), new THREE.MeshBasicMaterial({ color: 0x15171a })); st.rotation.x = -Math.PI / 2; st.position.set(x + ox, 0.05, z + oz); scene.add(st); });
-  makeRack(x - W / 2 + 0.9, z - 1.8, 'z', 4.4, true); makeRack(x + W / 2 - 0.9, z + 1.2, 'z', 4.0, true);
-  makeBarrels(x + 6.4, z - 3.6, 5);
-  slab(1.1, 0.9, 0.7, std(0xa83222, 0.6, 0.3), x - 6.3, 0.45, z - 3.8, true);              // ящик с инструментом
+  m.box(3.8, 1.1, 0.04, DARK, x, 2.4, z + D / 2 + T / 2); m.tube([x, 3.1, z + D / 2 + 0.3], [x, 3.4, z + D / 2 + 0.8], 0.02, 0x3a3f45, 4); g.box(0.3, 0.12, 0.2, 0xfff6dd, x, 3.38, z + D / 2 + 0.85);
+  textPlane('ШИНЫ', 1.5, 0.5, '#a02a1a', '#fff6dd', x - 7.1, 2.6, z + 5.22, 0); m.box(1.6, 0.6, 0.04, DARK, x - 7.1, 2.6, z + D / 2 + 0.2);
+  [-1, 1].forEach(sx => { // боковые окна с решётками, часть выбита
+    const wx = x + sx * (W / 2 + T / 2 + 0.04);
+    m.box(0.1, 1.0, 1.7, DARK, wx, 2.6, z - 1.5); d.box(0.08, 0.9, 1.6, sx > 0 ? 0x070b0e : 0x1a232b, wx, 2.6, z - 1.5);
+    for (let i = 0; i < 4; i++) m.box(0.06, 0.9, 0.04, 0x4a4f55, wx + sx * 0.05, 2.6, z - 2.1 + i * 0.4); m.box(0.22, 0.06, 1.9, 0x6a6f75, wx + sx * 0.08, 2.1, z - 1.5);
+  });
+  [-4.1, 0, 4.1].forEach(ox => { g.box(2.2, 0.05, 0.3, 0xfff6dd, x + ox, H - 0.1, z); m.box(2.3, 0.05, 0.4, 0x4a4f55, x + ox, H - 0.05, z); });
+  for (let i = -2; i <= 2; i++) m.box(0.2, 0.3, D - 0.4, 0x4a4f55, x + i * 3, H - 0.2, z);
+  // внутри: стеллажи, бочки, ящик с инструментом, подъёмник, шины, доска с инструментом
+  rackK(K, x - W / 2 + 0.9, z - 1.8, 'z', 4.4, true); rackK(K, x + W / 2 - 0.9, z + 1.2, 'z', 4.0, true);
+  barrelsK(K, x + 6.4, z - 3.6, 5);
+  s.box(1.1, 0.9, 0.7, 0xa83222, x - 6.3, 0.45, z - 3.8); colBox(x - 6.3, z - 3.8, 0.55, 0.35);
+  for (let i = 0; i < 3; i++) d.box(0.9, 0.2, 0.02, mulCol(0xa83222, 0.8), x - 6.3, 0.3 + i * 0.25, z - 3.44); m.box(0.9, 0.04, 0.5, 0x555a60, x - 6.3, 0.92, z - 3.8);
+  d.box(2.6, 1.2, 0.04, 0x6a5a42, x - 3.6, 2.2, z - D / 2 + T / 2 + 0.04);
+  [[-1.0, 0x8a8f94], [-0.5, 0xa83222], [0, 0x8a8f94], [0.5, 0x2f6fa8], [1.0, 0x8a8f94]].forEach(([o, c]) => m.box(0.08, 0.5, 0.03, c, x - 3.6 + o, 2.2, z - D / 2 + T / 2 + 0.08));
+  [2.7, 5.5].forEach(ox => { m.box(0.25, 2.6, 0.25, 0xd9a21b, x + ox, 1.3, z + 0.5); m.box(0.5, 0.06, 0.5, 0x3a3f45, x + ox, 0.03, z + 0.5); colBox(x + ox, z + 0.5, 0.2, 0.2); m.cyl(0.07, 1.4, 0x8a8f94, x + ox + (ox < 4 ? -0.18 : 0.18), 0, z + 0.5, 6); });
+  m.box(3.1, 0.2, 0.3, 0xd9a21b, x + 4.1, 2.6, z + 0.5);
+  [[2.7, -1], [5.5, 1]].forEach(([ox, sg]) => [-1, 1].forEach(q => { m.box(1.5, 0.08, 0.14, 0x555a60, x + ox + sg * -0.8 + 0.0, 0.8, z + 0.5 + q * 0.3); m.box(0.2, 0.06, 0.2, 0x151515, x + ox - sg * 1.3, 0.86, z + 0.5 + q * 0.3); }));
+  m.box(0.3, 0.5, 0.2, 0x3a4a3a, x + 6.2, 1.0, z + 0.5);
+  barrelsK(K, x + 9.5, z + 1.5, 4);
+  K.finish();
   const rec = { x, z, carX: x - 4.1, carZ: z - 0.6, benchX: x + 3.8, benchZ: z - D / 2 + 0.8 };
   garages.push(rec);
   return rec;
 }
 
 function buildWaterTower(x, z) {
-  const steel = std(0x6f7479, 0.6, 0.6), rust = std(0x7a4a32, 0.9, 0.3), tankM = std(0x7a8288, 0.7, 0.4);
-  clearTrees(x, z, 6, 6);
-  const tube = (p1, p2, r, m) => {
-    const a = new THREE.Vector3(...p1), b = new THREE.Vector3(...p2), d = b.clone().sub(a);
-    const mesh = new THREE.Mesh(new THREE.CylinderGeometry(r, r, d.length(), 6), m);
-    mesh.position.copy(a).addScaledVector(d, 0.5); mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), d.normalize()); scene.add(mesh);
-  };
+  clearTrees(x, z, 6, 6); clearTrees(x + 6, z - 4, 3, 3);
+  const K = bKit(x, z, 14), { s, r, d, m, ms } = K;
+  const STEEL = 0x6f7479, RUST = 0x7a4a32, TANK = 0x7a8288;
   const legs = [[-1, -1], [1, -1], [-1, 1], [1, 1]];
   legs.forEach(([sx, sz]) => {
-    tube([x + sx * 2.5, 0, z + sz * 2.5], [x + sx * 1.9, 9, z + sz * 1.9], 0.14, steel);
-    colliders.push({ minX: x + sx * 2.5 - 0.35, maxX: x + sx * 2.5 + 0.35, minZ: z + sz * 2.5 - 0.35, maxZ: z + sz * 2.5 + 0.35 });
+    m.tube([x + sx * 2.5, 0, z + sz * 2.5], [x + sx * 1.9, 9, z + sz * 1.9], 0.14, STEEL, 6);
+    s.box(0.9, 0.3, 0.9, 0x6e6e68, x + sx * 2.5, 0.15, z + sz * 2.5); m.box(0.4, 0.06, 0.4, 0x3a3f45, x + sx * 2.5, 0.33, z + sz * 2.5);
+    colBox(x + sx * 2.5, z + sz * 2.5, 0.35, 0.35);
   });
-  [3, 6].forEach(y => { // горизонтальные кольца и раскосы
+  [3, 6].forEach(y => {
     const k = 2.5 - y * 0.0667;
-    [[-1, -1, 1, -1], [1, -1, 1, 1], [1, 1, -1, 1], [-1, 1, -1, -1]].forEach(([ax, az, bx, bz]) => tube([x + ax * k, y, z + az * k], [x + bx * k, y, z + bz * k], 0.06, steel));
+    [[-1, -1, 1, -1], [1, -1, 1, 1], [1, 1, -1, 1], [-1, 1, -1, -1]].forEach(([ax, az, bx, bz]) => m.tube([x + ax * k, y, z + az * k], [x + bx * k, y, z + bz * k], 0.06, STEEL, 5));
   });
-  tube([x - 2.5, 0, z - 2.5], [x + 2.2, 3, z - 2.2], 0.05, rust); tube([x + 2.5, 0, z + 2.5], [x - 2.2, 3, z + 2.2], 0.05, rust);
-  tube([x + 2.2, 3, z - 2.2], [x - 2.0, 6, z - 2.0], 0.05, rust); tube([x - 2.2, 3, z + 2.2], [x + 2.0, 6, z + 2.0], 0.05, rust);
-  const tank = new THREE.Mesh(new THREE.CylinderGeometry(2.4, 2.4, 3.2, 14), tankM); tank.position.set(x, 10.8, z); scene.add(tank);
-  const band = new THREE.Mesh(new THREE.CylinderGeometry(2.45, 2.45, 0.2, 14), rust); band.position.set(x, 10.8, z); scene.add(band);
-  const roof = new THREE.Mesh(new THREE.ConeGeometry(2.7, 1.5, 14), std(0x5a3f2c, 0.9, 0.2)); roof.position.set(x, 13.15, z); scene.add(roof);
-  const deck = new THREE.Mesh(new THREE.CylinderGeometry(3.0, 3.0, 0.14, 14), steel); deck.position.set(x, 9.1, z); scene.add(deck);
-  for (let i = 0; i < 14; i++) { const a = i / 14 * Math.PI * 2; tube([x + Math.cos(a) * 2.9, 9.1, z + Math.sin(a) * 2.9], [x + Math.cos(a) * 2.9, 10.1, z + Math.sin(a) * 2.9], 0.03, steel); }
-  tube([x - 2.5, 0, z + 3.0], [x - 2.5, 9.1, z + 3.0], 0.05, steel); tube([x - 1.9, 0, z + 3.0], [x - 1.9, 9.1, z + 3.0], 0.05, steel); // лестница
-  for (let i = 0; i < 22; i++) tube([x - 2.5, 0.4 + i * 0.4, z + 3.0], [x - 1.9, 0.4 + i * 0.4, z + 3.0], 0.025, steel);
+  [[-2.5, -2.5, 2.2, -2.2, 0, 3], [2.5, 2.5, -2.2, 2.2, 0, 3], [2.2, -2.2, -2.0, -2.0, 3, 6], [-2.2, 2.2, 2.0, 2.0, 3, 6], [2.5, -2.5, 2.2, 2.2, 0, 3], [-2.5, 2.5, -2.2, -2.2, 0, 3]].forEach(([ax, az, bx, bz, y0, y1]) => m.tube([x + ax, y0, z + az], [x + bx, y1, z + bz], 0.05, RUST, 4));
+  m.cyl(0.25, 9, 0x5a6066, x, 0, z, 10); [1.5, 4.5, 7.5].forEach(y => m.cyl(0.34, 0.1, 0x3a3f45, x, y, z, 10));       // стояк в центре
+  m.cyl(0.4, 0.4, 0x2f5a8a, x, 0.4, z, 10); m.cylX(0.18, 0.05, 0x8a2b20, x + 0.45, 0.9, z, 8);                          // вентиль
+  m.cyl(2.45, 0.2, TANK, x, 9.14, z, 14); m.cyl(3.0, 0.14, STEEL, x, 9.03, z, 14);                                       // днище бака и площадка
+  ms.cyl(2.4, 3.2, TANK, x, 9.2, z, 16);
+  for (let k = 0; k < 4; k++) m.cyl(2.46, 0.08, k % 2 ? RUST : 0x5a6066, x, 9.55 + k * 0.8, z, 16);                       // клёпаные пояса
+  for (let k = 0; k < 16; k++) { const an = k / 16 * Math.PI * 2; if (h01(k, x, z) > 0.55) d.box(0.14, 0.9 + h01(k + 3, x, z) * 1.6, 0.04, 0x6a4a34, x + Math.cos(an) * 2.42, 11.6 - h01(k + 3, x, z) * 0.5, z + Math.sin(an) * 2.42, 0, -an + Math.PI / 2, 0); } // потёки
+  m.cone(2.7, 0.1, 1.5, 0x5a3f2c, x, 12.4, z, 14); m.cyl(0.3, 0.25, 0x6a6f75, x, 13.5, z, 8); m.tube([x, 13.9, z], [x, 15.2, z], 0.02, 0x3a3f45, 4); // крыша и громоотвод
+  for (let i = 0; i < 14; i++) { const an = i / 14 * Math.PI * 2, cx = x + Math.cos(an) * 2.9, cz = z + Math.sin(an) * 2.9; m.tube([cx, 9.1, cz], [cx, 10.1, cz], 0.03, STEEL, 4); const an2 = (i + 1) / 14 * Math.PI * 2; if (i % 5 !== 4) m.tube([cx, 10.1, cz], [x + Math.cos(an2) * 2.9, 10.1, z + Math.sin(an2) * 2.9], 0.025, STEEL, 4); }
+  // лестница с ограждением
+  m.tube([x - 2.5, 0, z + 3.0], [x - 2.5, 9.1, z + 3.0], 0.05, STEEL, 4); m.tube([x - 1.9, 0, z + 3.0], [x - 1.9, 9.1, z + 3.0], 0.05, STEEL, 4);
+  for (let i = 0; i < 22; i++) m.tube([x - 2.5, 0.4 + i * 0.4, z + 3.0], [x - 1.9, 0.4 + i * 0.4, z + 3.0], 0.025, STEEL, 4);
   textPlane('ВОДА', 2.6, 0.9, '#2b4a7a', '#e8dfc8', x, 10.8, z + 2.45, 0);
+  // насосная будка: блоки, двускатная крыша, дверь с табличкой, счётчик, трубы с вентилями
+  const px = x + 6, pz = z - 4;
+  s.box(3, 2.4, 3, 0x77786f, px, 1.2, pz); colBox(px, pz, 1.5, 1.5); s.box(3.08, 0.5, 3.08, 0x5a5b54, px, 0.25, pz);
+  for (let i = 0; i < 7; i++) { d.box(3.04, 0.025, 3.04, 0x66675f, px, 0.7 + i * 0.28, pz); }
+  r.gable(3.6, 3.2, 0.7, 0x4a4d50, px, 2.4, pz, 0.2); m.box(3.7, 0.08, 0.1, 0x3a3f45, px, 2.43, pz + 1.62);
+  m.box(1.0, 1.8, 0.1, 0x2f3438, px - 0.8, 0.9, pz + 1.5); m.box(1.1, 0.1, 0.14, 0x3a3f45, px - 0.8, 1.85, pz + 1.5); m.box(0.06, 0.2, 0.06, 0x9aa0a8, px - 0.5, 0.9, pz + 1.58);
+  m.box(0.5, 0.3, 0.12, 0x4a5a4a, px + 0.6, 1.5, pz + 1.55); m.cylZ(0.1, 0.05, 0x1a1a1a, px + 0.6, 1.5, pz + 1.62, 8);
+  d.box(0.8, 0.4, 0.04, 0x1a1c1e, px + 0.8, 1.7, pz - 1.52); [0, 1, 2].forEach(i => m.box(0.7, 0.04, 0.05, 0x3a3f45, px + 0.8, 1.6 + i * 0.1, pz - 1.54));
+  m.cylZ(0.1, 5.5, 0x6b5a48, x + 3.7, 0.6, z - 4, 8); m.cylX(0.1, 4.5, 0x6b5a48, x + 3.8 + 0.0, 0.6, z - 1.4, 8);
+  [-6.2, -4, -2].forEach(o => m.cylZ(0.15, 0.06, 0x3a3a3a, x + 3.7, 0.6, z + o, 8));
+  m.cyl(0.04, 0.35, 0x8a2b20, x + 3.7, 0.7, z - 3.2, 6); m.cylX(0.14, 0.04, 0x8a2b20, x + 3.7, 1.05, z - 3.2, 8);
+  textPlane('ОПАСНО', 1.3, 0.5, '#e0b020', '#111111', x + 2.5, 1.7, z + 2.9, 0); m.tube([x + 2.5, 0, z + 2.88], [x + 2.5, 1.45, z + 2.88], 0.04, 0x4a4f55, 4);
+  K.finish();
   const rec = { x, z };
   towers.push(rec);
   return rec;
 }
 
-function sandbagTex(rep) { // текстура мешков с песком
-  const c = document.createElement('canvas'); c.width = 32; c.height = 16;
-  const g = c.getContext('2d'); g.fillStyle = '#6e5e40'; g.fillRect(0, 0, 32, 16);
-  for (let r = 0; r < 2; r++) for (let i = -1; i < 2; i++) {
-    const x = i * 16 + (r ? 8 : 0), y = r * 8;
-    g.fillStyle = (i + r) % 2 ? '#b8a37a' : '#c7b285'; g.fillRect(x + 1, y + 1, 14, 6);
-    g.fillStyle = '#d8c698'; g.fillRect(x + 2, y + 1, 12, 1);
-  }
-  const t = new THREE.CanvasTexture(c);
-  t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(rep, 2); t.magFilter = THREE.NearestFilter; t.colorSpace = THREE.SRGBColorSpace;
-  return t;
-}
-function sandWall(x1, z1, x2, z2, h) { // стена из мешков с песком (одна коробка с текстурой)
-  const L = Math.hypot(x2 - x1, z2 - z1), cx = (x1 + x2) / 2, cz = (z1 + z2) / 2, alongX = Math.abs(x2 - x1) > Math.abs(z2 - z1);
-  const m = new THREE.Mesh(new THREE.BoxGeometry(alongX ? L : 0.7, h, alongX ? 0.7 : L), new THREE.MeshStandardMaterial({ color: 0xffffff, map: sandbagTex(L), roughness: 1 }));
-  m.position.set(cx, h / 2, cz); scene.add(m);
-  colliders.push({ minX: cx - (alongX ? L / 2 : 0.35), maxX: cx + (alongX ? L / 2 : 0.35), minZ: cz - (alongX ? 0.35 : L / 2), maxZ: cz + (alongX ? 0.35 : L / 2) });
-  blockers.push(m);
-  return m;
-}
-
-function buildOutpost(x, z) { // военный блокпост: мешки с песком, вышка, казарма, палатка, флаг
-  const olive = std(0x55603a, 0.85), oliveD = std(0x3f4a2c, 0.9), concrete = std(0x777770, 1), steel = std(0x5a5f64, 0.5, 0.6), wood = std(0x6b4f2e), canvasM = std(0x6a7048, 1);
+function buildOutpost(x, z) { // военный блокпост: мешки с песком, вышка, казарма, палатка, флаг, колючка, мачта, грузовик
   clearTrees(x, z, 19, 16);
-  slab(30, 0.05, 24, std(0x6a6458, 1), x, 0.025, z, false);
+  const K = bKit(x, z, 15), { s, r, d, m, ms, g } = K;
+  const OLIVE = 0x55603a, OLIVE_D = 0x3f4a2c, CONC = 0x777770, STEEL = 0x5a5f64, WOOD = 0x6b4f2e, CANVAS = 0x6a7048, CRATE = 0x4a5230;
+  // земля: утоптанный гравий, колеи, лужи, пучки травы
+  d.box(30, 0.05, 24, 0x6a6458, x, 0.025, z);
+  for (let i = 0; i < 6; i++) d.box(0.5, 0.012, 8 + h01(i, x, z) * 6, 0x4a463c, x - 5 + i * 2 + (i > 2 ? 3 : 0), 0.056, z + 4 + h01(i + 3, x, z) * 2, 0, (h01(i + 7, x, z) - 0.5) * 0.1, 0); // колеи
+  for (let i = 0; i < 5; i++) d.box(1.2 + h01(i, z, x), 0.012, 0.8 + h01(i + 4, z, x), 0x2e3436, x - 9 + i * 4.5, 0.058, z + 8 - h01(i + 9, x, z) * 14);                             // лужи
+  for (let i = 0; i < 14; i++) { const px = x + (h01(i, x, z) - 0.5) * 28, pz = z + (h01(i + 13, x, z) - 0.5) * 22; for (let k = 0; k < 3; k++) d.box(0.05, 0.2 + k * 0.05, 0.05, 0x5a7a3a, px + k * 0.07, 0.15, pz + (k % 2) * 0.06); }
   // периметр из мешков (вход с юга шириной 6 м)
-  sandWall(x - 14.5, z - 11.5, x + 14.5, z - 11.5, 1.1);
-  sandWall(x - 14.5, z - 11.5, x - 14.5, z + 11.5, 1.1);
-  sandWall(x + 14.5, z - 11.5, x + 14.5, z + 11.5, 1.1);
-  sandWall(x - 14.5, z + 11.5, x - 3, z + 11.5, 1.1);
-  sandWall(x + 3, z + 11.5, x + 14.5, z + 11.5, 1.1);
-  [[-1.8, 8.5], [1.8, 6.5]].forEach(([ox, oz]) => slab(2.2, 0.85, 0.55, concrete, x + ox, 0.425, z + oz, true)); // бетонные блоки у входа
-  textPlane('ВОЕННАЯ ЗОНА', 4.2, 0.9, '#a02a1a', '#f0ead8', x, 2.2, z + 11.9, 0);
-  slab(0.2, 2.6, 0.2, wood, x - 2.1, 1.3, z + 11.8, false); slab(0.2, 2.6, 0.2, wood, x + 2.1, 1.3, z + 11.8, false);
-  // вышка
+  sandWallK(K, x - 14.5, z - 11.5, x + 14.5, z - 11.5, 1.1); sandWallK(K, x - 14.5, z - 11.5, x - 14.5, z + 11.5, 1.1); sandWallK(K, x + 14.5, z - 11.5, x + 14.5, z + 11.5, 1.1);
+  sandWallK(K, x - 14.5, z + 11.5, x - 3, z + 11.5, 1.1); sandWallK(K, x + 3, z + 11.5, x + 14.5, z + 11.5, 1.1);
+  [[-1.8, 8.5], [1.8, 6.5]].forEach(([ox, oz]) => { // бетонные блоки (профиль «Нью-Джерси») у входа
+    s.prism([[-0.275, 0], [0.275, 0], [0.2, 0.3], [0.12, 0.85], [-0.12, 0.85], [-0.2, 0.3]], 2.2, CONC, x + ox, 0, z + oz, 0, Math.PI / 2, 0); colBox(x + ox, z + oz, 1.1, 0.275);
+    d.box(0.5, 0.18, 0.03, 0xb02a1a, x + ox - 0.6, 0.55, z + oz + 0.17); d.box(0.5, 0.18, 0.03, 0xd8d0b0, x + ox + 0.1, 0.55, z + oz + 0.17);
+  });
+  textPlane('ВОЕННАЯ ЗОНА', 4.2, 0.9, '#a02a1a', '#f0ead8', x, 2.2, z + 11.9, 0); m.box(4.4, 1.1, 0.05, 0x24282b, x, 2.2, z + 11.86);
+  m.box(0.2, 2.6, 0.2, WOOD, x - 2.1, 1.3, z + 11.8); m.box(0.2, 2.6, 0.2, WOOD, x + 2.1, 1.3, z + 11.8);
+  m.box(0.4, 1.1, 0.4, 0x3a3f45, x - 3.2, 0.55, z + 10.6); // шлагбаум поднят
+  for (let i = 0; i < 6; i++) m.tube([x - 3.2 + i * 0.12, 1.0 + i * 0.4, z + 10.6], [x - 3.2 + (i + 1) * 0.12, 1.0 + (i + 1) * 0.4, z + 10.6], 0.05, i % 2 ? 0xd8d0b0 : 0xb02a1a, 5);
+  // вышка: стойки с раскосами, настил, бойницы, мешки, пулемёт, крыша, лестница, прожектор
   const tx = x + 10.5, tz = z - 7.5;
-  [[-1.5, -1.5], [1.5, -1.5], [-1.5, 1.5], [1.5, 1.5]].forEach(([ox, oz]) => slab(0.32, 5.2, 0.32, wood, tx + ox, 2.6, tz + oz, true));
-  slab(3.8, 0.2, 3.8, wood, tx, 5.2, tz, false, true);
-  [-1, 1].forEach(sx => { slab(0.15, 0.9, 3.8, olive, tx + sx * 1.9, 5.75, tz, false); slab(3.8, 0.9, 0.15, olive, tx, 5.75, tz + sx * 1.9, false); });
-  slab(4.6, 0.18, 4.6, olive, tx, 7.6, tz, false, true);
-  [[-2, -2], [2, -2], [-2, 2], [2, 2]].forEach(([ox, oz]) => slab(0.18, 2.4, 0.18, wood, tx + ox, 6.4, tz + oz, false));
-  for (let i = 0; i < 12; i++) slab(0.8, 0.07, 0.07, wood, tx, 0.4 + i * 0.42, tz + 1.62, false); // ступени лестницы
-  // казарма (дверь на юг), внутри ящики с автоматами
-  const bx = x - 7.5, bz = z - 1, wallM = olive, H = 3.3, T = 0.3;
-  slab(10, H, T, wallM, bx, H / 2, bz - 3, true);
-  slab(T, H, 6, wallM, bx - 5, H / 2, bz, true); slab(T, H, 6, wallM, bx + 5, H / 2, bz, true);
-  slab(4.1, H, T, wallM, bx - 2.95, H / 2, bz + 3, true); slab(4.1, H, T, wallM, bx + 2.95, H / 2, bz + 3, true);
-  slab(1.8, H - 2.5, T, wallM, bx, 2.5 + (H - 2.5) / 2, bz + 3, false, true);
-  slab(10.4, 0.3, 6.4, oliveD, bx, H + 0.15, bz, false, true);
-  slab(10.2, 0.04, 6.2, std(0x5a5a54, 1), bx, 0.02, bz, false);
-  [-3, 3].forEach(ox => slab(2.2, 1.0, 0.06, std(0x1a232b, 0.1, 0.6), bx + ox, 1.9, bz + 3.18, false));
-  [-3, 0, 3].forEach(ox => { slab(1.7, 0.4, 0.8, steel, bx + ox, 0.2, bz + 2.2, false); slab(1.7, 0.4, 0.8, steel, bx + ox, 0.8, bz + 2.2, false); }); // койки
-  [-3.5, -1.2].forEach(ox => slab(0.9, 1.9, 0.5, steel, bx + ox + 3.2, 0.95, bz - 2.6, true));                                                           // шкафчики
-  // палатка
-  gable(5, 3.4, 2.0, canvasM, x + 8, 0, z + 5);
-  slab(4.6, 0.6, 0.12, canvasM, x + 8, 0.3, z + 6.6, false);
-  slab(1.8, 0.25, 0.7, steel, x + 7, 0.3, z + 5, false); slab(1.8, 0.25, 0.7, steel, x + 9.2, 0.3, z + 5, false);
-  // флагшток, бочки, ящики
-  slab(0.12, 8, 0.12, steel, x - 12, 4, z + 8, false);
+  [[-1.5, -1.5], [1.5, -1.5], [-1.5, 1.5], [1.5, 1.5]].forEach(([ox, oz]) => { s.box(0.32, 5.2, 0.32, WOOD, tx + ox, 2.6, tz + oz); colBox(tx + ox, tz + oz, 0.16, 0.16); s.box(0.5, 0.2, 0.5, CONC, tx + ox, 0.1, tz + oz); });
+  [[-1.5, -1.5, 1.5, -1.5], [-1.5, 1.5, 1.5, 1.5], [-1.5, -1.5, -1.5, 1.5], [1.5, -1.5, 1.5, 1.5]].forEach(([ax, az, bx, bz]) => [[0.5, 2.6], [2.8, 4.9]].forEach(([y0, y1]) => {
+    m.tube([tx + ax, y0, tz + az], [tx + bx, y1, tz + bz], 0.04, 0x5a4228, 5); m.tube([tx + ax, y1, tz + az], [tx + bx, y0, tz + bz], 0.04, 0x5a4228, 5);
+  }));
+  r.box(3.8, 0.2, 3.8, WOOD, tx, 5.2, tz); for (let i = 0; i < 8; i++) d.box(3.7, 0.02, 0.02, 0x3f2f1c, tx, 5.31, tz - 1.7 + i * 0.5);
+  [-1, 1].forEach(sx => { s.box(0.15, 0.9, 3.8, OLIVE, tx + sx * 1.9, 5.75, tz); s.box(3.8, 0.9, 0.15, OLIVE, tx, 5.75, tz + sx * 1.9); });
+  for (let i = 0; i < 6; i++) d.box(0.5, 0.22, 0.4, [0xb8a37a, 0xc7b285, 0xa8946a][i % 3], tx - 1.4 + i * 0.5, 6.31, tz - 1.9, 0, 0, 0); // мешки на бруствере
+  m.tube([tx, 5.9, tz - 1.6], [tx - 0.35, 5.3, tz - 1.9], 0.02, 0x2a2d30, 4); m.tube([tx, 5.9, tz - 1.6], [tx + 0.35, 5.3, tz - 1.9], 0.02, 0x2a2d30, 4); m.box(0.12, 0.14, 0.5, 0x2a2d30, tx, 6.0, tz - 1.6); m.tube([tx, 6.0, tz - 1.85], [tx, 6.0, tz - 2.5], 0.025, 0x2a2d30, 5);
+  r.box(4.6, 0.18, 4.6, OLIVE, tx, 7.6, tz); r.box(4.7, 0.08, 4.7, OLIVE_D, tx, 7.72, tz); [[-1.5, 1.0, 1.4, 1.0], [1.0, -1.2, 1.3, 1.2]].forEach(([ox, oz, w, dd]) => d.box(w, 0.02, dd, 0x3a4528, tx + ox, 7.77, tz + oz));
+  [[-2, -2], [2, -2], [-2, 2], [2, 2]].forEach(([ox, oz]) => m.box(0.18, 2.4, 0.18, WOOD, tx + ox, 6.4, tz + oz));
+  m.tube([tx - 0.45, 0.2, tz + 1.62], [tx - 0.45, 5.4, tz + 1.62], 0.04, 0x5a4228, 5); m.tube([tx + 0.45, 0.2, tz + 1.62], [tx + 0.45, 5.4, tz + 1.62], 0.04, 0x5a4228, 5);
+  for (let i = 0; i < 12; i++) m.box(0.8, 0.07, 0.07, WOOD, tx, 0.4 + i * 0.42, tz + 1.62);
+  g.box(0.7, 0.35, 0.7, 0xfff0cc, tx, 7.9, tz); m.cyl(0.38, 0.12, 0x2a2d30, tx, 7.72, tz, 8); m.box(0.8, 0.06, 0.8, 0x2a2d30, tx, 8.1, tz);
+  // казарма: доски внахлёст, окна со ставнями, пологая крыша, печка, двухъярусные койки, шкафчики, карта
+  const bx = x - 7.5, bz = z - 1, H = 3.3, T = 0.3;
+  const bw = (cx, cz, w, dd, along, y0 = 0, y1 = H) => {
+    s.box(w, y1 - y0, dd, OLIVE, cx, (y0 + y1) / 2, cz);
+    for (let i = 0; y0 + 0.2 + i * 0.26 < y1 - 0.1; i++) { const yy = y0 + 0.2 + i * 0.26; if (along === 'x') d.box(w, 0.03, dd + 0.04, mulCol(OLIVE, 0.88), cx, yy, cz); else d.box(w + 0.04, 0.03, dd, mulCol(OLIVE, 0.88), cx, yy, cz); }
+  };
+  bw(bx, bz - 3, 10, T, 'x'); colBox(bx, bz - 3, 5, T / 2);
+  bw(bx - 5, bz, T, 6, 'z'); colBox(bx - 5, bz, T / 2, 3); bw(bx + 5, bz, T, 6, 'z'); colBox(bx + 5, bz, T / 2, 3);
+  bw(bx - 2.95, bz + 3, 4.1, T, 'x'); colBox(bx - 2.95, bz + 3, 2.05, T / 2); bw(bx + 2.95, bz + 3, 4.1, T, 'x'); colBox(bx + 2.95, bz + 3, 2.05, T / 2);
+  bw(bx, bz + 3, 1.8, T, 'x', 2.5, H);
+  [-1, 1].forEach(sx => [-1, 1].forEach(sg => d.box(0.4, H, 0.4, mulCol(OLIVE, 0.72), bx + sx * 5, H / 2, bz + sg * 3)));
+  d.box(10.2, 0.04, 6.2, 0x5a5a54, bx, 0.02, bz); for (let i = 0; i < 10; i++) d.box(0.03, 0.01, 6.2, 0x3f3f3a, bx - 4.5 + i, 0.046, bz);
+  { const hs = 3.2, rise = 0.9, a = Math.atan2(rise, hs), L = Math.hypot(hs, rise);
+    [-1, 1].forEach(sg => K.xf(m4(bx, H + 0.1 + rise / 2, bz + sg * hs / 2, sg * a, 0, 0), () => { r.box(10.8, 0.12, L, OLIVE_D, 0, 0, 0); for (let i = 0; i < 18; i++) r.box(0.08, 0.05, L, i % 2 ? mulCol(OLIVE_D, 0.85) : mulCol(OLIVE_D, 1.1), -5.1 + i * 0.6, 0.08, 0); r.box(1.6, 0.02, 1.2, 0x2a2e1c, sg * 2, 0.075, 0.3); }));
+    m.box(10.9, 0.12, 0.3, 0x2f351f, bx, H + 0.1 + rise + 0.03, bz);
+    [-1, 1].forEach(sx => s.prism([[-3.15, 0], [3.15, 0], [0, rise - 0.05]], T, OLIVE, bx + sx * 5, H, bz, 0, Math.PI / 2, 0)); }
+  m.cyl(0.12, 1.4, 0x3a3f45, bx - 4, H + 0.4, bz - 1.5, 8); m.cyl(0.18, 0.06, 0x2a2d30, bx - 4, H + 1.8, bz - 1.5, 8); m.tube([bx + 3, H + 0.5, bz + 1], [bx + 3, H + 3.2, bz + 1], 0.02, 0x3a3f45, 4);
+  [-3, 3].forEach((ox, k) => {
+    const wx = bx + ox, wz = bz + 3.18;
+    m.box(2.3, 1.1, 0.08, 0x2f351f, wx, 1.9, wz); d.box(2.2, 1.0, 0.06, k ? 0x070b0e : 0x1a232b, wx, 1.9, wz + 0.01); m.box(0.06, 1.0, 0.08, 0x2f351f, wx, 1.9, wz + 0.02);
+    s.box(0.5, 1.0, 0.04, OLIVE_D, wx - 1.45, 1.9, wz + 0.1); if (k) s.box(0.5, 1.0, 0.04, OLIVE_D, wx + 1.45, 1.9, wz + 0.1, 0, 0.0, 0.0); else m.box(0.5, 1.0, 0.04, OLIVE_D, wx + 1.55, 1.9, wz + 0.3, 0, -0.9, 0); // одна ставня висит
+  });
+  m.box(0.1, 2.5, 0.2, 0x2f351f, bx - 0.9, 1.25, bz + 3); m.box(0.1, 2.5, 0.2, 0x2f351f, bx + 0.9, 1.25, bz + 3); m.box(0.85, 2.3, 0.06, WOOD, bx - 0.5, 1.15, bz + 3.4, 0, -1.2, 0);
+  [-3, 0, 3].forEach(ox => { // койки в два яруса
+    const cx = bx + ox, cz = bz + 2.2;
+    [[-0.8, -0.35], [0.8, -0.35], [-0.8, 0.35], [0.8, 0.35]].forEach(([a, b]) => m.box(0.06, 1.3, 0.06, STEEL, cx + a, 0.65, cz + b));
+    [0.3, 0.95].forEach((y, lv) => { m.box(1.7, 0.05, 0.8, STEEL, cx, y, cz); d.box(1.6, 0.1, 0.72, lv ? 0x4a5a3a : 0x5a5a4a, cx, y + 0.07, cz); d.box(0.4, 0.1, 0.5, 0xb8b4a0, cx - 0.55, y + 0.17, cz); if ((lv + ox) % 2) d.box(1.0, 0.06, 0.74, 0x6a6a5a, cx + 0.25, y + 0.14, cz); });
+  });
+  [-3.5, -1.2].forEach(ox => { s.box(0.9, 1.9, 0.5, STEEL, bx + ox + 3.2, 0.95, bz - 2.6); colBox(bx + ox + 3.2, bz - 2.6, 0.45, 0.25); d.box(0.02, 1.8, 0.02, 0x2a2d30, bx + ox + 3.2, 0.95, bz - 2.34); for (let i = 0; i < 4; i++) d.box(0.3, 0.03, 0.01, 0x2a2d30, bx + ox + 3.0, 1.6 + i * 0.07, bz - 2.34); });
+  d.box(2.0, 1.2, 0.04, 0x6a5a42, bx + 1.2, 1.9, bz - 2.8); d.box(1.8, 1.0, 0.01, 0xc8c0a0, bx + 1.2, 1.9, bz - 2.77); for (let i = 0; i < 4; i++) d.box(0.06, 0.06, 0.02, 0xb02a1a, bx + 0.7 + i * 0.35, 1.8 + (i % 2) * 0.25, bz - 2.75);
+  m.box(0.5, 0.9, 0.5, 0x2a2d30, bx - 4.4, 0.45, bz - 2.2); m.tube([bx - 4.4, 0.9, bz - 2.2], [bx - 4.4, H + 0.4, bz - 2.2], 0.06, 0x2a2d30, 6);
+  [-2.2, 2.2].forEach(ox => { m.tube([bx + ox, H - 0.1, bz], [bx + ox, H - 0.4, bz], 0.01, 0x1a1a1a, 3); m.cone(0.3, 0.1, 0.2, 0x2a2d1c, bx + ox, H - 0.62, bz, 8); g.box(0.14, 0.08, 0.14, 0xfff0cc, bx + ox, H - 0.64, bz); });
+  // палатка: ската из брезента, торцевая стенка, шесты и растяжки, походные койки
+  { const tcx = x + 8, tcz = z + 5, a = Math.atan2(2.0, 1.7), L = Math.hypot(1.7, 2.0);
+    d.box(5.0, 0.02, 3.2, 0x3a3f2a, tcx, 0.01, tcz);
+    [-1, 1].forEach(sg => K.xf(m4(tcx, 1.0, tcz + sg * 0.85, sg * a, 0, 0), () => { r.box(5.2, 0.06, L, CANVAS, 0, 0, 0); for (let i = 0; i < 6; i++) r.box(0.04, 0.04, L, mulCol(CANVAS, 0.78), -2.5 + i, 0.04, 0); }));
+    m.box(5.3, 0.1, 0.1, 0x4a4f3a, tcx, 2.02, tcz); s.prism([[-1.7, 0], [1.7, 0], [0, 1.98]], 0.05, mulCol(CANVAS, 0.85), tcx + 2.5, 0, tcz, 0, Math.PI / 2, 0);
+    [-1, 1].forEach(sg => { m.tube([tcx + 2.6, 0, tcz], [tcx + 2.6, 2.0, tcz], 0.03, 0x5a4228, 4); m.tube([tcx - 2.6, 0, tcz], [tcx - 2.6, 2.0, tcz], 0.03, 0x5a4228, 4); m.tube([tcx + 3.3 * sg * 0.0 + 2.6, 2.0, tcz], [tcx + 3.5, 0, tcz + sg * 2.2], 0.008, 0x8a7a50, 3); m.tube([tcx - 2.6, 2.0, tcz], [tcx - 3.5, 0, tcz + sg * 2.2], 0.008, 0x8a7a50, 3); });
+    m.box(1.8, 0.25, 0.7, STEEL, x + 7, 0.3, z + 5); m.box(1.8, 0.25, 0.7, STEEL, x + 9.2, 0.3, z + 5); d.box(1.7, 0.06, 0.62, 0x5a5a4a, x + 7, 0.45, z + 5); d.box(1.7, 0.06, 0.62, 0x4a5a3a, x + 9.2, 0.45, z + 5);
+    [[-3, -2.5], [3, -2.5], [-3, 2.5], [3, 2.5]].forEach(([ox, oz]) => m.tube([tcx + ox, 0, tcz + oz], [tcx + ox, 2.6, tcz + oz], 0.04, 0x5a4228, 4)); }
+  // флагшток со звездой, бочки, ящики с боеприпасами, мачта связи, камуфляжная сеть, грузовик
+  m.tube([x - 12, 0, z + 8], [x - 12, 8, z + 8], 0.06, STEEL, 6); m.cyl(0.12, 0.3, 0x6a6f75, x - 12, 8, z + 8, 8); s.box(0.5, 0.3, 0.5, CONC, x - 12, 0.15, z + 8);
   const fc = document.createElement('canvas'); fc.width = 96; fc.height = 64; const fg = fc.getContext('2d');
   fg.fillStyle = '#4a5530'; fg.fillRect(0, 0, 96, 64); fg.fillStyle = '#d8d0b0'; fg.font = 'bold 44px monospace'; fg.textAlign = 'center'; fg.fillText('★', 48, 46);
   const flag = new THREE.Mesh(new THREE.PlaneGeometry(1.8, 1.2), new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(fc), side: THREE.DoubleSide })); flag.position.set(x - 11.1, 7.2, z + 8); scene.add(flag);
-  makeBarrels(x + 10, z + 8, 4);
-  [[x + 4, z - 9], [x + 5.1, z - 9]].forEach(([cx, cz]) => slab(1.0, 0.9, 1.0, std(0x4a5230, 0.9), cx, 0.45, cz, true));
-  slab(1.0, 0.9, 1.0, std(0x4a5230, 0.9), x + 4.5, 1.35, z - 9, false);
+  barrelsK(K, x + 10, z + 8, 4);
+  [[x + 4, z - 9], [x + 5.1, z - 9]].forEach(([cx, cz]) => { crateK(s, 1.0, 0.9, 1.0, CRATE, cx, 0, cz); colBox(cx, cz, 0.5, 0.5); });
+  crateK(d, 1.0, 0.9, 1.0, CRATE, x + 4.5, 0.9, z - 9);
+  [[x + 8, z - 9.5], [x + 9.2, z - 9.5], [x + 8.6, z - 9.5]].forEach(([cx, cz], k) => crateK(d, 1.0, 0.8, 0.8, CRATE, cx, k === 2 ? 0.8 : 0, cz));
+  addRazorWire([[x - 14.5, z - 11.5, x + 14.5, z - 11.5], [x - 14.5, z - 11.5, x - 14.5, z + 11.5], [x + 14.5, z - 11.5, x + 14.5, z + 11.5], [x - 14.5, z + 11.5, x - 3, z + 11.5], [x + 3, z + 11.5, x + 14.5, z + 11.5]], K);
+  mastK(K, x + 1, z - 9.5, 10);
+  const net2 = new THREE.Mesh(new THREE.PlaneGeometry(6, 5), new THREE.MeshStandardMaterial({ color: 0x4a5530, roughness: 1, transparent: true, opacity: 0.75, side: THREE.DoubleSide }));
+  net2.rotation.x = -Math.PI / 2; net2.position.set(x + 8, 2.6, z + 5); scene.add(net2);
+  milTruckK(K, x - 8, z + 7.5, Math.PI / 2);
+  K.finish();
   const rec = { x, z, bx, bz };
   outposts.push(rec);
   return rec;
 }
 
-function buildArmory(x, z) { // арсенал: бетонный бункер с земляной насыпью
-  const conc = std(0x7c7d78, 1), dark = std(0x2b2f33, 0.6, 0.5), W = 9, D = 7, H = 3.4, T = 0.5;
+function buildArmory(x, z) { // арсенал: бетонный бункер с земляной насыпью, стальная дверь, вентиляция, антенна
+  const W = 9, D = 7, H = 3.4, T = 0.5;
   clearTrees(x, z, 9, 9);
-  slab(W - 0.4, 0.04, D - 0.4, std(0x55565a, 1), x, 0.02, z, false);
-  slab(W, H, T, conc, x, H / 2, z - D / 2, true);
-  slab(T, H, D, conc, x - W / 2, H / 2, z, true); slab(T, H, D, conc, x + W / 2, H / 2, z, true);
-  slab(3.6, H, T, conc, x - 2.7, H / 2, z + D / 2, true); slab(3.6, H, T, conc, x + 2.7, H / 2, z + D / 2, true);
-  slab(1.8, H - 2.5, T, conc, x, 2.5 + (H - 2.5) / 2, z + D / 2, false, true);
-  slab(W + 0.6, 0.5, D + 0.6, conc, x, H + 0.25, z, false, true);
-  const mound = slab(W + 3, 1.0, D + 3, std(0x5c5036, 1), x, H + 1.0, z, false, true);
-  slab(W - 1, 0.8, D - 1, std(0x66583c, 1), x, H + 1.9, z, false);
-  // стальная дверь приоткрыта
-  const door = slab(0.18, 2.5, 1.0, dark, x - 1.2, 1.25, z + D / 2 + 0.6, false); door.rotation.y = 1.15;
-  textPlane('АРСЕНАЛ', 3.0, 0.7, '#23282c', '#d8d0b0', x, 2.9, z + D / 2 + T / 2 + 0.02, 0);
-  makeRack(x - W / 2 + 0.9, z - 0.5, 'z', 3.6, true); makeRack(x + W / 2 - 0.9, z - 0.5, 'z', 3.6, true);
-  const lampMat = new THREE.MeshBasicMaterial({ color: 0xfff0cc });
-  [-2, 2].forEach(ox => { const l = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.05, 0.3), lampMat); l.position.set(x + ox, H - 0.1, z); scene.add(l); });
-  slab(2.0, 0.9, 0.8, std(0x4a5230, 0.9), x, 0.45, z - 2.3, true);
+  const K = bKit(x, z, 16), { s, r, d, m, g } = K;
+  const CONC = 0x7c7d78, DARK = 0x2b2f33;
+  d.box(W - 0.4, 0.04, D - 0.4, 0x55565a, x, 0.02, z); for (let i = 0; i < 2; i++) d.box(0.12, 0.012, D - 1.2, 0xb89a24, x - 1.4 + i * 2.8, 0.046, z);
+  const cp = (cx, cz, w, dd, y0, y1) => { // бетонная стена: опалубка, подтёки
+    s.box(w, y1 - y0, dd, CONC, cx, (y0 + y1) / 2, cz);
+    const alongX = w > dd, len = alongX ? w : dd;
+    for (let i = 1; i < Math.floor(len / 1.5); i++) { const o = -len / 2 + i * 1.5; if (alongX) d.box(0.05, y1 - y0, dd + 0.03, 0x6a6b66, cx + o, (y0 + y1) / 2, cz); else d.box(w + 0.03, y1 - y0, 0.05, 0x6a6b66, cx, (y0 + y1) / 2, cz + o); }
+    for (let i = 0; i < Math.floor(len / 1.8); i++) { const o = (h01(i, cx, cz) - 0.5) * (len - 0.6), hh = 0.5 + h01(i + 4, cx, cz) * 1.2; if (alongX) d.box(0.1, hh, dd + 0.04, 0x55564f, cx + o, y1 - hh / 2, cz); else d.box(w + 0.04, hh, 0.1, 0x55564f, cx, y1 - hh / 2, cz + o); }
+  };
+  cp(x, z - D / 2, W, T, 0, H); colBox(x, z - D / 2, W / 2, T / 2);
+  cp(x - W / 2, z, T, D, 0, H); colBox(x - W / 2, z, T / 2, D / 2); cp(x + W / 2, z, T, D, 0, H); colBox(x + W / 2, z, T / 2, D / 2);
+  cp(x - 2.7, z + D / 2, 3.6, T, 0, H); colBox(x - 2.7, z + D / 2, 1.8, T / 2); cp(x + 2.7, z + D / 2, 3.6, T, 0, H); colBox(x + 2.7, z + D / 2, 1.8, T / 2);
+  cp(x, z + D / 2, 1.8, T, 2.5, H);
+  r.box(W + 0.6, 0.5, D + 0.6, CONC, x, H + 0.25, z);
+  r.box(W + 3, 1.0, D + 3, 0x5c5036, x, H + 1.0, z); r.box(W - 1, 0.8, D - 1, 0x66583c, x, H + 1.9, z);
+  for (let i = 0; i < 14; i++) { const px = x + (h01(i, x, z) - 0.5) * (W - 1.5), pz = z + (h01(i + 9, x, z) - 0.5) * (D - 1.5); for (let k = 0; k < 3; k++) d.box(0.05, 0.2 + k * 0.06, 0.05, 0x5a7a3a, px + k * 0.07, H + 2.4, pz); }
+  for (let i = 0; i < 5; i++) d.box(0.5 + h01(i, z, x) * 0.5, 0.35, 0.45, 0x6a6a64, x - W / 2 - 1.3 + (i % 2) * 0.4, H + 0.7 - i * 0.0, z - 3 + i * 1.3);
+  // стальная дверь: рама, петли, запорное колесо, приоткрыта
+  m.box(0.18, 2.5, 1.0, DARK, x - 1.2, 1.25, z + D / 2 + 0.6, 0, 1.15, 0); m.cylX(0.14, 0.06, 0x6a6f75, x - 1.2, 1.3, z + D / 2 + 0.55, 8);
+  m.box(0.16, 2.5, 0.2, 0x3a3f45, x - 0.9, 1.25, z + D / 2); m.box(0.16, 2.5, 0.2, 0x3a3f45, x + 0.9, 1.25, z + D / 2); m.box(1.96, 0.16, 0.2, 0x3a3f45, x, 2.5, z + D / 2);
+  textPlane('АРСЕНАЛ', 3.0, 0.5, '#23282c', '#d8d0b0', x, 2.85, z + D / 2 + T / 2 + 0.02, 0); textPlane('ВХОД ВОСПРЕЩЁН', 3.0, 0.3, '#a02a1a', '#f0ead8', x, 3.28, z + D / 2 + T / 2 + 0.03, 0);
+  rackK(K, x - W / 2 + 0.9, z - 0.5, 'z', 3.6, true); rackK(K, x + W / 2 - 0.9, z - 0.5, 'z', 3.6, true);
+  [-2, 2].forEach(ox => { g.box(1.2, 0.05, 0.3, 0xfff0cc, x + ox, H - 0.1, z); m.box(1.3, 0.05, 0.4, 0x3a3f45, x + ox, H - 0.05, z); });
+  crateK(s, 2.0, 0.9, 0.8, 0x4a5230, x, 0, z - 2.3); colBox(x, z - 2.3, 1.0, 0.4);
+  // снаружи: предупреждающие полосы, вентиляционные грибки, антенна, ящики, мешки с песком
+  for (let i = 0; i < 8; i++) d.box(0.4, 0.012, 0.7, i % 2 ? 0x151515 : 0xe0b020, x - 1.4 + i * 0.4, 0.052, z + 4.7);
+  [-2.5, 2.5].forEach(ox => { m.cyl(0.22, 0.9, 0x8a8f94, x + ox, 4.9, z + 1, 8); m.cyl(0.3, 0.1, 0x4a4f55, x + ox, 5.8, z + 1, 8); m.cone(0.4, 0.05, 0.2, 0x5a5f64, x + ox, 5.95, z + 1, 8); });
+  m.tube([x + 2, 5.7, z - 1], [x + 2, 8.9, z - 1], 0.05, 0x6a6f75, 5); m.cylX(0.3, 0.04, 0x9aa0a8, x + 2, 8.3, z - 1, 10); [[1, 0], [-1, 0], [0, 1.2]].forEach(([dx, dz]) => m.tube([x + 2, 8.5, z - 1], [x + 2 + dx * 2, 5.7, z - 1 + dz * 2], 0.008, 0x6a6f75, 3));
+  crateK(s, 1.0, 0.9, 1.0, 0x4a5230, x + 7.5, 0, z + 3); crateK(s, 1.0, 0.9, 1.0, 0x4a5230, x + 7.5, 0.9, z + 3); colBox(x + 7.5, z + 3, 0.5, 0.5);
+  sandWallK(K, x - 6.5, z + 5.5, x - 3.0, z + 5.5, 0.9); sandWallK(K, x + 3.0, z + 5.5, x + 6.5, z + 5.5, 0.9);
+  K.finish();
   const rec = { x, z };
   armories.push(rec);
   return rec;
@@ -1668,162 +2713,40 @@ function buildArmory(x, z) { // арсенал: бетонный бункер с
 })();
 
 // --- Улучшения зданий: заборы, машины-остовы, контейнеры, погрузчик, цистерна, колючка, мачты, вывески ---
-function aabbAt(x, z, hx, hz, top) { colliders.push({ minX: x - hx, maxX: x + hx, minZ: z - hz, maxZ: z + hz, top }); }
-function boxAt(w, h, d, mat, x, y, z, parent) { const o = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat); o.position.set(x, y, z); (parent || scene).add(o); return o; }
-function addFence(x1, z1, x2, z2, h, colorHex) { // забор из досок (часть досок выбита) с двумя перекладинами
-  const L = Math.hypot(x2 - x1, z2 - z1), n = Math.max(2, Math.round(L / 0.35)), rotY = Math.atan2(-(z2 - z1), x2 - x1);
-  const im = new THREE.InstancedMesh(new THREE.BoxGeometry(0.1, h, 0.04), std(colorHex, 0.95), n);
-  const d = new THREE.Object3D();
-  for (let i = 0; i < n; i++) {
-    const t = i / (n - 1), sy = 0.85 + Math.random() * 0.3, gone = Math.random() < 0.12;
-    d.position.set(x1 + (x2 - x1) * t, h * sy / 2, z1 + (z2 - z1) * t); d.rotation.set(0, rotY, 0); d.scale.set(gone ? 0.001 : 1, gone ? 0.001 : sy, 1);
-    d.updateMatrix(); im.setMatrixAt(i, d.matrix);
-  }
-  scene.add(im);
-  [0.3, 0.75].forEach(k => { const r = boxAt(L, 0.08, 0.05, std(colorHex, 0.95), (x1 + x2) / 2, h * k, (z1 + z2) / 2); r.rotation.y = rotY; });
-  aabbAt((x1 + x2) / 2, (z1 + z2) / 2, Math.abs(x2 - x1) / 2 + 0.1, Math.abs(z2 - z1) / 2 + 0.1, h);
-}
-function makeWreckCar(x, z, rotY, color) { // ржавый остов легковой машины с одним снятым колесом
-  const g = new THREE.Group(), body = std(color, 0.9, 0.2), dark = std(0x1a1a1a, 1), rust = std(0x6b4a2a, 1, 0.1), glass = std(0x1a232b, 0.2, 0.5);
-  boxAt(1.8, 0.6, 4.2, body, 0, 0.7, 0, g); boxAt(1.6, 0.55, 2.0, body, 0, 1.25, 0.2, g); boxAt(1.5, 0.4, 1.8, glass, 0, 1.3, 0.2, g); boxAt(1.55, 0.04, 1.6, rust, 0, 1.54, 0.2, g);
-  boxAt(0.5, 0.02, 0.8, rust, 0.4, 1.02, -1.3, g);
-  [[-0.9, -1.3], [0.9, -1.3], [-0.9, 1.3], [0.9, 1.3]].forEach(([wx, wz], i) => { if (i === 3) return; const w = new THREE.Mesh(new THREE.CylinderGeometry(0.38, 0.38, 0.28, 10), dark); w.rotation.z = Math.PI / 2; w.position.set(wx, 0.38, wz); g.add(w); });
-  g.position.set(x, 0, z); g.rotation.y = rotY; scene.add(g);
-  const al = Math.abs(Math.sin(rotY)) < 0.5; aabbAt(x, z, al ? 0.95 : 2.1, al ? 2.1 : 0.95);
-}
-function makeContainer(x, z, rotY, colors, stack) { // грузовой контейнер, можно стопкой
-  const L = 6.0, W2 = 2.4, H2 = 2.6;
-  const mat = new THREE.MeshStandardMaterial({ color: 0xffffff, map: corrugated(colors[0], colors[1], 6), roughness: 0.8, metalness: 0.3 });
-  for (let k = 0; k < stack; k++) {
-    const m = new THREE.Mesh(new THREE.BoxGeometry(L, H2, W2), mat); m.position.set(x, H2 / 2 + k * H2, z); m.rotation.y = rotY; scene.add(m); blockers.push(m);
-    const dr = boxAt(0.12, H2 - 0.2, W2 - 0.2, std(0x2f3438, 0.6, 0.5), 0, 0, 0); dr.position.set(x + (rotY === 0 ? L / 2 : 0), H2 / 2 + k * H2, z + (rotY === 0 ? 0 : L / 2)); dr.rotation.y = rotY;
-  }
-  aabbAt(x, z, rotY === 0 ? L / 2 : W2 / 2, rotY === 0 ? W2 / 2 : L / 2);
-}
-function makeForklift(x, z, rotY) { // погрузчик
-  const g = new THREE.Group(), yel = std(0xd9a21b, 0.6, 0.3), blk = std(0x1a1a1a, 0.9), steel = std(0x6a6f75, 0.4, 0.7);
-  boxAt(1.1, 0.7, 1.9, yel, 0, 0.75, 0.2, g); boxAt(1.1, 0.5, 0.7, blk, 0, 0.95, 1.2, g);
-  [-0.5, 0.5].forEach(sx => { boxAt(0.06, 1.1, 0.06, steel, sx, 1.7, 0.1, g); boxAt(0.06, 1.1, 0.06, steel, sx, 1.7, -0.5, g); });
-  boxAt(1.15, 0.06, 0.7, steel, 0, 2.25, -0.2, g); boxAt(0.5, 0.1, 0.45, blk, 0, 1.15, 0.35, g);
-  [-0.35, 0.35].forEach(sx => boxAt(0.08, 2.4, 0.08, steel, sx, 1.4, -0.95, g)); boxAt(0.9, 0.08, 0.1, steel, 0, 1.1, -0.9, g);
-  [-0.3, 0.3].forEach(sx => boxAt(0.12, 0.06, 1.2, steel, sx, 0.25, -1.55, g));
-  [[-0.55, -0.5], [0.55, -0.5], [-0.5, 1.0], [0.5, 1.0]].forEach(([wx, wz]) => { const w = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.3, 0.22, 10), blk); w.rotation.z = Math.PI / 2; w.position.set(wx, 0.3, wz); g.add(w); });
-  g.position.set(x, 0, z); g.rotation.y = rotY; scene.add(g);
-  const al = Math.abs(Math.sin(rotY)) < 0.5; aabbAt(x, z, al ? 0.7 : 1.9, al ? 1.9 : 0.7);
-}
-function makeTanker(x, z, rotY) { // ржавая цистерна на шасси (длинная ось Z при rotY=0)
-  const g = new THREE.Group(), silver = std(0x8a8f94, 0.5, 0.6), rust = std(0x6b4a2a, 1, 0.2), dark = std(0x1a1a1a, 0.9), cab = std(0xa83222, 0.7, 0.3);
-  const tk = new THREE.Mesh(new THREE.CylinderGeometry(1.1, 1.1, 6.5, 14).rotateX(Math.PI / 2), silver); tk.position.set(0, 1.95, 0.6); g.add(tk);
-  [-2, 0, 2, 3.6].forEach(zz => { const b = new THREE.Mesh(new THREE.CylinderGeometry(1.14, 1.14, 0.18, 14).rotateX(Math.PI / 2), rust); b.position.set(0, 1.95, zz); g.add(b); });
-  boxAt(1.6, 0.35, 8.2, std(0x2f3438, 0.8, 0.4), 0, 0.8, 0.4, g); boxAt(2.1, 1.7, 1.9, cab, 0, 1.7, -4.2, g); boxAt(1.9, 0.6, 0.06, std(0x1a232b, 0.1, 0.5), 0, 2.1, -5.17, g);
-  boxAt(0.6, 0.25, 0.6, silver, 0, 3.15, 0.6, g);
-  [-3.9, -0.5, 1.1, 2.7].forEach(wz => [-1, 1].forEach(sx => { const w = new THREE.Mesh(new THREE.CylinderGeometry(0.45, 0.45, 0.32, 10).rotateZ(Math.PI / 2), dark); w.position.set(sx * 0.95, 0.45, wz); g.add(w); }));
-  g.position.set(x, 0, z); g.rotation.y = rotY; scene.add(g);
-  const al = Math.abs(Math.sin(rotY)) < 0.5; aabbAt(x, z, al ? 1.2 : 4.6, al ? 4.6 : 1.2);
-}
-function makeMilTruck(x, z, rotY) { // военный грузовик-остов с тентом
-  const g = new THREE.Group(), olive = std(0x4a5230, 0.85, 0.2), tent = std(0x55603a, 1), dark = std(0x1a1a1a, 0.9);
-  boxAt(2.2, 1.5, 1.9, olive, 0, 1.55, -2.1, g); boxAt(1.9, 0.5, 0.06, std(0x1a232b, 0.1, 0.5), 0, 1.9, -3.07, g);
-  boxAt(2.3, 0.4, 4.4, std(0x3a4226, 0.9, 0.3), 0, 0.95, 1.2, g); boxAt(2.3, 1.7, 4.2, tent, 0, 2.0, 1.2, g);
-  [-3.0, 0.2, 2.2].forEach(wz => [-1, 1].forEach(sx => { const w = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.5, 0.36, 10).rotateZ(Math.PI / 2), dark); w.position.set(sx * 1.05, 0.5, wz); g.add(w); }));
-  g.position.set(x, 0, z); g.rotation.y = rotY; scene.add(g);
-  const al = Math.abs(Math.sin(rotY)) < 0.5; aabbAt(x, z, al ? 1.3 : 3.4, al ? 3.4 : 1.3);
-}
-function addMast(x, z, h) { // мачта связи с красной лампой и растяжками
-  const steel = std(0x6a6f75, 0.5, 0.6);
-  boxAt(0.18, h, 0.18, steel, x, h / 2, z);
-  boxAt(0.12, 0.12, 0.12, new THREE.MeshBasicMaterial({ color: 0xff2a1a }), x, h + 0.1, z);
-  [[1, 1], [-1, 1], [0, -1.4]].forEach(([dx, dz]) => {
-    const a = new THREE.Vector3(x, h * 0.85, z), b = new THREE.Vector3(x + dx * 3, 0, z + dz * 3), dir = b.clone().sub(a);
-    const w = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.012, dir.length(), 4), steel);
-    w.position.copy(a).addScaledVector(dir, 0.5); w.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.normalize()); scene.add(w);
-  });
-  aabbAt(x, z, 0.2, 0.2);
-}
-function addRazorWire(segs) { // колючая проволока: ряд витков одним объектом
-  const pts = [];
-  segs.forEach(([x1, z1, x2, z2]) => { const L = Math.hypot(x2 - x1, z2 - z1), n = Math.round(L / 0.6); for (let i = 0; i <= n; i++) pts.push([x1 + (x2 - x1) * i / n, z1 + (z2 - z1) * i / n, Math.abs(x2 - x1) > Math.abs(z2 - z1)]); });
-  const im = new THREE.InstancedMesh(new THREE.TorusGeometry(0.22, 0.012, 4, 10), std(0x8a9096, 0.4, 0.8), pts.length), d = new THREE.Object3D();
-  pts.forEach((p, i) => { d.position.set(p[0], 1.32, p[1]); d.rotation.set(0, p[2] ? Math.PI / 2 : 0, 0); d.updateMatrix(); im.setMatrixAt(i, d.matrix); });
-  scene.add(im);
-}
-function stripesPlane(w, h, px, pz) { // жёлто-чёрная предупреждающая полоса на земле
-  const c = document.createElement('canvas'); c.width = 128; c.height = 32; const g = c.getContext('2d');
-  g.fillStyle = '#e0b020'; g.fillRect(0, 0, 128, 32); g.fillStyle = '#151515';
-  for (let i = -2; i < 10; i++) { g.beginPath(); g.moveTo(i * 16, 32); g.lineTo(i * 16 + 8, 32); g.lineTo(i * 16 + 24, 0); g.lineTo(i * 16 + 16, 0); g.fill(); }
-  const m = new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(c) })); m.rotation.x = -Math.PI / 2; m.position.set(px, 0.045, pz); scene.add(m);
-}
-
+// --- Декор мира (1.9.0): заборы и дворы домов, контейнеры и погрузчик у складов, шины у гаражей ---
+// Остальной декор (бочки, машины, цистерна, мачта, колючка, вывески) теперь собирается внутри самих зданий.
+// Порядок и число вызовов Math.random те же, что в 1.8.0: заборы, пятна крови, шины.
 (function decorateWorld() {
   const carColors = [0x5a6a7a, 0x7a3a2a, 0x6a6a3a, 0x3a5a4a];
-  // дома: забор с проходом к двери, почтовый ящик, фонарь, пятна крови, грядки, ржавая машина
   housePositions.forEach((h, i) => {
     clearTrees(h.x, h.z + 7.5, 8, 1.8);
-    addFence(h.x - 6.5, h.z + 7, h.x - 1.6, h.z + 7, 1.1, 0x7a6a4a); addFence(h.x + 1.6, h.z + 7, h.x + 6.5, h.z + 7, 1.1, 0x7a6a4a);
-    boxAt(0.08, 1.0, 0.08, std(0x4a3a2a), h.x + 1.3, 0.5, h.z + 7.3); boxAt(0.4, 0.25, 0.22, std(0x2f6fa8, 0.6, 0.3), h.x + 1.3, 1.1, h.z + 7.3);
-    boxAt(0.16, 0.22, 0.16, new THREE.MeshBasicMaterial({ color: 0xffd58a }), h.x + 1.3, 2.7, h.z + 3.98);
+    const K = bKit(h.x, h.z, 21), { d, m, g } = K;
+    fenceK(K, h.x - 6.5, h.z + 7, h.x - 1.6, h.z + 7, 1.1, 0x7a6a4a); fenceK(K, h.x + 1.6, h.z + 7, h.x + 6.5, h.z + 7, 1.1, 0x7a6a4a);
+    // почтовый ящик на столбе, фонарь у крыльца
+    m.box(0.08, 1.0, 0.08, 0x4a3a2a, h.x + 1.3, 0.5, h.z + 7.3); m.box(0.4, 0.25, 0.22, 0x2f6fa8, h.x + 1.3, 1.1, h.z + 7.3); m.cyl(0.11, 0.4, 0x2f6fa8, h.x + 1.3, 1.1, h.z + 7.3, 8, true);
+    m.box(0.02, 0.12, 0.1, 0xb02a1a, h.x + 1.52, 1.25, h.z + 7.3);
+    g.box(0.16, 0.22, 0.16, 0xffd58a, h.x + 1.3, 2.7, h.z + 3.98);
     const blood = new THREE.Mesh(new THREE.CircleGeometry(0.5 + Math.random() * 0.5, 9), new THREE.MeshBasicMaterial({ color: 0x4a0f0f, transparent: true, opacity: 0.7 }));
     blood.rotation.x = -Math.PI / 2; blood.position.set(h.x + (Math.random() - 0.5) * 1.6, 0.04, h.z + 4.9); scene.add(blood);
-    boxAt(2.2, 0.25, 1.0, std(0x4a3a24, 1), h.x - 1.5, 0.12, h.z - 5.3); boxAt(2.2, 0.35, 0.5, std(0x3f7a34, 1), h.x - 1.5, 0.35, h.z - 5.3); // грядка
-    if (i % 3 === 0) { clearTrees(h.x + 9, h.z + 2, 3.5, 3.5); makeWreckCar(h.x + 9, h.z + 2, 0, carColors[i % carColors.length]); }
-    else makeBarrels(h.x - 9, h.z + 1, 2 + (i % 3));
+    // грядка: земля в раме, ростки, колышки
+    d.box(2.2, 0.25, 1.0, 0x4a3a24, h.x - 1.5, 0.12, h.z - 5.3); d.box(2.2, 0.35, 0.5, 0x3f7a34, h.x - 1.5, 0.35, h.z - 5.3);
+    [-1, 1].forEach(sx => d.box(0.08, 0.3, 1.1, 0x6a5a3a, h.x - 1.5 + sx * 1.1, 0.15, h.z - 5.3));
+    for (let k = 0; k < 6; k++) d.box(0.1, 0.3 + (k % 3) * 0.08, 0.1, 0x4f9a3a, h.x - 2.4 + k * 0.36, 0.55, h.z - 5.3 + (k % 2 ? 0.15 : -0.1));
+    if (i % 3 === 0) { clearTrees(h.x + 9, h.z + 2, 3.5, 3.5); carK(K, h.x + 9, h.z + 2, 0, carColors[i % carColors.length]); }
+    else barrelsK(K, h.x - 9, h.z + 1, 2 + (i % 3));
+    K.finish();
   });
-  // склады: контейнеры, погрузчик внутри, прожектор, вентиляторы на крыше, жёлтые столбики у ворот
-  warehouses.forEach((w, i) => {
+  warehouses.forEach((w, i) => { // контейнеры и погрузчик
     clearTrees(w.x + 13, w.z, 4, 9);
-    makeContainer(w.x + 13, w.z - 3, Math.PI / 2, i ? ['#2f6fa8', '#1f4f7a'] : ['#a8442f', '#7a2f20'], 2);
-    makeContainer(w.x + 13, w.z + 3.5, Math.PI / 2, i ? ['#c9a227', '#9a7a1a'] : ['#3f8a4a', '#2a6a34'], 1);
-    makeForklift(w.x - 3.2, w.z - 1.2, 0);
-    boxAt(0.18, 7, 0.18, std(0x4a4f55, 0.5, 0.6), w.x - 10, 3.5, w.z + 7); boxAt(0.9, 0.3, 0.5, new THREE.MeshBasicMaterial({ color: 0xfff0cc }), w.x - 10, 7.1, w.z + 6.8); aabbAt(w.x - 10, w.z + 7, 0.2, 0.2);
-    [-8, -4, 0, 4, 8].forEach(ox => { const v = new THREE.Mesh(new THREE.CylinderGeometry(0.32, 0.32, 0.55, 10), std(0x8a8f94, 0.5, 0.6)); v.position.set(w.x + ox * 0.9, 8.2, w.z); scene.add(v); });
-    [[-3.2, 7.6], [3.2, 7.6], [-3.2, 9.6], [3.2, 9.6]].forEach(([ox, oz]) => boxAt(0.2, 0.9, 0.2, std(0xe0b020, 0.7), w.x + ox, 0.45, w.z + oz));
-    boxAt(12, 0.12, 0.12, std(0x6a6f75, 0.5, 0.6), w.x, 3.0, w.z - 6.5); // труба вдоль стены
+    const K = bKit(w.x, w.z, 22);
+    containerK(K, w.x + 13, w.z - 3, Math.PI / 2, i ? ['#2f6fa8', '#1f4f7a'] : ['#a8442f', '#7a2f20'], 2);
+    containerK(K, w.x + 13, w.z + 3.5, Math.PI / 2, i ? ['#c9a227', '#9a7a1a'] : ['#3f8a4a', '#2a6a34'], 1);
+    forkliftK(K, w.x - 3.2, w.z - 1.2, 0);
+    K.finish();
   });
-  // заправка: цистерна, воздушная колонка, будка телефона, стол для пикника, неоновая вывеска
-  stations.forEach(st => {
-    clearTrees(st.x + 12, st.z - 6, 3, 6);
-    makeTanker(st.x + 12, st.z - 6, 0);
-    boxAt(0.4, 1.3, 0.4, std(0x2f6fa8, 0.6, 0.3), st.x - 6.5, 0.65, st.z + 9); boxAt(0.3, 0.3, 0.02, new THREE.MeshBasicMaterial({ color: 0x6dff6d }), st.x - 6.5, 1.1, st.z + 9.21); aabbAt(st.x - 6.5, st.z + 9, 0.3, 0.3);
-    boxAt(0.9, 2.2, 0.9, std(0x2f6fa8, 0.6, 0.3), st.x + 6.5, 1.1, st.z + 9.5); boxAt(0.7, 1.2, 0.04, std(0x1a232b, 0.1, 0.5), st.x + 6.5, 1.3, st.z + 9.96); aabbAt(st.x + 6.5, st.z + 9.5, 0.5, 0.5);
-    boxAt(1.8, 0.1, 0.8, std(0x7a5c34), st.x - 8, 0.8, st.z + 10); [-0.7, 0.7].forEach(ox => boxAt(0.1, 0.8, 0.8, std(0x5e4528), st.x - 8 + ox, 0.4, st.z + 10));
-    [-1, 1].forEach(sd => boxAt(1.8, 0.08, 0.3, std(0x7a5c34), st.x - 8, 0.45, st.z + 10 + sd * 0.7));
-    textPlane('ОТКРЫТО', 1.7, 0.5, '#0a2a0a', '#6dff6d', st.x + 4.3, 3.0, st.shopZ + 3.2, 0);
-  });
-  // гараж: поднятые рулонные ворота с планками, подъёмник, шины, бочки, вывеска
-  garages.forEach(g => {
+  garages.forEach(g => { // шины: числа Math.random как раньше
     clearTrees(g.x + 9.5, g.z, 3, 6);
-    [-4.1, 4.1].forEach(ox => { for (let k = 0; k < 4; k++) boxAt(4.2, 0.05, 0.1, std(0x9aa0a8, 0.4, 0.6), g.x + ox, 3.65 - k * 0.12, g.z + 5.02); });
-    [2.7, 5.5].forEach(ox => boxAt(0.25, 2.6, 0.25, std(0xd9a21b, 0.6, 0.4), g.x + ox, 1.3, g.z + 0.5)); boxAt(3.1, 0.2, 0.3, std(0xd9a21b, 0.6, 0.4), g.x + 4.1, 2.6, g.z + 0.5);
-    [2.7, 5.5].forEach(ox => aabbAt(g.x + ox, g.z + 0.5, 0.2, 0.2));
     const tires = makeTires(4); tires.group.position.set(g.x + 9.5, 0, g.z - 3); scene.add(tires.group);
-    makeBarrels(g.x + 9.5, g.z + 1.5, 4);
-    textPlane('ШИНЫ', 1.5, 0.5, '#a02a1a', '#fff6dd', g.x - 7.1, 2.6, g.z + 5.22, 0);
-  });
-  // башня: насосная будка, трубы, предупреждающая табличка
-  towers.forEach(t => {
-    clearTrees(t.x + 6, t.z - 4, 3, 3);
-    boxAt(3, 2.4, 3, std(0x77786f, 1), t.x + 6, 1.2, t.z - 4); boxAt(3.4, 0.2, 3.4, std(0x4a4d50, 0.9, 0.2), t.x + 6, 2.5, t.z - 4); boxAt(0.9, 1.7, 0.08, std(0x2f3438, 0.6, 0.5), t.x + 5.2, 0.85, t.z - 2.46); aabbAt(t.x + 6, t.z - 4, 1.5, 1.5);
-    boxAt(0.2, 0.2, 5.5, std(0x6b5a48, 0.6, 0.6), t.x + 3.7, 0.6, t.z - 4 + 0); const pp = boxAt(4.5, 0.2, 0.2, std(0x6b5a48, 0.6, 0.6), t.x + 3.8, 0.6, t.z - 1.4); pp.rotation.y = 0;
-    textPlane('ОПАСНО', 1.3, 0.5, '#e0b020', '#111111', t.x + 2.5, 1.7, t.z + 2.9, 0);
-  });
-  // блокпост: колючка по периметру, мачта связи, камуфляжная сеть, грузовик, ящики
-  outposts.forEach(o => {
-    addRazorWire([[o.x - 14.5, o.z - 11.5, o.x + 14.5, o.z - 11.5], [o.x - 14.5, o.z - 11.5, o.x - 14.5, o.z + 11.5], [o.x + 14.5, o.z - 11.5, o.x + 14.5, o.z + 11.5], [o.x - 14.5, o.z + 11.5, o.x - 3, o.z + 11.5], [o.x + 3, o.z + 11.5, o.x + 14.5, o.z + 11.5]]);
-    addMast(o.x + 1, o.z - 9.5, 10);
-    const net2 = new THREE.Mesh(new THREE.PlaneGeometry(6, 5), new THREE.MeshStandardMaterial({ color: 0x4a5530, roughness: 1, transparent: true, opacity: 0.75, side: THREE.DoubleSide }));
-    net2.rotation.x = -Math.PI / 2; net2.position.set(o.x + 8, 2.6, o.z + 5); scene.add(net2);
-    makeMilTruck(o.x - 8, o.z + 7.5, Math.PI / 2);
-    [[o.x + 8, o.z - 9.5], [o.x + 9.2, o.z - 9.5], [o.x + 8.6, o.z - 9.5]].forEach(([cx, cz], k) => boxAt(1.0, 0.8, 0.8, std(0x4a5230, 0.9), cx, 0.4 + (k === 2 ? 0.8 : 0), cz));
-    boxAt(0.7, 0.35, 0.7, new THREE.MeshBasicMaterial({ color: 0xfff0cc }), o.x + 10.5, 7.9, o.z - 7.5); // прожектор на вышке
-  });
-  // арсенал: предупреждающие полосы, антенна, вентиляция, ящики, мешки с песком
-  armories.forEach(a => {
-    stripesPlane(3.2, 0.7, a.x, a.z + 4.7);
-    boxAt(0.1, 4, 0.1, std(0x6a6f75, 0.5, 0.6), a.x + 2, 6.9, a.z - 1);
-    [-2.5, 2.5].forEach(ox => { const v = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.22, 0.9, 8), std(0x8a8f94, 0.5, 0.6)); v.position.set(a.x + ox, 5.35, a.z + 1); scene.add(v); const c2 = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.3, 0.1, 8), std(0x4a4f55, 0.5, 0.6)); c2.position.set(a.x + ox, 5.85, a.z + 1); scene.add(c2); });
-    boxAt(1.0, 0.9, 1.0, std(0x4a5230, 0.9), a.x + 7.5, 0.45, a.z + 3); boxAt(1.0, 0.9, 1.0, std(0x4a5230, 0.9), a.x + 7.5, 1.35, a.z + 3); aabbAt(a.x + 7.5, a.z + 3, 0.5, 0.5);
-    sandWall(a.x - 6.5, a.z + 5.5, a.x - 3.0, a.z + 5.5, 0.9); sandWall(a.x + 3.0, a.z + 5.5, a.x + 6.5, a.z + 5.5, 0.9);
-    textPlane('ВХОД ВОСПРЕЩЁН', 3.0, 0.5, '#a02a1a', '#f0ead8', a.x, 3.3, a.z + 3.78, 0);
   });
 })();
 
@@ -2229,7 +3152,7 @@ function spawnBike(x, z, heading) {
 function mountBike() {
   if (!bike || riding || health <= 0) return;
   riding = true; drive = 'bike';
-  if (bike.collider) { colliders.splice(colliders.indexOf(bike.collider), 1); bike.collider = null; }
+  if (bike.collider) { removeFrom(colliders, bike.collider); bike.collider = null; }
   bike.rig.rider.visible = true;
   bike.on = bike.fuel > 0;
   yaw = bike.heading; pitch = -0.15;
@@ -2473,7 +3396,7 @@ function spawnCar(x, z, heading, fuel) {
 function mountCar(c) {
   if (riding || health <= 0) return;
   riding = true; drive = 'car'; curCar = c;
-  if (c.collider) { colliders.splice(colliders.indexOf(c.collider), 1); c.collider = null; }
+  if (c.collider) { removeFrom(colliders, c.collider); c.collider = null; }
   c.on = c.fuel > 0;
   yaw = c.heading; pitch = -0.1;
   try { bActx = bActx || new (window.AudioContext || window.webkitAudioContext)(); if (bActx.state === 'suspended') bActx.resume(); } catch (err) { bActx = null; }
@@ -2681,7 +3604,7 @@ function takeFromPile(p) { // берём одну штуку, модель ум�
   chopCd = 0.25;
   p.group.remove(p.parts.shift());
   p.n--;
-  if (p.n <= 0) { scene.remove(p.group); piles.splice(piles.indexOf(p), 1); if (!p.stash) spawnPile(p.type); } // где-то появится новая
+  if (p.n <= 0) { scene.remove(p.group); removeFrom(piles, p); if (!p.stash) spawnPile(p.type); } // где-то появится новая
 }
 
 // Подсказка «[E] ...» и поиск кучи или ящика, на которые смотрит игрок
@@ -2881,7 +3804,7 @@ function updateCases(dt) {
       if (u >= 1) { c.loot.visible = false; c.state = 'empty'; c.t = 0; }
     } else if (c.state === 'empty') {
       c.t += dt; // пустой ящик исчезает через 90 секунд
-      if (c.t > 90) { scene.remove(c.root); colliders.splice(colliders.indexOf(c.collider), 1); cases.splice(i, 1); }
+      if (c.t > 90) { scene.remove(c.root); removeFrom(colliders, c.collider); cases.splice(i, 1); }
     }
   }
 }
@@ -3084,7 +4007,7 @@ const floors = [];        // поверхности, по которым мож�
 let fallV = 0, sleeping = false;
 const MAX_BENCHES = 2;
 function surfaceAt(x, z, feet) { // на какой высоте стоять в этой точке
-  let best = 0;
+  let best = Math.max(terrainY(x, z), SWIM_Y); // в озере ноги не глубже SWIM_Y: игрок плывёт
   for (const f of floors) {
     if (x < f.minX || x > f.maxX || z < f.minZ || z > f.maxZ) continue;
     if (f.y <= feet + 0.6 && f.y > best) best = f.y; // ступенька не выше 0,6 м
@@ -3139,6 +4062,7 @@ function aabbSeg(x, z, a, lo, hi, thick) { // отрезок стены вдол
 
 function placePieceAt(type, rotv, x, z, free) {
   if (health <= 0) return null;
+  if (!free && (Math.abs(x) > FLAT_HALF - 2 || Math.abs(z) > FLAT_HALF - 2)) return notify('На холмах строить нельзя');
   const p = pieces[type];
   const [w, h, d, y] = pieceGeometry(type, rotv);
   const a = rotv % 2;
@@ -3350,13 +4274,13 @@ function removePiece() {
   scene.remove(b.mesh);
   if (b.light) scene.remove(b.light);
   if (b.vis) scene.remove(b.vis);
-  if (b.collider) colliders.splice(colliders.indexOf(b.collider), 1);
+  if (b.collider) removeFrom(colliders, b.collider);
   if (b.colliders) b.colliders.forEach(c => { const ci = colliders.indexOf(c); if (ci >= 0) colliders.splice(ci, 1); });
-  if (b.floor) floors.splice(floors.indexOf(b.floor), 1);
+  if (b.floor) removeFrom(floors, b.floor);
   if (b.floorEntries) b.floorEntries.forEach(f => { const fi = floors.indexOf(f); if (fi >= 0) floors.splice(fi, 1); });
   const bi = blockers.indexOf(b.mesh);
   if (bi >= 0) blockers.splice(bi, 1);
-  builtMeshes.splice(builtMeshes.indexOf(b.mesh), 1);
+  removeFrom(builtMeshes, b.mesh);
   built.splice(i, 1);
   addItem('wood', Math.floor(pieces[b.type].cost / 2));
 }
@@ -3376,8 +4300,8 @@ function chop(quiet) {
   if (t.hp <= 0) {
     scene.remove(t.trunk);
     scene.remove(t.crown);
-    colliders.splice(colliders.indexOf(t.collider), 1);
-    blockers.splice(blockers.indexOf(t.trunk), 1);
+    removeFrom(colliders, t.collider);
+    removeFrom(blockers, t.trunk);
     trees.splice(ti, 1);
     const n = 2 + Math.floor(Math.random() * 4); // выпадает от 2 до 5 брёвен
     spawnPile('wood', t.trunk.position.x, t.trunk.position.z, n);
@@ -3607,7 +4531,7 @@ menu.addEventListener('keydown', e => { // Enter в поле пароля
 });
 // Esc (или потеря курсора) ставит игру на паузу и открывает настройки
 document.addEventListener('pointerlockchange', () => {
-  if (gameStarted && !chatOpen && document.pointerLockElement !== renderer.domElement && !menuOpen && health > 0) { menuTab = 'settings'; toggleMenu(true); }
+  if (gameStarted && !cutscenes.cut.active && !chatOpen && document.pointerLockElement !== renderer.domElement && !menuOpen && health > 0) { menuTab = 'settings'; toggleMenu(true); }
 });
 menu.addEventListener('click', e => {
   const sl = e.target.closest('[data-slot]');
@@ -3676,6 +4600,7 @@ function makeSave() { // всё, что нужно, чтобы вернуть и
     cars: cars.map(c => [c.rig.root.position.x, c.rig.root.position.z, c.heading, c.fuel]),
     wh: warehouses.map(w => [w.state, w.hp]),
     pumps: stations.map(st => st.pumps.map(p => p.fuel)),
+    evac: cutscenes.serialize(),
   };
 }
 function saveGame(slot, quiet) {
@@ -3710,16 +4635,16 @@ function applySave(sv) { // накладываем сохранение на т�
   const fe = new Set(sv.felled);
   for (let i = trees.length - 1; i >= 0; i--) {
     const t = trees[i]; if (!fe.has(t.id)) continue;
-    scene.remove(t.trunk); scene.remove(t.crown); colliders.splice(colliders.indexOf(t.collider), 1); blockers.splice(blockers.indexOf(t.trunk), 1); trees.splice(i, 1);
+    scene.remove(t.trunk); scene.remove(t.crown); removeFrom(colliders, t.collider); removeFrom(blockers, t.trunk); trees.splice(i, 1);
   }
   sv.pileDiff.forEach(([id, n]) => {
     const p = piles.find(q => q.id === id); if (!p) return;
     while (p.n > n && p.parts.length) { p.group.remove(p.parts.shift()); p.n--; }
-    if (n <= 0) { scene.remove(p.group); piles.splice(piles.indexOf(p), 1); }
+    if (n <= 0) { scene.remove(p.group); removeFrom(piles, p); }
   });
   sv.caseState.forEach(([id, st]) => {
     const c = cases.find(q => q.id === id); if (!c) return;
-    if (st === 'gone') { scene.remove(c.root); const ci = colliders.indexOf(c.collider); if (ci >= 0) colliders.splice(ci, 1); cases.splice(cases.indexOf(c), 1); }
+    if (st === 'gone') { scene.remove(c.root); const ci = colliders.indexOf(c.collider); if (ci >= 0) colliders.splice(ci, 1); removeFrom(cases, c); }
     else setCaseOpen(c, st === 'empty');
   });
   // объекты, появившиеся уже во время игры
@@ -3728,7 +4653,7 @@ function applySave(sv) { // накладываем сохранение на т�
   sv.dyn.ammo.forEach(([x, z, st]) => spawnAmmoBox(x, z, !!st));
   sv.dyn.cases.forEach(([x, z, r, st, kind, state]) => { spawnCase(x, z, r, !!st, kind || undefined); const c = cases[cases.length - 1]; if (state === 1) setCaseOpen(c, false); else if (state === 2) setCaseOpen(c, true); });
   // транспорт
-  cars.slice().forEach(c => { if (c.collider) colliders.splice(colliders.indexOf(c.collider), 1); scene.remove(c.rig.root); }); cars.length = 0;
+  cars.slice().forEach(c => { if (c.collider) removeFrom(colliders, c.collider); scene.remove(c.rig.root); }); cars.length = 0;
   sv.cars.forEach(([x, z, h, f]) => spawnCar(x, z, h, f));
   if (sv.bike) { spawnBike(sv.bike[0], sv.bike[1], sv.bike[2]); bike.fuel = sv.bike[3]; }
   // постройки игрока
@@ -3736,6 +4661,7 @@ function applySave(sv) { // накладываем сохранение на т�
   // склады, колонки, подвал
   sv.wh.forEach(([state, hp], i) => { const w = warehouses[i]; if (!w) return; w.hp = hp; if (state === 'open') { w.state = 'open'; scene.remove(w.hatch); w.hole.visible = true; } });
   sv.pumps.forEach((arr, i) => { const st = stations[i]; if (st) arr.forEach((f, j) => { if (st.pumps[j]) st.pumps[j].fuel = f; }); });
+  cutscenes.restore(sv.evac);     // финал: уже был (4) или объявлен (1)
   if (sv.basement >= 0 && warehouses[sv.basement]) { inBasement = true; curW = warehouses[sv.basement]; }
 }
 
@@ -3761,7 +4687,7 @@ function renderMainMenu(view) {
       return `<div style="display:flex;align-items:center;justify-content:center;gap:8px;margin:6px"><div style="width:520px;max-width:55vw;padding:10px 14px;border:2px solid #4a5a3a;border-radius:8px;background:rgba(20,26,18,.85);text-align:left">Слот ${i}: ${d ? slotInfo(d) : '<span style="opacity:.6">пусто</span>'}</div>${d ? (d.v === 2 ? Bs('Загрузить', 'slot:' + i) : '') + Bs('Удалить', 'del:' + i) : ''}</div>`;
     }).join('') + B('Назад', 'back');
   }
-  mainMenu.innerHTML = `<div style="text-align:center"><div style="font-size:72px;letter-spacing:10px;color:#c8e07a;text-shadow:0 4px 12px #000">DEADZONE</div><div style="opacity:.8;margin-bottom:24px">Постапокалиптическое выживание</div>${body}</div><div style="position:absolute;right:14px;bottom:10px;opacity:.6;font-size:14px">версия 1.3.0 · сохраняться можно на кровати</div>`;
+  mainMenu.innerHTML = `<div style="text-align:center"><div style="font-size:72px;letter-spacing:10px;color:#c8e07a;text-shadow:0 4px 12px #000">DEADZONE</div><div style="opacity:.8;margin-bottom:24px">Постапокалиптическое выживание</div>${body}</div><div style="position:absolute;right:14px;bottom:10px;opacity:.6;font-size:14px">версия 1.8.0 · сохраняться можно на кровати</div>`;
 }
 function startGame(isNew, lock) {
   gameStarted = true; mainMenu.style.display = 'none';
@@ -3769,6 +4695,11 @@ function startGame(isNew, lock) {
   if (isNew) { gameHour = 8; day = 1; camera.position.set(0, 1.7, 0); yaw = 0; pitch = 0; }
   if (lock) { try { const p = renderer.domElement.requestPointerLock(); if (p && p.catch) p.catch(() => {}); } catch (e) { /* клик по экрану захватит мышь */ } }
   notify(isNew ? 'Выживи. Построй кровать (B, 8), чтобы сохраняться' : 'Игра загружена' + (lock ? '' : '. Кликни по экрану, чтобы управлять'));
+}
+function startNewGame(gate) { // новая игра: вступительная сцена, потом обычный старт (параметр ?nointro в адресе её отключает)
+  const begin = () => { startGame(true, true); gameHour = 6.4; };   // после вступления начинается раннее утро
+  if (/[?&]nointro\b/.test(location.search)) { startGame(true, true); return; }
+  cutscenes.startIntro(begin, { gate });
 }
 function loadSlot(slot) {
   const sv = readSaves()[slot];
@@ -3779,7 +4710,7 @@ function loadSlot(slot) {
 mainMenu.addEventListener('click', e => {
   const t = e.target.closest('[data-mm]'); if (!t) return;
   const [act, arg] = t.dataset.mm.split(':');
-  if (act === 'new') startGame(true, true);
+  if (act === 'new') startNewGame(false);
   else if (act === 'continue') loadSlot(parseInt(lsGet('dz_lastSlot') || '0', 10));
   else if (act === 'load') renderMainMenu('load');
   else if (act === 'back') renderMainMenu('main');
@@ -3827,6 +4758,7 @@ function bootGame() { // автозапуск после перезагрузк�
     const sv = readSaves()[bootInfo.slot];
     if (sv && sv.v === 2 && sv.seed === WORLD_SEED) { applySave(sv); currentSlot = bootInfo.slot; startGame(false, false); return; }
   }
+  if (bootInfo && bootInfo.newGame) { gameHour = 9; startNewGame(true); return; }   // «Новая игра» из финала: вступление с ожиданием нажатия
   gameHour = 9; // красивый фон для меню
   mainMenu.style.display = 'flex'; renderMainMenu('main');
 }
@@ -3881,26 +4813,244 @@ const mpHud = document.createElement('div');
 mpHud.style.cssText = 'position:fixed;top:10px;right:10px;color:#fff;font:15px monospace;text-shadow:1px 1px 2px #000;background:rgba(0,0,0,.4);padding:4px 10px;border-radius:6px;display:none;text-align:right;white-space:pre';
 document.body.appendChild(mpHud);
 
+// --- Оружие в руках других игроков: упрощённые модели (ствол смотрит в +Z, начало координат у рукояти) ---
+function buildWorldGun(kind) {
+  const B = zBoxes(mulberry(7 + kind.length));
+  const STEEL = 0x2a2d30, STEEL_L = 0x4a5057, WOOD = 0x7a4a22, WOOD_D = 0x4e3119, BLACK = 0x0d0e10, FRAME = 0x26292d;
+  let gy = 0.06, gz = 0.04; // смещение: центр рукояти попадает в начало координат
+  if (kind === 'pistol') {
+    gz = 0.01; gy = 0.06;
+    B.box(0.03, 0.04, 0.21, 0x2d3136, 0, 0.045, 0.07); B.box(0.032, 0.044, 0.03, STEEL_L, 0, 0.045, -0.02);       // затвор
+    B.box(0.014, 0.014, 0.03, BLACK, 0, 0.04, 0.19); B.box(0.008, 0.014, 0.01, 0xf2f2f2, 0, 0.072, 0.165); B.box(0.018, 0.012, 0.01, BLACK, 0, 0.072, -0.03); // дуло, мушка, целик
+    B.box(0.03, 0.032, 0.18, FRAME, 0, 0.008, 0.07);                                                               // рама
+    B.box(0.032, 0.12, 0.05, 0x5a3a20, 0, -0.06, -0.01, -0.2); B.box(0.032, 0.012, 0.056, BLACK, 0, -0.122, -0.035); // рукоять, дно магазина
+    B.box(0.008, 0.012, 0.05, FRAME, 0, -0.022, 0.06); B.box(0.008, 0.022, 0.008, STEEL_L, 0, -0.012, 0.05);        // скоба и курок
+  } else if (kind === 'shotgun') {
+    B.box(0.05, 0.085, 0.28, 0x1f2226, 0, 0.03, 0.12); B.box(0.004, 0.03, 0.08, BLACK, 0.026, 0.035, 0.1);        // ствольная коробка, окно выброса
+    B.box(0.034, 0.034, 0.6, STEEL, 0, 0.058, 0.56); B.box(0.03, 0.03, 0.46, STEEL_L, 0, 0.012, 0.5);              // ствол, трубка магазина
+    B.box(0.052, 0.05, 0.22, WOOD, 0, 0.002, 0.46); B.box(0.04, 0.04, 0.025, BLACK, 0, 0.058, 0.87); B.box(0.008, 0.012, 0.008, 0xc9a227, 0, 0.082, 0.86); // цевьё, дульный срез, мушка
+    B.box(0.04, 0.1, 0.05, WOOD_D, 0, -0.06, -0.04, -0.3); B.box(0.045, 0.11, 0.34, WOOD, 0, 0.0, -0.27, 0.1);       // рукоять, приклад
+    B.box(0.048, 0.13, 0.025, BLACK, 0, -0.015, -0.45); B.box(0.008, 0.012, 0.07, STEEL, 0, -0.025, 0.06);          // затылок приклада, скоба
+  } else { // ak
+    B.box(0.05, 0.075, 0.34, STEEL, 0, 0.03, 0.12); B.box(0.046, 0.02, 0.3, STEEL_L, 0, 0.078, 0.14); B.box(0.03, 0.018, 0.07, STEEL, 0, 0.092, 0.24); // коробка, крышка, целик
+    B.box(0.058, 0.055, 0.26, WOOD, 0, 0.012, 0.4); B.box(0.052, 0.032, 0.26, WOOD, 0, 0.06, 0.4);                  // цевьё
+    B.box(0.024, 0.024, 0.3, STEEL, 0, 0.04, 0.68); B.box(0.022, 0.022, 0.28, STEEL_L, 0, 0.082, 0.52);            // ствол, газовая трубка
+    B.box(0.022, 0.05, 0.03, STEEL, 0, 0.075, 0.82); B.box(0.032, 0.032, 0.05, BLACK, 0, 0.04, 0.85);               // мушка, дульный тормоз
+    B.box(0.04, 0.12, 0.075, STEEL, 0, -0.07, 0.13, 0.05); B.box(0.04, 0.12, 0.075, STEEL, 0, -0.18, 0.17, 0.3);    // магазин-«банан»
+    B.box(0.042, 0.008, 0.077, STEEL_L, 0, -0.07, 0.13, 0.05);
+    B.box(0.04, 0.1, 0.05, WOOD, 0, -0.06, -0.04, -0.35); B.box(0.045, 0.12, 0.38, WOOD, 0, 0.0, -0.33, 0.1);        // рукоять, приклад
+    B.box(0.05, 0.13, 0.015, BLACK, 0, -0.01, -0.53); B.box(0.008, 0.012, 0.06, STEEL, 0, -0.02, 0.07);            // затылок, скоба
+  }
+  const g = new THREE.Group(), m = B.mesh(weaponMixMat);
+  m.position.set(0, gy, gz); g.add(m);
+  return g;
+}
+// --- Выжившие (аватары других игроков) ---
+// Скелет: таз с бёдрами и коленями, корпус на поясе, плечи с локтями, голова. Оружие держат руки через обратную кинематику
+// (две кости: плечо и предплечье), поэтому кисти лежат на рукояти и цевье при любом наклоне головы и отдаче.
+const SURV_SKINS = [0xd9a67a, 0xc68642, 0xf1c27d, 0x8d5524];
+const SURV_STYLE = [ // куртка, головной убор, рюкзак, волосы
+  { jacket: 0x2f6fa8, hat: 'beanie', hatCol: 0x1f3550, pack: 0xc9742a, hair: 0x4a3322, beard: false, goggles: false },
+  { jacket: 0xa8442f, hat: 'cap', hatCol: 0x1a1a1a, pack: 0x5a5f61, hair: 0x2b2118, beard: true, goggles: false },
+  { jacket: 0x3f8a4a, hat: 'none', hatCol: 0, pack: 0x8a7a52, hair: 0x6a5a3a, beard: false, goggles: true },
+  { jacket: 0x8a6fa8, hat: 'bandana', hatCol: 0xb02a2a, pack: 0x2f7a7a, hair: 0x1a1a1a, beard: true, goggles: false },
+];
+const SURV_L1 = 0.30, SURV_L2 = 0.29;      // длина плеча и предплечья (до центра кисти)
+const SURV_SH = [0.28, 0.44];              // плечо: сдвиг от оси и высота над поясом
+function buildSurvivor(idx) {
+  const st = SURV_STYLE[idx % 4], skin = SURV_SKINS[(idx + (idx >> 2)) % 4], rnd = mulberry(9000 + idx * 17);
+  const jk = st.jacket, jkD = mulCol(jk, 0.72), jkL = mulCol(jk, 1.18), skD = mulCol(skin, 0.78), hair = st.hair;
+  const pants = idx % 2 ? 0x6a6048 : 0x3a4252, pantsD = mulCol(pants, 0.72), boot = 0x2a2018, glove = 0x2f2f33;
+  const grp = (x, y, z) => { const o = new THREE.Group(); o.position.set(x, y, z); return o; };
+  const cl = v => Math.min(1, Math.max(0, v));
+  const g = new THREE.Group(), body = new THREE.Group(), upper = grp(0, 1.08, 0);
+  g.add(body); body.add(upper);
+
+  // корпус: куртка, пояс с подсумком и флягой, рюкзак
+  const U = zBoxes(rnd, y => 0.8 + 0.2 * cl((y + 0.2) / 0.6));
+  U.box(0.34, 0.2, 0.22, pants, 0, -0.1, 0);
+  U.box(0.34, 0.24, 0.22, jkD, 0, 0.08, 0); U.box(0.42, 0.3, 0.25, jk, 0, 0.32, 0);
+  [-1, 1].forEach(sd => U.box(0.14, 0.1, 0.2, jk, sd * 0.27, 0.44, 0));
+  U.box(0.24, 0.05, 0.2, jkL, 0, 0.5, 0); U.box(0.1, 0.1, 0.1, skin, 0, 0.55, 0);
+  U.box(0.012, 0.46, 0.01, 0x222222, 0, 0.27, 0.128);
+  [-1, 1].forEach(sd => { U.box(0.1, 0.09, 0.012, jkD, sd * 0.12, 0.28, 0.13); U.box(0.05, 0.34, 0.02, 0x222222, sd * 0.13, 0.32, 0.128); });
+  U.box(0.37, 0.05, 0.235, jkD, 0, 0.0, 0);
+  U.box(0.36, 0.06, 0.23, 0x2a2018, 0, -0.04, 0); U.box(0.06, 0.04, 0.012, 0xc9a227, 0, -0.04, 0.12);
+  U.box(0.1, 0.12, 0.07, 0x3a3a2a, -0.2, -0.12, 0.06); U.box(0.07, 0.2, 0.07, 0x3a6a8a, 0.21, -0.08, -0.04);
+  U.box(0.34, 0.42, 0.18, st.pack, 0, 0.28, -0.21); U.box(0.32, 0.12, 0.2, mulCol(st.pack, 0.8), 0, 0.5, -0.21); U.box(0.34, 0.1, 0.1, 0x5a5a3a, 0, 0.6, -0.21);
+  upper.add(U.mesh(zombieMat));
+
+  // голова: лицо, глаза, волосы, головной убор, борода, очки
+  const head = grp(0, 0.62, 0), Hd = zBoxes(rnd), Ey = zBoxes(rnd);
+  Hd.box(0.24, 0.26, 0.25, skin, 0, 0.02, 0); Hd.box(0.22, 0.08, 0.22, skin, 0, -0.12, 0.01);
+  Hd.box(0.2, 0.025, 0.02, hair, 0, 0.085, 0.126); Hd.box(0.04, 0.07, 0.04, skD, 0, -0.02, 0.14); Hd.box(0.08, 0.015, 0.01, 0x6a2a2a, 0, -0.08, 0.128);
+  [-1, 1].forEach(sd => { Hd.box(0.02, 0.07, 0.04, skin, sd * 0.125, 0, 0); Ey.box(0.045, 0.03, 0.01, 0xf2f2f2, sd * 0.055, 0.04, 0.128); Ey.box(0.02, 0.025, 0.012, 0x1a1a1a, sd * 0.055, 0.04, 0.131); });
+  if (st.hat === 'beanie') { Hd.box(0.27, 0.12, 0.27, st.hatCol, 0, 0.13, 0); Hd.box(0.28, 0.04, 0.28, mulCol(st.hatCol, 0.8), 0, 0.07, 0); Hd.box(0.06, 0.06, 0.06, 0xd9d9d9, 0, 0.21, 0); Hd.box(0.25, 0.1, 0.06, hair, 0, 0.0, -0.13); }
+  else if (st.hat === 'cap') { Hd.box(0.26, 0.07, 0.26, st.hatCol, 0, 0.14, 0); Hd.box(0.24, 0.015, 0.12, st.hatCol, 0, 0.1, 0.18); Hd.box(0.25, 0.1, 0.06, hair, 0, 0.04, -0.12); }
+  else if (st.hat === 'bandana') { Hd.box(0.27, 0.07, 0.27, st.hatCol, 0, 0.12, 0); Hd.box(0.06, 0.08, 0.05, st.hatCol, 0.06, 0.08, -0.15); Hd.box(0.08, 0.2, 0.07, hair, 0, -0.02, -0.16); Hd.box(0.26, 0.05, 0.27, hair, 0, 0.17, 0); }
+  else { Hd.box(0.26, 0.07, 0.27, hair, 0, 0.13, 0); Hd.box(0.26, 0.12, 0.06, hair, 0, 0.06, -0.12); }
+  if (st.beard) Hd.box(0.2, 0.09, 0.06, hair, 0, -0.1, 0.11);
+  if (st.goggles) { Hd.box(0.26, 0.05, 0.03, 0x222222, 0, 0.11, 0.12); [-1, 1].forEach(sd => Hd.box(0.08, 0.035, 0.012, 0x88c0d8, sd * 0.055, 0.11, 0.14)); }
+  head.add(Hd.mesh(zombieMat), Ey.mesh(zombieEyeMat)); upper.add(head);
+
+  // руки: плечо и предплечье на локте; перчатки
+  const arm = sd => {
+    const a = grp(sd * SURV_SH[0], SURV_SH[1], 0), fo = grp(0, -SURV_L1, 0);
+    const A = zBoxes(rnd, y => 0.86 + 0.14 * cl((y + 0.62) / 0.62)), F = zBoxes(rnd, y => 0.86 + 0.14 * cl((y - SURV_L1 + 0.62) / 0.62));
+    A.box(0.11, 0.3, 0.11, jk, 0, -0.15, 0);
+    F.box(0.1, 0.12, 0.1, jk, 0, -0.01, 0); F.box(0.1, 0.22, 0.1, jk, 0, -0.11, 0); F.box(0.108, 0.04, 0.108, jkD, 0, -0.23, 0);
+    F.box(0.09, 0.1, 0.1, glove, 0, -0.29, 0); F.box(0.085, 0.045, 0.05, glove, 0, -0.35, 0.03); F.box(0.025, 0.05, 0.04, glove, -sd * 0.05, -0.28, 0.03);
+    fo.add(F.mesh(zombieMat)); a.add(A.mesh(zombieMat), fo); a.fore = fo; upper.add(a); return a;
+  };
+  const armL = arm(-1), armR = arm(1);   // armL у плеча с лицевой стороны - это правая рука аватара: ею он держит оружие
+
+  // ноги: бедро и голень на колене; наколенники, ботинки
+  const leg = sd => {
+    const l = grp(sd * 0.13, 0.93, 0), sh = grp(0, -0.45, 0);
+    const L = zBoxes(rnd, y => 0.8 + 0.2 * cl((y + 0.93) / 0.93)), S2 = zBoxes(rnd, y => 0.7 + 0.3 * cl((y + 0.93 + 0.45) / 0.93));
+    L.box(0.16, 0.45, 0.17, pants, 0, -0.225, 0); L.box(0.03, 0.14, 0.1, pantsD, sd * 0.09, -0.2, 0.02);
+    S2.box(0.15, 0.08, 0.16, pants, 0, 0, 0); S2.box(0.13, 0.1, 0.02, 0x2a2a2a, 0, 0, 0.09);
+    S2.box(0.14, 0.4, 0.15, pants, 0, -0.2, 0); S2.box(0.15, 0.05, 0.16, pantsD, 0, -0.37, 0);
+    S2.box(0.155, 0.11, 0.27, boot, 0, -0.405, 0.04); S2.box(0.16, 0.03, 0.28, 0x151210, 0, -0.465, 0.04);
+    sh.add(S2.mesh(zombieMat)); l.add(L.mesh(zombieMat), sh); l.shin = sh; body.add(l); return l;
+  };
+  const legL = leg(-1), legR = leg(1);
+  return { g, body, parts: { upper, head, armL, armR, legL, legR } };
+}
+
+// --- Обратная кинематика руки: плечо и предплечье тянутся к точке T (в пространстве корпуса), локоть смотрит по подсказке pole ---
+function quatFromBasis(X, Y, Z) {
+  const m11 = X[0], m12 = Y[0], m13 = Z[0], m21 = X[1], m22 = Y[1], m23 = Z[1], m31 = X[2], m32 = Y[2], m33 = Z[2], tr = m11 + m22 + m33;
+  let x, y, z, w;
+  if (tr > 0) { const s = 0.5 / Math.sqrt(tr + 1); w = 0.25 / s; x = (m32 - m23) * s; y = (m13 - m31) * s; z = (m21 - m12) * s; }
+  else if (m11 > m22 && m11 > m33) { const s = 2 * Math.sqrt(1 + m11 - m22 - m33); w = (m32 - m23) / s; x = 0.25 * s; y = (m12 + m21) / s; z = (m13 + m31) / s; }
+  else if (m22 > m33) { const s = 2 * Math.sqrt(1 + m22 - m11 - m33); w = (m13 - m31) / s; x = (m12 + m21) / s; y = 0.25 * s; z = (m23 + m32) / s; }
+  else { const s = 2 * Math.sqrt(1 + m33 - m11 - m22); w = (m21 - m12) / s; x = (m13 + m31) / s; y = (m23 + m32) / s; z = 0.25 * s; }
+  return [x, y, z, w];
+}
+const v3len = a => Math.hypot(a[0], a[1], a[2]) || 1, v3dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const v3cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+const v3norm = a => { const l = v3len(a); return [a[0] / l, a[1] / l, a[2] / l]; };
+function solveArm(arm, S, T, pole) {
+  const L1 = SURV_L1, L2 = SURV_L2;
+  const v = [T[0] - S[0], T[1] - S[1], T[2] - S[2]], d = v3len(v), u = [v[0] / d, v[1] / d, v[2] / d];
+  const dd = Math.min(L1 + L2 - 0.004, Math.max(Math.abs(L1 - L2) + 0.02, d));            // дотянуться можно только в пределах длины руки
+  const cosA = (L1 * L1 + dd * dd - L2 * L2) / (2 * L1 * dd), sinA = Math.sqrt(Math.max(0, 1 - cosA * cosA));
+  const pd = v3dot(pole, u), n = v3norm([pole[0] - u[0] * pd, pole[1] - u[1] * pd, pole[2] - u[2] * pd]);
+  const a = [u[0] * cosA + n[0] * sinA, u[1] * cosA + n[1] * sinA, u[2] * cosA + n[2] * sinA]; // куда смотрит плечо
+  const E = [S[0] + a[0] * L1, S[1] + a[1] * L1, S[2] + a[2] * L1], Tt = [S[0] + u[0] * dd, S[1] + u[1] * dd, S[2] + u[2] * dd];
+  const w = v3norm([Tt[0] - E[0], Tt[1] - E[1], Tt[2] - E[2]]);                           // куда смотрит предплечье
+  let h = v3cross(a, w); if (v3len(h) < 1e-4) h = v3cross(a, pole); h = v3norm(h);          // ось сгиба локтя
+  const beta = Math.acos(Math.min(1, Math.max(-1, v3dot(a, w))));
+  const X = h, Y = [-a[0], -a[1], -a[2]], Z = v3cross(X, Y);
+  const q = quatFromBasis(X, Y, Z);
+  arm.quaternion.set(q[0], q[1], q[2], q[3]); arm.fore.rotation.x = beta;
+}
+function freeArm(arm, side, swing, flex) { arm.rotation.set(swing, 0, side * 0.06); arm.fore.rotation.x = -flex; } // свободная рука: качается, локоть согнут вперёд
+
+// --- Оружие в руках: где держать, куда класть вторую руку, где дульный срез. Координаты в пространстве корпуса (начало на поясе) ---
+const WEAPON_HOLD = {
+  pistol:  { pos: [-0.10, 0.38, 0.40], gun: true,  sup: [0.05, -0.05, 0.01], muzzle: [0, 0.10, 0.20] },
+  shotgun: { pos: [-0.10, 0.30, 0.10], gun: true,  sup: [0, 0.03, 0.42], muzzle: [0, 0.118, 0.91] },
+  ak:      { pos: [-0.10, 0.30, 0.10], gun: true,  sup: [0, 0.03, 0.40], muzzle: [0, 0.10, 0.89] },
+  axe:     { pos: [-0.30, 0.02, 0.14], gun: false, rot: 0.5, sup: [0, 0.34, 0] },
+};
+const IK_POLE_R = [-0.6, -1, -0.3], IK_POLE_L = [0.6, -1, -0.3]; // локоть смотрит вниз и в сторону
+const flashMat = new THREE.MeshBasicMaterial({ color: 0xffe0a0 }), flashGeo = new THREE.BoxGeometry(0.16, 0.014, 0.014), flashGeo2 = new THREE.BoxGeometry(0.014, 0.16, 0.014), flashGeo3 = new THREE.BoxGeometry(0.05, 0.05, 0.08);
+[flashMat, flashGeo, flashGeo2, flashGeo3].forEach(o => { o.userData.shared = true; });
+function avatarWeapon(av, kind) { // модель создаётся при первом показе и остаётся у аватара
+  let h = av.holders[kind];
+  if (h) return h;
+  h = new THREE.Group();
+  if (kind === 'axe') { const a = createAxe({ hands: false }).root; a.position.y = -0.14; h.add(a); }
+  else {
+    h.add(buildWorldGun(kind));
+    const f = new THREE.Group(), mz = WEAPON_HOLD[kind].muzzle;
+    f.add(new THREE.Mesh(flashGeo, flashMat), new THREE.Mesh(flashGeo2, flashMat), new THREE.Mesh(flashGeo3, flashMat));
+    f.position.set(mz[0], mz[1], mz[2] + 0.04); f.visible = false; h.add(f); h.userData.flash = f; // вспышка выстрела
+  }
+  av.parts.upper.add(h); av.holders[kind] = h;
+  return h;
+}
+
+// --- Анимация выжившего: походка и бег с коленями и локтями, дыхание, оружие (наклон, отдача, вспышка, замах топора), вздрагивание, падение ---
+function animateSurvivor(av, p, dt) {
+  const P = av.parts, s = av.s, up = P.upper, cv = (v, a, b) => Math.max(a, Math.min(b, v));
+  const dead = p.hp <= 0;
+  if (s.lastSc === undefined) { s.lastSc = p.sc || 0; s.lastAc = p.ac || 0; s.lastHp = p.hp; s.lastW = p.w; }
+  if ((p.sc || 0) > s.lastSc) { s.recoil = 1; s.flashT = 0.06; }                      // выстрел: счётчик на сервере вырос
+  if ((p.ac || 0) > s.lastAc && s.swingT < 0) s.swingT = 0;                            // замах топором
+  if (p.hp < s.lastHp) s.hitT = 0.3;                                                   // получил урон
+  if (p.w !== s.lastW) { s.low = 1; s.lastW = p.w; }                                   // достал другое оружие: поднимает из-под низа
+  s.lastSc = p.sc || 0; s.lastAc = p.ac || 0; s.lastHp = p.hp;
+  s.recoil = Math.max(0, s.recoil - dt * 8); s.flashT = Math.max(0, s.flashT - dt); s.hitT = Math.max(0, s.hitT - dt);
+  const moving = !!p.mv && !dead, sprint = moving && !!p.sp;
+  s.gait += ((moving ? 1 : 0) - s.gait) * Math.min(1, 10 * dt);
+  s.run += ((sprint ? 1 : 0) - s.run) * Math.min(1, 8 * dt);
+  s.low += (((sprint && p.w !== 'axe') ? 0.7 : 0) - s.low) * Math.min(1, 6 * dt);     // на бегу ствол опущен
+  s.phase += dt * (moving ? 7.5 + 3.5 * s.run : 0); s.idle += dt * 1.4;
+  const ph = s.phase, sw = Math.sin(ph), cw = Math.cos(ph), G = s.gait, R = s.run, amp = (0.5 + 0.4 * R) * G, kn = (0.7 + 0.7 * R) * G, flinch = s.hitT / 0.3;
+  // ноги
+  P.legL.rotation.x = sw * amp; P.legR.rotation.x = -sw * amp;
+  P.legL.shin.rotation.x = 0.06 + Math.max(0, -cw) * kn; P.legR.shin.rotation.x = 0.06 + Math.max(0, cw) * kn;
+  const H = WEAPON_HOLD[p.w], armed = !!H && !dead;
+  // корпус и голова
+  up.position.y = 1.08 + Math.abs(sw) * 0.035 * G * (1 + 0.6 * R) + Math.sin(s.idle) * 0.004 * (1 - G);
+  up.rotation.x = 0.03 + 0.05 * G + 0.16 * R * G - 0.28 * flinch + Math.sin(s.idle * 1.3) * 0.008;
+  up.rotation.y = sw * 0.12 * G * (armed ? 0.3 : 1);
+  // оружие и руки
+  for (const k in av.holders) av.holders[k].visible = armed && k === p.w;
+  if (armed) {
+    const holder = avatarWeapon(av, p.w); holder.visible = true;
+    let px = H.pos[0], py = H.pos[1], pz = H.pos[2], rx = 0, ry = 0;
+    if (H.gun) {
+      const th = -cv(p.pt || 0, -1.1, 1.1) * 0.8 + 0.5 * s.low - 0.09 * s.recoil;       // вверх и вниз по взгляду, опущено на бегу, подброс от отдачи
+      const cy = py - 0.40;                                                              // поворот вокруг груди
+      py = 0.40 + cy * Math.cos(th) - pz * Math.sin(th); pz = cy * Math.sin(th) + pz * Math.cos(th);
+      rx = th; pz -= 0.05 * s.recoil; py += Math.sin(s.idle) * 0.004 * (1 - G) + sw * 0.01 * G;
+    } else { // топор: на отдыхе опущен, при ударе замах и рубящий удар
+      rx = H.rot; ry = Math.PI; py += Math.sin(s.idle) * 0.004 * (1 - G);
+      if (s.swingT >= 0) {
+        s.swingT += dt; const t = s.swingT / 0.55;
+        const wind = ssm(0, 0.35, t) * (1 - ssm(0.35, 0.5, t)), strike = ssm(0.35, 0.55, t) * (1 - ssm(0.6, 1, t));
+        rx = H.rot - 1.7 * wind + 1.4 * strike; py += 0.30 * wind - 0.05 * strike; pz += -0.10 * wind + 0.25 * strike;
+        up.rotation.x += 0.25 * strike - 0.1 * wind;
+        if (s.swingT > 0.55) s.swingT = -1;
+      }
+    }
+    holder.position.set(px, py, pz); holder.rotation.set(rx, ry, 0);
+    if (holder.userData.flash) holder.userData.flash.visible = s.flashT > 0;
+    const M = m4(px, py, pz, rx, ry, 0), T = v => [M[0] * v[0] + M[4] * v[1] + M[8] * v[2] + M[12], M[1] * v[0] + M[5] * v[1] + M[9] * v[2] + M[13], M[2] * v[0] + M[6] * v[1] + M[10] * v[2] + M[14]];
+    solveArm(P.armL, [-SURV_SH[0], SURV_SH[1], 0], T([0, 0, 0]), IK_POLE_R);             // правая рука на рукояти
+    if (H.gun || s.swingT >= 0) solveArm(P.armR, [SURV_SH[0], SURV_SH[1], 0], T(H.sup), IK_POLE_L); // левая на цевье, у топора только при ударе
+    else freeArm(P.armR, 1, sw * amp * 0.9, 0.12 + 0.2 * G + 0.9 * R * G);
+  } else if (!dead && (p.w === 'bike' || p.w === 'car')) { // руль: обе руки вперёд
+    solveArm(P.armL, [-SURV_SH[0], SURV_SH[1], 0], [-0.20, 0.24, 0.40], IK_POLE_R); solveArm(P.armR, [SURV_SH[0], SURV_SH[1], 0], [0.20, 0.24, 0.40], IK_POLE_L);
+  } else { // руки свободны: качаются навстречу ногам, на бегу согнуты
+    const flex = 0.12 + 0.2 * G + 0.9 * R * G;
+    freeArm(P.armL, -1, -sw * amp * 0.9, flex); freeArm(P.armR, 1, sw * amp * 0.9, flex);
+  }
+  P.head.rotation.x = -cv(p.pt || 0, -1.1, 1.1) * 0.7 - up.rotation.x * 0.8 - 0.25 * flinch;
+  P.head.rotation.y = Math.sin(s.idle * 0.4) * 0.15 * (1 - G) - up.rotation.y * 0.6;
+  // смерть: падает на спину, руки и ноги расслаблены; если здоровье вернулось - встаёт
+  s.deadT = cv(s.deadT + (dead ? dt : -3 * dt), 0, 0.7);
+  const e = (s.deadT / 0.7) * (s.deadT / 0.7);
+  av.body.rotation.x = -Math.PI / 2 * 0.98 * e; av.body.position.y = 0.14 * e;
+  if (dead) {
+    freeArm(P.armL, -1, -0.3 - 0.5 * e, 0.2); freeArm(P.armR, 1, -0.3 - 0.5 * e, 0.2);
+    P.armL.rotation.z = -0.5 * e; P.armR.rotation.z = 0.5 * e; P.legL.rotation.z = -0.15 * e; P.legR.rotation.z = 0.2 * e;
+  } else { P.legL.rotation.z = P.legR.rotation.z = 0; }
+}
+
 // Аватары других игроков
 function makeAvatar(name, idx) {
-  const g = new THREE.Group();
-  const M = c => new THREE.MeshStandardMaterial({ color: c, roughness: 0.9, flatShading: true });
-  const part = (w, h, d, c, x, y, z, parent) => { const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), M(c)); m.position.set(x, y, z); (parent || g).add(m); return m; };
-  const shirt = [0x2f6fa8, 0xa8442f, 0x3f8a4a, 0x8a6fa8][idx % 4];
-  part(0.62, 0.85, 0.34, shirt, 0, 1.3, 0);
-  part(0.64, 0.14, 0.36, 0x2a2a2a, 0, 0.9, 0);
-  part(0.4, 0.4, 0.4, 0xd9a67a, 0, 1.9, 0); part(0.42, 0.12, 0.42, 0x2b2118, 0, 2.15, 0);
-  part(0.07, 0.06, 0.02, 0x111111, -0.09, 1.93, 0.205); part(0.07, 0.06, 0.02, 0x111111, 0.09, 1.93, 0.205);
-  const arm = side => { const p = new THREE.Group(); p.position.set(side * 0.42, 1.65, 0); part(0.18, 0.7, 0.18, shirt, 0, -0.32, 0, p); part(0.16, 0.14, 0.16, 0xd9a67a, 0, -0.7, 0, p); g.add(p); return p; };
-  const leg = side => { const p = new THREE.Group(); p.position.set(side * 0.16, 0.9, 0); part(0.24, 0.85, 0.26, 0x33363c, 0, -0.42, 0, p); part(0.26, 0.12, 0.34, 0x1a1410, 0, -0.85, 0.04, p); g.add(p); return p; };
-  const parts = { armL: arm(-1), armR: arm(1), legL: leg(-1), legR: leg(1) };
-  parts.gun = part(0.08, 0.1, 0.5, 0x222222, 0, -0.62, 0.3, parts.armR); // оружие в правой руке
+  const sv = buildSurvivor(idx), g = sv.g;
   const c = document.createElement('canvas'); c.width = 256; c.height = 64;
   const x = c.getContext('2d'); x.font = 'bold 34px monospace'; x.textAlign = 'center'; x.lineWidth = 6; x.strokeStyle = '#000'; x.strokeText(name, 128, 44); x.fillStyle = '#fff'; x.fillText(name, 128, 44);
   const label = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), transparent: true }));
-  label.scale.set(2.4, 0.6, 1); label.position.set(0, 2.75, 0); g.add(label);
+  label.scale.set(2.4, 0.6, 1); label.position.set(0, 2.35, 0); g.add(label);
   scene.add(g);
-  return { g, parts, phase: 0 };
+  return { g, body: sv.body, parts: sv.parts, holders: {}, s: { phase: 0, idle: 0, gait: 0, run: 0, low: 0, recoil: 0, flashT: 0, swingT: -1, hitT: 0, deadT: 0 } };
 }
 function upsertPlayer(id, name) {
   let p = net.players.get(id);
@@ -3914,18 +5064,13 @@ function updateAvatars(dt) {
     const av = p.av, k = Math.min(1, 12 * dt);
     av.g.position.x += (p.x - av.g.position.x) * k; av.g.position.z += (p.z - av.g.position.z) * k; av.g.position.y += ((p.y - 1.7) - av.g.position.y) * k;
     let dr = (p.yaw + Math.PI) - av.g.rotation.y; dr = Math.atan2(Math.sin(dr), Math.cos(dr)); av.g.rotation.y += dr * k;
-    av.phase += dt * (p.mv ? 8 : 1.5);
-    const sw = Math.sin(av.phase), amp = p.mv ? 0.7 : 0.05;
-    av.parts.legL.rotation.x = sw * amp; av.parts.legR.rotation.x = -sw * amp;
-    av.parts.armL.rotation.x = -sw * amp * 0.8;
-    av.parts.armR.rotation.x = p.w === 'axe' || p.w === 'bike' || p.w === 'car' ? -0.4 : -1.3 + sw * amp * 0.1; // с оружием руку поднимает вперёд
-    av.parts.gun.visible = p.w !== 'bike' && p.w !== 'car';
+    animateSurvivor(av, p, dt);
   });
 }
 function removePlayer(id) {
   const p = net.players.get(id);
   if (!p) return;
-  if (p.av) scene.remove(p.av.g);
+  if (p.av) { scene.remove(p.av.g); disposeObject(p.av.g); }
   net.players.delete(id); net.conns.delete(id);
   addChat('', `${p.name} вышел из игры`);
 }
@@ -3935,6 +5080,7 @@ function ownState() {
     x: +camera.position.x.toFixed(2), y: +camera.position.y.toFixed(2), z: +camera.position.z.toFixed(2), yaw: +yaw.toFixed(2),
     w: riding ? drive : weapon, hp: Math.ceil(health),
     mv: (keys.KeyW || keys.KeyA || keys.KeyS || keys.KeyD || (v && Math.abs(v.v) > 1)) ? 1 : 0,
+    pt: +pitch.toFixed(2), sp: (keys.ShiftLeft && !riding && (keys.KeyW || keys.KeyA || keys.KeyS || keys.KeyD)) ? 1 : 0, sc: shotCount, ac: axeCount,
   };
 }
 // Зомби: хозяин считает, клиенты показывают
@@ -3945,6 +5091,7 @@ function pickTarget(z) { // ближайший игрок (у хозяина - �
   return best;
 }
 function damageZombie(z, dmg) { // у клиента урон идёт хозяину комнаты
+  z.hitT = 0.28; // вздрагивание при попадании
   if (net.role === 'client') { netSendTo(net.hostConn, { t: 'zh', id: z.id, d: dmg }); z.lastHit = performance.now(); return; }
   z.hp -= dmg;
 }
@@ -3952,8 +5099,11 @@ function clientZombie(z, dt) {
   if (z.tx !== undefined) {
     const k = Math.min(1, 10 * dt);
     z.mesh.position.x += (z.tx - z.mesh.position.x) * k; z.mesh.position.z += (z.tz - z.mesh.position.z) * k;
+    z.mesh.position.y = terrainY(z.mesh.position.x, z.mesh.position.z);
     let dr = z.try - z.mesh.rotation.y; dr = Math.atan2(Math.sin(dr), Math.cos(dr)); z.mesh.rotation.y += dr * k;
   }
+  z.atkCd = (z.atkCd || 0) - dt; // у клиента о укусах не сообщают: замах, если зомби стоит вплотную к тебе
+  if (!z.mv && z.atkCd <= 0 && Math.hypot(camera.position.x - z.mesh.position.x, camera.position.z - z.mesh.position.z) < 1.7 * Math.max(1, z.cfg.sx)) { z.attackT = ZOMBIE_ATTACK; z.atkCd = z.type === 'runner' ? 0.7 : 1; }
   animateZombie(z, !!z.mv, dt);
 }
 function applyZombieSnapshot(list) {
@@ -3967,7 +5117,7 @@ function applyZombieSnapshot(list) {
   for (let i = zombies.length - 1; i >= 0; i--) {
     if (seen.has(zombies[i].id)) continue;
     if (performance.now() - (zombies[i].lastHit || -1e9) < 2500) kills++; // зомби, которого добил ты
-    scene.remove(zombies[i].mesh); zombies.splice(i, 1);
+    startCorpse(zombies[i]); zombies.splice(i, 1);
   }
 }
 
@@ -3992,7 +5142,7 @@ function handleHostMsg(conn, m) {
   }
   const pid = conn.__pid, p = pid ? net.players.get(pid) : null;
   if (!p) return;
-  if (m.t === 'ps') { p.x = m.x; p.y = m.y; p.z = m.z; p.yaw = m.yaw; p.w = m.w; p.mv = m.mv; p.hp = m.hp; }
+  if (m.t === 'ps') { p.x = m.x; p.y = m.y; p.z = m.z; p.yaw = m.yaw; p.w = m.w; p.mv = m.mv; p.hp = m.hp; p.pt = m.pt || 0; p.sp = m.sp || 0; p.sc = m.sc || 0; p.ac = m.ac || 0; }
   else if (m.t === 'zh') { const z = zombies.find(q => q.id === m.id); if (z) z.hp -= Math.min(5, m.d || 0); }
   else if (m.t === 'chat') { const text = String(m.text || '').slice(0, 120); addChat(p.name, text); netBroadcast({ t: 'chat', name: p.name, text }); }
 }
@@ -4009,7 +5159,7 @@ function handleClientMsg(m) {
   else if (m.t === 'full') setMpStatus('В комнате нет мест (максимум 4 игрока)');
   else if (m.t === 'pl') {
     const ids = new Set();
-    m.list.forEach(e => { if (e.id === net.id) return; ids.add(e.id); const p = upsertPlayer(e.id, e.name); p.x = e.x; p.y = e.y; p.z = e.z; p.yaw = e.yaw; p.w = e.w; p.mv = e.mv; p.hp = e.hp; });
+    m.list.forEach(e => { if (e.id === net.id) return; ids.add(e.id); const p = upsertPlayer(e.id, e.name); p.x = e.x; p.y = e.y; p.z = e.z; p.yaw = e.yaw; p.w = e.w; p.mv = e.mv; p.hp = e.hp; p.pt = e.pt || 0; p.sp = e.sp || 0; p.sc = e.sc || 0; p.ac = e.ac || 0; });
     [...net.players.keys()].forEach(id => { if (!ids.has(id)) removePlayer(id); });
   }
   else if (m.t === 'zs') applyZombieSnapshot(m.list);
@@ -4093,7 +5243,7 @@ function netTick(dt) {
     if (net.tPlayers >= 0.08) {
       net.tPlayers = 0;
       const list = [Object.assign({ id: 'p0', name: net.name }, ownState())];
-      net.players.forEach(p => list.push({ id: p.id, name: p.name, x: p.x, y: p.y, z: p.z, yaw: p.yaw, w: p.w, mv: p.mv, hp: p.hp }));
+      net.players.forEach(p => list.push({ id: p.id, name: p.name, x: p.x, y: p.y, z: p.z, yaw: p.yaw, w: p.w, mv: p.mv, hp: p.hp, pt: p.pt, sp: p.sp, sc: p.sc, ac: p.ac }));
       netBroadcast({ t: 'pl', list });
     }
     if (net.tZombies >= 0.1) {
@@ -4187,7 +5337,7 @@ function adminAction(act, arg, arg2) {
       const p = front(2.6); resolveCollisions(p, 0.9);
       if (!bike) { spawnBike(p.x, p.z, yaw); bike.fuel = 100; }
       else {
-        if (bike.collider) { colliders.splice(colliders.indexOf(bike.collider), 1); bike.collider = null; }
+        if (bike.collider) { removeFrom(colliders, bike.collider); bike.collider = null; }
         bike.rig.root.position.set(p.x, 0, p.z); bike.heading = yaw; bike.v = 0;
         parkBikeCollider();
       }
@@ -4196,7 +5346,7 @@ function adminAction(act, arg, arg2) {
     else if (arg === 'fuel') { bike.fuel = 100; notify('Бак полный'); }
     else if (arg === 'remove') {
       if (riding) dismountBike();
-      if (bike.collider) colliders.splice(colliders.indexOf(bike.collider), 1);
+      if (bike.collider) removeFrom(colliders, bike.collider);
       scene.remove(bike.rig.root); bike = null; notify('Мотоцикл убран');
     }
     return;
@@ -4208,13 +5358,13 @@ function adminAction(act, arg, arg2) {
     else if (arg === 'come') {
       const c = nearest(); if (!c) return notify('Джипов нет');
       const p = front(4.5); resolveCollisions(p, 1.5);
-      if (c.collider) { colliders.splice(colliders.indexOf(c.collider), 1); c.collider = null; }
+      if (c.collider) { removeFrom(colliders, c.collider); c.collider = null; }
       c.rig.root.position.set(p.x, 0, p.z); c.heading = yaw; c.v = 0; parkCarCollider(c); notify('Джип притянут');
     } else if (arg === 'fuel') { const c = riding && drive === 'car' ? curCar : nearest(); if (c) { c.fuel = 100; notify('Джип заправлен'); } else notify('Джипов нет'); }
     else if (arg === 'remove') {
       const c = nearest(); if (!c) return notify('Джипов нет');
-      if (c.collider) colliders.splice(colliders.indexOf(c.collider), 1);
-      scene.remove(c.rig.root); cars.splice(cars.indexOf(c), 1); notify('Джип убран');
+      if (c.collider) removeFrom(colliders, c.collider);
+      scene.remove(c.rig.root); removeFrom(cars, c); notify('Джип убран');
     }
     return;
   }
@@ -4254,7 +5404,7 @@ function adminAction(act, arg, arg2) {
 
 // Управление
 addEventListener('keydown', e => {
-  if (!gameStarted) return;
+  if (!gameStarted || cutscenes.cut.active) return;
   if (chatOpen) return;                                   // печатаем сообщение
   if (net.active && e.code === 'Enter' && !menuOpen) { e.preventDefault(); openChat(); return; }
   if (e.code === 'Tab') { e.preventDefault(); toggleMenu(!menuOpen); return; }
@@ -4281,7 +5431,7 @@ addEventListener('keydown', e => {
 });
 addEventListener('keyup', e => keys[e.code] = false);
 renderer.domElement.addEventListener('click', () => {
-  if (!gameStarted) return;
+  if (!gameStarted || cutscenes.cut.active) return;
   if (document.pointerLockElement !== renderer.domElement) renderer.domElement.requestPointerLock();
   else if (buildMode) placePiece();
   else if (weapon !== 'ak') attack();
@@ -4329,7 +5479,7 @@ function startReload() { // клавиша R
 
 function startSwing() { // ЛКМ с топором: замах, удар, возврат
   if (swingT >= 0) return;
-  swingT = 0; swingHitDone = false; cool = 0.6;
+  swingT = 0; swingHitDone = false; cool = 0.6; axeCount++;
 }
 function axeHit() { // момент удара: дерево перед тобой и зомби рядом
   chopCd = 0; chop(true);
@@ -4350,7 +5500,7 @@ function axeHit() { // момент удара: дерево перед тобо
 function attackShotgun() { // 6 дробинок с разбросом
   if (sgReloading) { if (sgAmmo <= 0) return; sgReloading = false; sgLhBlend = 1; } // выстрел прерывает заряжание
   if (sgAmmo <= 0) return notify('Дробовик пуст, нажми R');
-  sgAmmo--;
+  sgAmmo--; shotCount++;
   cool = 0.95; sgRecoil = 1; kick += 0.05; sgFlashT = 0.08;
   sgRacking = true; sgRackT = 0; sgClack1 = false;
   for (let i = 0; i < 6; i++) {
@@ -4367,7 +5517,7 @@ function attackShotgun() { // 6 дробинок с разбросом
 function attackAK() { // автомат: очередь при зажатой кнопке мыши
   if (akReloading) return;
   if (akAmmo <= 0) { if (noticeT <= 0) notify('Магазин пуст, нажми R'); return; }
-  akAmmo--;
+  akAmmo--; shotCount++;
   cool = 0.1; akRecoil = 1; kick += 0.009; akFlashT = 0.05;
   raycaster.setFromCamera(new THREE.Vector2((Math.random() - 0.5) * 0.014, (Math.random() - 0.5) * 0.014), camera);
   const zHits = raycaster.intersectObjects(zombies.map(z => z.mesh), true);
@@ -4385,7 +5535,7 @@ function attack() {
   if (weapon === 'ak') return attackAK();
   if (reloading) return;
   if (ammo <= 0) return notify('Магазин пуст, нажми R');
-  ammo--;
+  ammo--; shotCount++;
   cool = 0.22; recoil = 1; kick += 0.02; mzT = 0.06; slidePulse = 1; // отдача, вспышка, затвор
   if (ammo === 0) lock = true;                                       // затвор остаётся отведённым
 
@@ -4399,11 +5549,36 @@ function attack() {
   if (z) damageZombie(z, hitDamage(z, zHits[0].point.y)); // в голову урон x2
 }
 
+// --- Экран смерти: раньше нужно было жать F5, но в собранной игре (Electron, меню отключено) F5 не работает ---
+const deathScreen = document.createElement('div');
+deathScreen.style.cssText = 'position:fixed;inset:0;display:none;flex-direction:column;align-items:center;justify-content:center;font:18px monospace;color:#fff;z-index:30;background:rgba(60,0,0,.6)';
+document.body.appendChild(deathScreen);
+let deathShown = false;
+function showDeathScreen() {
+  deathShown = true;
+  try { document.exitPointerLock(); } catch (e) { /* курсор и так свободен */ }
+  const last = parseInt(lsGet('dz_lastSlot') || '0', 10), sv = last ? readSaves()[last] : null;
+  const canLoad = !net.active && sv && sv.v === 2;
+  const B = (label, act) => `<button data-death="${act}" style="font:inherit;font-size:20px;color:#fff;width:320px;padding:12px;margin:6px;border:2px solid #7a3a3a;border-radius:8px;background:#3a2424;cursor:pointer">${label}</button>`;
+  deathScreen.innerHTML = `<div style="font-size:64px;letter-spacing:8px;color:#e05a4a;text-shadow:0 4px 12px #000">ТЫ УМЕР</div>` +
+    `<div style="opacity:.85;margin:10px 0 22px">День ${day} · убито зомби: ${kills}</div>` +
+    (canLoad ? B(`Загрузить сохранение (слот ${last})`, 'load') : '') + B('В главное меню', 'menu');
+  deathScreen.style.display = 'flex';
+}
+deathScreen.addEventListener('click', e => {
+  const t = e.target.closest('[data-death]'); if (!t) return;
+  if (t.dataset.death === 'load') {
+    const last = parseInt(lsGet('dz_lastSlot') || '0', 10), sv = readSaves()[last];
+    if (sv && sv.v === 2) { try { localStorage.setItem('dz_boot', JSON.stringify({ seed: sv.seed, slot: last })); } catch (err) { /* без сохранения откроется меню */ } }
+  }
+  location.reload();
+});
+
 // --- Цикл ---
 const clock = new THREE.Clock();
 function loop() {
   const rawDt = clock.getDelta();
-  const dt = ((menuOpen && !net.active) || sleeping || !gameStarted) ? 0 : Math.min(rawDt, 0.1); // в меню и во сне игра на паузе
+  const dt = ((menuOpen && !net.active) || sleeping || !gameStarted || cutscenes.cut.active) ? 0 : Math.min(rawDt, 0.1); // в меню и во сне игра на паузе
   if (rawDt > 0) fpsSmooth = fpsSmooth * 0.95 + (1 / rawDt) * 0.05;
   if (adm('god')) { health = 100; hunger = 100; thirst = 100; }
   if (adm('infAmmo')) { ammo = MAG; sgAmmo = SG_MAG; reserve = Math.max(reserve, 30); if (hasShotgun) sgReserve = Math.max(sgReserve, 30); akAmmo = AK_MAG; if (hasAK) akReserve = Math.max(akReserve, 60); }
@@ -4440,10 +5615,12 @@ function loop() {
   } else { sky.visible = true; basementLamp.intensity = 0; }
   updateClouds(dt);
 
-  if (health > 0) {
+  if (health > 0 && !cutscenes.cut.active) {
     if (!riding) {
       const flying = adm('fly');
-      const speed = flying ? (keys.ShiftLeft ? 18 : 9) * dt * admin.flySpeed : (keys.ShiftLeft ? 8 : 4.5) * dt * (adm('speedMul') ? admin.speedMul : 1);
+      const wet = !flying && terrainY(camera.position.x, camera.position.z) < WATER_Y - 0.3; // глубже колена: плывём медленнее и не бежим
+      const speed = flying ? (keys.ShiftLeft ? 18 : 9) * dt * admin.flySpeed : (keys.ShiftLeft && !wet ? 8 : 4.5) * dt * (wet ? 0.55 : 1) * (adm('speedMul') ? admin.speedMul : 1);
+      if (wet && pitch < -0.8 && thirst < 100) { thirst = Math.min(100, thirst + 14 * dt); if (!window.__drinkT || performance.now() - window.__drinkT > 4000) { window.__drinkT = performance.now(); notify('Ты пьёшь воду из озера'); } } // посмотри вниз, стоя в воде: пьёшь
       const fwd = flying
         ? new THREE.Vector3(-Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), -Math.cos(yaw) * Math.cos(pitch))
         : new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw));
@@ -4455,13 +5632,15 @@ function loop() {
       if (flying) { // Пробел - вверх, C - вниз
         if (keys.Space) camera.position.y += speed;
         if (keys.KeyC) camera.position.y -= speed;
-        if (camera.position.y < 0.5) camera.position.y = 0.5;
+        const floorY = terrainY(camera.position.x, camera.position.z) + 0.5;
+        if (camera.position.y < floorY) camera.position.y = floorY;
       } else { // ходьба по земле, ступеням и крышам-полам; падение вниз
         const ty = 1.7 + surfaceAt(camera.position.x, camera.position.z, camera.position.y - 1.7);
         if (ty > camera.position.y) { camera.position.y += Math.min(ty - camera.position.y, 14 * dt); fallV = 0; }
         else { fallV = Math.min(fallV + 22 * dt, 25); camera.position.y = Math.max(ty, camera.position.y - fallV * dt); if (camera.position.y <= ty + 0.0001) fallV = 0; }
       }
       if (!adm('noclip') && !(flying && camera.position.y > 8)) resolveCollisions(camera.position, 0.4);
+      camera.position.x = clamp(camera.position.x, -WORLD_WALK, WORLD_WALK); camera.position.z = clamp(camera.position.z, -WORLD_WALK, WORLD_WALK); // край мира: горы
     }
 
     // Голод и жажда
@@ -4703,12 +5882,14 @@ function loop() {
   }
 
   // Зомби
+  updateCorpses(dt);
+  updateWater(dt); updateWild(dt);
   for (let i = zombies.length - 1; i >= 0; i--) {
     const z = zombies[i];
     if (net.role === 'client') { clientZombie(z, dt); continue; } // у клиента зомби двигает хозяин комнаты
     if (z.hp <= 0) {
       if (z.cfg.explode) explodeBloater(z);
-      scene.remove(z.mesh); zombies.splice(i, 1); kills++;
+      startCorpse(z); zombies.splice(i, 1); kills++;
       if (!adm('noZombies')) spawnZombie(undefined, undefined, pickZombieType(daylight < 0.4));
       continue;
     }
@@ -4720,15 +5901,23 @@ function loop() {
     z.mv = chase ? 1 : 0;
     if (chase) {
       to.normalize();
+      const zx0 = z.mesh.position.x, zz0 = z.mesh.position.z;
       z.mesh.position.addScaledVector(to, (z.cfg.speed + (1 - daylight) * (z.type === 'runner' ? 0.8 : 1.0)) * dt); // ночью быстрее
       z.mesh.rotation.y = Math.atan2(to.x, to.z);
       resolveCollisions(z.mesh.position, 0.6 * sc);
+      if (LAKES.length && terrainY(z.mesh.position.x, z.mesh.position.z) < WATER_Y - 0.5) { // зомби не лезут в глубокую воду: скользят вдоль берега или стоят
+        const nx = z.mesh.position.x, nz = z.mesh.position.z;
+        if (terrainY(nx, zz0) >= WATER_Y - 0.5) z.mesh.position.set(nx, z.mesh.position.y, zz0);
+        else if (terrainY(zx0, nz) >= WATER_Y - 0.5) z.mesh.position.set(zx0, z.mesh.position.y, nz);
+        else z.mesh.position.set(zx0, z.mesh.position.y, zz0);
+      }
+      z.mesh.position.y = terrainY(z.mesh.position.x, z.mesh.position.z);
     }
     animateZombie(z, chase, dt);
     z.cooldown -= dt;
-    if (dist <= 1.5 * Math.max(1, sc) && z.cooldown <= 0 && tgt.y < 2.9) {
-      if (tgt.remote) { netSendTo(net.conns.get(tgt.remote.id), { t: 'hurt', d: z.cfg.dmg }); z.cooldown = 1; } // укус другого игрока
-      else if (health > 0 && (!menuOpen || net.active)) { health -= z.cfg.dmg; z.cooldown = z.type === 'runner' ? 0.7 : 1; }
+    if (dist <= 1.5 * Math.max(1, sc) && z.cooldown <= 0 && tgt.y - terrainY(tgt.x, tgt.z) < 2.9) { // высота над землёй, а не над нулём (на холме тоже кусают)
+      if (tgt.remote) { netSendTo(net.conns.get(tgt.remote.id), { t: 'hurt', d: z.cfg.dmg }); z.cooldown = 1; z.attackT = ZOMBIE_ATTACK; } // укус другого игрока
+      else if (health > 0 && (!menuOpen || net.active)) { health -= z.cfg.dmg; z.cooldown = z.type === 'runner' ? 0.7 : 1; z.attackT = ZOMBIE_ATTACK; }
     }
   }
 
@@ -4736,8 +5925,10 @@ function loop() {
 
   if (health <= 0) {
     health = 0;
-    hud.textContent = `Ты умер. Убито: ${kills}. Нажми F5, чтобы начать заново`;
+    hud.textContent = `Ты умер. Убито: ${kills}`;
+    if (!deathShown) showDeathScreen();
   } else {
+    if (deathShown) { deathShown = false; deathScreen.style.display = 'none'; }
     hud.textContent =
       `День ${day}   Здоровье: ${Math.ceil(health)}   Еда: ${Math.ceil(hunger)}   Вода: ${Math.ceil(thirst)}\n` +
       `Убито: ${kills}   ` + (riding ? vehicleHud() : weapon === 'pistol' ? `Пистолет: ${reloading ? 'перезарядка...' : ammo} / ${reserve}` : weapon === 'shotgun' ? `Дробовик: ${sgReloading ? 'заряжаю... ' : ''}${sgAmmo} / ${sgReserve}` : weapon === 'ak' ? `АК-47: ${akReloading ? 'перезарядка... ' : ''}${akAmmo} / ${akReserve}` : 'Топор: ЛКМ - рубить и бить');
@@ -4763,15 +5954,308 @@ function loop() {
     const tt = performance.now() / 1000 * 0.07;
     camera.position.set(Math.cos(tt) * 34, 13, Math.sin(tt) * 34); camera.rotation.set(0, 0, 0); camera.lookAt(0, 3, 0);
   }
+  cutscenes.update(rawDt);       // кат-сцены управляют камерой после остального кадра
   renderer.render(scene, camera);
   requestAnimationFrame(loop);
 }
+// --- Озёра и дикая местность (1.9.0) ---
+// Всё считается из зерна мира собственными генераторами (Math.random не трогаем): мир из старых сохранений не сдвигается, у игроков комнаты всё одинаково.
+const lakeState = { t: 0, tex: null, mat: null, group: null };
+function makeWaterNormal() { // бесшовная карта нормалей: наложение синусов с периодом в размер картинки
+  const N = 128, c = document.createElement('canvas'); c.width = c.height = N;
+  const g = c.getContext('2d'), img = g.createImageData(N, N), TAU = Math.PI * 2;
+  const hgt = (x, y) => { const u = x / N * TAU, v = y / N * TAU; return Math.sin(u * 3 + Math.sin(v * 2) * 1.3) * 0.5 + Math.sin(v * 4 + u) * 0.35 + Math.sin(u * 7 + v * 5) * 0.18 + Math.sin(u * 2 - v * 6) * 0.25; };
+  for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+    const dx = hgt(x + 1, y) - hgt(x - 1, y), dy = hgt(x, y + 1) - hgt(x, y - 1), k = 2.2;
+    let nx = -dx * k, ny = -dy * k, nz = 1; const l = Math.hypot(nx, ny, nz); nx /= l; ny /= l; nz /= l;
+    const i = (y * N + x) * 4; img.data[i] = (nx * 0.5 + 0.5) * 255; img.data[i + 1] = (ny * 0.5 + 0.5) * 255; img.data[i + 2] = (nz * 0.5 + 0.5) * 255; img.data[i + 3] = 255;
+  }
+  g.putImageData(img, 0, 0);
+  const t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.anisotropy = 4;
+  return t;
+}
+function buildLakes() {
+  if (!LAKES.length) return;
+  const tex = makeWaterNormal();
+  const mat = new THREE.MeshStandardMaterial({ vertexColors: true, transparent: true, roughness: 0.07, metalness: 0.12, normalMap: tex, normalScale: new THREE.Vector2(0.5, 0.5), depthWrite: false });
+  mat.userData.shared = true;
+  const group = new THREE.Group();
+  LAKES.forEach(l => { // вода: сетка 2,5 м; цвет и прозрачность из глубины, у берега светлая пена
+    const half = l.reach / LAKE_BEACH, step = 2.5, n = Math.ceil(2 * half / step) + 1, pos = [], col = [], uv = [], idx = [], dep = [];
+    for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) {
+      const x = l.x - half + i * step, z = l.z - half + j * step, depth = WATER_Y - terrainY(x, z);
+      dep.push(depth); pos.push(x, WATER_Y, z); uv.push(x / 9, z / 9);
+      const k = Math.min(1, Math.max(0, depth / 3.2)), foam = depth > 0 && depth < 0.2 ? (1 - depth / 0.2) * 0.55 : 0;
+      let r = 0.20 + (0.03 - 0.20) * k, g = 0.46 + (0.16 - 0.46) * k, b = 0.44 + (0.22 - 0.44) * k;
+      r += (0.9 - r) * foam; g += (0.95 - g) * foam; b += (0.92 - b) * foam;
+      col.push(r, g, b, depth <= 0 ? 0 : Math.max(Math.min(1, Math.pow(Math.min(1, depth / 0.9), 0.6)) * 0.9, foam * 0.7));
+    }
+    for (let j = 0; j < n - 1; j++) for (let i = 0; i < n - 1; i++) {
+      const a = j * n + i, b = a + 1, c = a + n, d = c + 1;
+      if (Math.max(dep[a], dep[b], dep[c], dep[d]) <= 0) continue; // клетка целиком на суше
+      idx.push(a, c, b, b, c, d);
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 4)); geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+    geo.setIndex(idx); geo.computeVertexNormals(); geo.computeBoundingSphere();
+    const m = new THREE.Mesh(geo, mat); m.renderOrder = 2; m.castShadow = false; group.add(m);
+  });
+  scene.add(group); group.traverse(c => { if (c.isMesh) c.castShadow = false; }); // тени вода не отбрасывает
+  lakeState.tex = tex; lakeState.mat = mat; lakeState.group = group;
+
+  // --- жизнь у воды: тростник с рогозом, кувшинки, камешки, коряги, лодка ---
+  let sd = (WORLD_SEED ^ 0x1A4E5EED) | 0;
+  const lr = () => { sd = (sd + 0x6D2B79F5) | 0; let t = Math.imul(sd ^ (sd >>> 15), 1 | sd); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+  const stdMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1, flatShading: true }); stdMat.userData.shared = true;
+  const gb = zBoxes(mulberry(701), y => 0.8 + 0.2 * Math.min(1, y / 1.0));
+  for (let k = 0; k < 9; k++) { // пучок: стебли и три рогозовые головки
+    const an = k / 9 * 6.283 + 0.4, rr = 0.1 + ((k * 37) % 10) / 55, h = 1.1 + ((k * 13) % 7) / 7, tipx = Math.cos(an) * rr * 1.8, tipz = Math.sin(an) * rr * 1.8;
+    gb.tube([Math.cos(an) * rr, 0, Math.sin(an) * rr], [tipx, h, tipz], 0.017, k % 2 ? 0x5a7a34 : 0x6f8a3c, 4);
+    if (k % 3 === 0) gb.tube([tipx * 0.98, h - 0.22, tipz * 0.98], [tipx, h + 0.02, tipz], 0.04, 0x5a3a22, 5);
+  }
+  const reedGeo = gb.mesh(stdMat).geometry;
+  const pb = zBoxes(mulberry(702), null); pb.frustum(0.4, 0.38, 0.025, 9, 0x3f7a34, m4(0, 0.0, 0), true); pb.box(0.2, 0.012, 0.03, 0x2f5a28, 0.22, 0.016, 0);
+  const padGeo = pb.mesh(stdMat).geometry;
+  const fb = zBoxes(mulberry(703), null); fb.frustum(0.4, 0.38, 0.025, 9, 0x3f7a34, m4(0, 0.0, 0), true); for (let k = 0; k < 6; k++) fb.frustum(0.09, 0.0, 0.14, 5, k % 2 ? 0xf0b8d0 : 0xf6dce8, m4(Math.cos(k) * 0.07, 0.09, Math.sin(k) * 0.07, 0.5 * Math.cos(k), 0, 0.5 * Math.sin(k)));
+  const flowerGeo = fb.mesh(stdMat).geometry;
+  const sb = zBoxes(mulberry(704), null); sb.blob(0.28, ny => ny > 0.4 ? 0x9a948a : 0x6a665e, m4(0, 0.1, 0), 1, 0.55, 0.85, 0, 0.2);
+  const pebbleGeo = sb.mesh(stdMat).geometry;
+  const wb = zBoxes(mulberry(705), y => 0.8 + 0.2 * Math.min(1, y / 0.5)); // коряга
+  wb.cylZ(0.14, 2.8, 0x7a6a56, 0, 0.14, 0, 6); wb.cylZ(0.1, 0.05, 0xc8b898, 0, 0.14, 1.4, 6); wb.tube([0.0, 0.2, -0.6], [0.35, 0.6, -0.95], 0.05, 0x6a5a48, 4); wb.tube([0.0, 0.2, 0.5], [-0.3, 0.55, 0.85], 0.045, 0x6a5a48, 4);
+  const woodGeo = wb.mesh(stdMat).geometry;
+  const dm = new THREE.Object3D(), tint = new THREE.Color();
+  const shorePoint = (l, an, f) => { // точка на луче от центра озера: f - во сколько раз ближе/дальше берега (1 = берег)
+    const c = Math.cos(an), s = Math.sin(an); let lo = 0, hi = l.reach;
+    for (let i = 0; i < 18; i++) { const mid = (lo + hi) / 2; if (lakeQ(l, l.x + c * mid, l.z + s * mid) < 1) lo = mid; else hi = mid; }
+    const t = lo * f; return [l.x + c * t, l.z + s * t];
+  };
+  LAKES.forEach((l, li) => {
+    const reeds = [], pads = [], flowers = [], pebbles = [], woods = [];
+    const tries = Math.round(l.r * 9);
+    for (let i = 0; i < tries; i++) {
+      const an = lr() * 6.283, [x, z] = shorePoint(l, an, 0.9 + lr() * 0.22), h = terrainY(x, z);
+      if (h < WATER_Y - 0.55 || h > WATER_Y + 0.5) continue;
+      if (_vnoise(x / 13 + 5.1, z / 13 + 8.3) < 0.42) continue;                        // тростник растёт полосами
+      reeds.push([x + (lr() - 0.5) * 2, z + (lr() - 0.5) * 2, 0.8 + lr() * 0.8, lr() * 6.283]);
+    }
+    for (let c = 0; c < Math.max(2, Math.round(l.r / 5)); c++) { // кувшинки: острова с цветами
+      const [cx, cz] = shorePoint(l, lr() * 6.283, 0.55 + lr() * 0.3), n = 5 + Math.floor(lr() * 8);
+      for (let k = 0; k < n; k++) { const x = cx + (lr() - 0.5) * 6, z = cz + (lr() - 0.5) * 6; if (WATER_Y - terrainY(x, z) < 0.35) continue; (lr() < 0.22 ? flowers : pads).push([x, z, 0.7 + lr() * 0.9, lr() * 6.283]); }
+    }
+    for (let i = 0; i < l.r * 2; i++) { const [x, z] = shorePoint(l, lr() * 6.283, 0.93 + lr() * 0.5); const h = terrainY(x, z); if (h > WATER_Y + 1.2) continue; pebbles.push([x, z, 0.5 + lr() * 1.3, lr() * 6.283]); }
+    for (let i = 0; i < 2 + Math.floor(l.r / 12); i++) { const an = lr() * 6.283, [x, z] = shorePoint(l, an, 1.02 + lr() * 0.18); if (terrainY(x, z) > WATER_Y + 1.0) continue; woods.push([x, z, 0.8 + lr() * 0.6, an + 1.57 + (lr() - 0.5)]); }
+    const put = (geo, list, y0, rotate) => {
+      if (!list.length) return;
+      const im = new THREE.InstancedMesh(geo, stdMat, list.length);
+      list.forEach(([x, z, s, ry], i) => { dm.position.set(x, y0 === null ? terrainY(x, z) - 0.03 : y0, z); dm.rotation.set(0, ry, 0); dm.scale.set(s, s * (rotate ? 1 : 1), s); dm.updateMatrix(); im.setMatrixAt(i, dm.matrix); im.setColorAt(i, tint.setRGB(0.9 + lr() * 0.2, 0.9 + lr() * 0.2, 0.9 + lr() * 0.15)); });
+      im.instanceMatrix.needsUpdate = true; if (im.instanceColor) im.instanceColor.needsUpdate = true; im.computeBoundingSphere(); scene.add(im); im.castShadow = false; group.add(im);
+    };
+    put(reedGeo, reeds, null); put(padGeo, pads, WATER_Y + 0.025); put(flowerGeo, flowers, WATER_Y + 0.025); put(pebbleGeo, pebbles, null); put(woodGeo, woods, null);
+    if (li % 2 === 0 && l.r > 15) { // старая лодка на берегу, носом к воде
+      const an = lr() * 6.283, [bx, bz] = shorePoint(l, an, 1.12), by = terrainY(bx, bz);
+      const b = zBoxes(mulberry(710 + li), y => 0.8 + 0.2 * Math.min(1, y / 0.5)), wood = 0x6a7a80, wood2 = 0x7a5a3a;
+      K_BOAT(b, wood, wood2);
+      const mesh = b.mesh(stdMat); mesh.position.set(bx, by + 0.08, bz); mesh.rotation.y = -an + Math.PI / 2 + 3.14159 * 0; mesh.rotation.z = 0.06; scene.add(mesh); mesh.castShadow = false; group.add(mesh);
+    }
+  });
+}
+function K_BOAT(b, wood, wood2) { // дощатая лодка с вёслами, длинная ось - Z, нос в -Z
+  b.box(1.0, 0.08, 2.6, wood2, 0, 0.1, 0.1);
+  [-1, 1].forEach(sd => { b.box(0.07, 0.42, 2.6, wood, sd * 0.52, 0.34, 0.1, 0, 0, -sd * 0.16); b.box(0.07, 0.42, 1.2, wood, sd * 0.28, 0.34, -1.55, 0, sd * 0.5, -sd * 0.12); b.box(0.05, 0.05, 2.6, wood2, sd * 0.6, 0.55, 0.1); });
+  b.box(0.9, 0.42, 0.07, wood, 0, 0.34, 1.4); b.box(0.9, 0.05, 0.3, wood2, 0, 0.36, 0.55); b.box(0.9, 0.05, 0.3, wood2, 0, 0.36, -0.5);
+  b.tube([0.45, 0.5, 0.1], [1.3, 0.2, 0.7], 0.025, 0x8a6a46, 5); b.box(0.5, 0.02, 0.18, 0x8a6a46, 1.55, 0.14, 0.82, 0, 0.5, 0);
+  b.tube([-0.2, 0.15, -0.3], [-0.4, 0.1, 0.5], 0.01, 0x8a8a7a, 3);
+}
+function updateWater(dt) {
+  if (!lakeState.mat) return;
+  lakeState.t += dt;
+  const t = lakeState.t;
+  lakeState.tex.offset.set(t * 0.011, t * 0.007);
+  lakeState.mat.normalScale.setScalar(0.45 + Math.sin(t * 0.7) * 0.08);
+  lakeState.group.position.y = Math.sin(t * 0.8) * 0.02;
+}
+
+// --- Дикая местность: лес, кусты, коряги и валуны на холмах за ровной зоной ---
+// Свой генератор случайных чисел: Math.random тут не трогаем. Каждый вид рисуется через InstancedMesh по клеткам 140 м, дальние клетки скрываются.
+const wildCells = [];
+function makeNatureGeos() {
+  const mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1, flatShading: true }); mat.userData.shared = true;
+  const mk = seed => zBoxes(mulberry(seed), y => 0.78 + 0.22 * Math.min(1, y / 2.5));
+  const geo = b => b.mesh(mat).geometry;
+  const out = { mat, trees: [], bushes: [], rocks: [] };
+  { // ель: ярусы конусов с подпушкой
+    const b = mk(11); b.frustum(0.34, 0.12, 6.6, 6, 0x4a3320, m4(0, 3.3, 0));
+    for (let i = 0; i < 7; i++) {
+      const t = i / 6, y = 1.4 + t * 4.7, r = 1.95 * (1 - t * 0.8) + 0.25, h = 1.6 + (1 - t) * 0.5, col = [0x2a4f26, 0x2f5a2a, 0x264a22][i % 3];
+      b.frustum(r, 0, h, 7, col, m4(0, y + h / 2, 0, 0, i * 0.7, 0));
+      if (i % 2 === 0) b.frustum(r * 0.62, 0, h * 0.85, 6, mulCol(col, 1.18), m4(0, y + h * 0.62, 0, 0, i * 1.3 + 0.5, 0));
+    }
+    b.frustum(0.32, 0, 1.0, 6, 0x2f5a2a, m4(0, 6.9, 0)); out.trees.push(geo(b));
+  }
+  { // сосна: высокий голый ствол с ржавой корой и плоскими шапками хвои
+    const b = mk(12); b.frustum(0.32, 0.14, 8.8, 6, 0x6b4a2e, m4(0, 4.4, 0));
+    for (let i = 0; i < 5; i++) b.tube([0, 2.4 + i * 0.8, 0], [Math.cos(i * 2.4) * 0.7, 2.6 + i * 0.8, Math.sin(i * 2.4) * 0.7], 0.03, 0x4a3420, 4);
+    [[0.2, 7.0, 0, 1.7], [-0.3, 7.9, 0.2, 1.3], [0.1, 8.7, -0.1, 0.9], [0.9, 6.5, 0.6, 0.9], [-0.9, 6.7, -0.5, 0.95]].forEach(([x, y, z, r], i) => b.blob(r, ny => ny > 0.4 ? 0x3f7034 : 0x2f5a2a, m4(x, y, z, 0, i, 0), 1, 0.5, 1, 0, 0.2));
+    out.trees.push(geo(b));
+  }
+  { // берёза: белый ствол с чёрными метинами, светлая крона из шаров
+    const b = mk(13); b.frustum(0.22, 0.1, 5.8, 6, 0xe6e2d4, m4(0, 2.9, 0));
+    for (let i = 0; i < 9; i++) b.box(0.2, 0.05, 0.05, 0x2a2a2a, Math.cos(i * 2.1) * 0.15, 0.7 + i * 0.5, Math.sin(i * 2.1) * 0.15, 0, -i * 2.1, 0);
+    [[0.7, 4.0, 0.2], [-0.5, 4.4, -0.5]].forEach(([x, y, z]) => b.tube([0, y - 0.6, 0], [x, y, z], 0.06, 0xd8d4c6, 4));
+    [[0, 5.6, 0, 1.4], [0.9, 4.6, 0.4, 1.1], [-0.8, 4.4, -0.5, 1.2], [0.2, 4.2, -1.0, 0.9], [-0.3, 6.4, 0.3, 0.8], [0.3, 4.5, 1.0, 0.9]].forEach(([x, y, z, r], i) => b.blob(r, ny => ny > 0.45 ? 0x86ae48 : 0x5f8a34, m4(x, y, z, 0, i, 0), 1, 0.9, 1, 0, 0.22));
+    out.trees.push(geo(b));
+  }
+  { // дуб: толстый ствол с корнями, массивная тёмная крона
+    const b = mk(14); b.frustum(0.85, 0.5, 0.7, 7, 0x4a3524, m4(0, 0.35, 0)); b.frustum(0.5, 0.32, 3.2, 7, 0x4a3524, m4(0, 2.3, 0));
+    [[1.4, 4.4, 0.6], [-1.3, 4.2, -0.5], [0.3, 4.6, -1.4]].forEach(([x, y, z]) => b.tube([0, 2.6, 0], [x, y, z], 0.17, 0x4a3524, 5));
+    [[0, 5.4, 0, 2.0], [1.7, 4.8, 0.7, 1.6], [-1.6, 4.7, -0.6, 1.7], [0.4, 4.9, -1.7, 1.5], [-0.5, 4.6, 1.6, 1.5], [0.2, 6.4, 0.2, 1.2]].forEach(([x, y, z, r], i) => b.blob(r, ny => ny > 0.5 ? 0x578a38 : 0x3a6a2a, m4(x, y, z, 0, i * 1.1, 0), 1, 0.8, 1, 1, 0.2));
+    out.trees.push(geo(b));
+  }
+  { // сухое дерево: серые ветви без листвы
+    const b = mk(15); b.frustum(0.3, 0.1, 5.4, 6, 0x6a6258, m4(0, 2.7, 0));
+    for (let i = 0; i < 7; i++) { const an = i * 2.4, y = 2.2 + i * 0.5, L = 1.4 - i * 0.1; b.tube([0, y, 0], [Math.cos(an) * L, y + 0.9, Math.sin(an) * L], 0.07, 0x5e564c, 4); b.tube([Math.cos(an) * L, y + 0.9, Math.sin(an) * L], [Math.cos(an + 0.5) * L * 1.5, y + 1.6, Math.sin(an + 0.5) * L * 1.5], 0.035, 0x5e564c, 4); }
+    out.trees.push(geo(b));
+  }
+  { const b = mk(21); [[0, 0.4, 0, 0.55], [0.5, 0.32, 0.2, 0.42], [-0.4, 0.3, -0.3, 0.45]].forEach(([x, y, z, r], i) => b.blob(r, ny => ny > 0.5 ? 0x55803a : 0x3a6a2a, m4(x, y, z, 0, i, 0), 1, 0.85, 1, 0, 0.22)); out.bushes.push(geo(b)); }
+  { const b = mk(22); [[0, 0.4, 0, 0.55], [0.5, 0.32, 0.2, 0.42], [-0.4, 0.3, -0.3, 0.45]].forEach(([x, y, z, r], i) => b.blob(r, ny => ny > 0.5 ? 0x55803a : 0x3a6a2a, m4(x, y, z, 0, i, 0), 1, 0.85, 1, 0, 0.22)); for (let i = 0; i < 9; i++) b.blob(0.05, 0xb02a3a, m4(Math.cos(i * 2.4) * 0.5, 0.3 + (i % 3) * 0.12, Math.sin(i * 2.4) * 0.5), 1, 1, 1, 0, 0.1); out.bushes.push(geo(b)); }
+  const rockCol = (ny, i) => ny > 0.55 ? (i % 3 === 0 ? 0x5a6e44 : 0x86837e) : ny < -0.2 ? 0x4e4d4a : 0x7c7b78;
+  { const b = mk(31); b.blob(1, rockCol, m4(0, 0.5, 0), 1, 0.7, 0.9, 1, 0.2); out.rocks.push(geo(b)); }
+  { const b = mk(32); b.blob(0.8, rockCol, m4(0, 0.95, 0), 0.8, 1.4, 0.8, 0, 0.25); out.rocks.push(geo(b)); }
+  { const b = mk(33); b.blob(1, rockCol, m4(0, 0.3, 0), 1.4, 0.34, 1.0, 0, 0.18); out.rocks.push(geo(b)); }
+  { const b = mk(34); [[-0.7, 0.4, 0.2, 0.8], [0.6, 0.3, -0.3, 0.6], [0.1, 0.25, 0.8, 0.5]].forEach(([x, y, z, r], i) => b.blob(r, rockCol, m4(x, y, z, 0, i, 0), 1, 0.75, 1, 0, 0.22)); out.rocks.push(geo(b)); }
+  { const b = mk(41); b.cylZ(0.28, 3.6, 0x5a4028, 0, 0.28, 0, 7); b.cylZ(0.24, 0.03, 0xc8a878, 0, 0.28, 1.8, 7); b.cylZ(0.24, 0.03, 0xc8a878, 0, 0.28, -1.8, 7); b.tube([0.1, 0.4, -0.5], [0.5, 0.75, -0.8], 0.05, 0x4a3420, 4); b.blob(0.3, 0x4a6a34, m4(0, 0.52, 0.4), 1.3, 0.35, 1, 0, 0.2); out.log = geo(b); }
+  { const b = mk(42); b.frustum(0.4, 0.3, 0.5, 8, 0x5a4028, m4(0, 0.25, 0)); b.frustum(0.3, 0.3, 0.03, 8, 0xc8a878, m4(0, 0.51, 0)); for (let i = 0; i < 4; i++) b.tube([Math.cos(i * 1.6) * 0.3, 0.2, Math.sin(i * 1.6) * 0.3], [Math.cos(i * 1.6) * 0.65, 0.0, Math.sin(i * 1.6) * 0.65], 0.07, 0x4a3420, 4); out.stump = geo(b); }
+  return out;
+}
+function buildWilderness() {
+  let seed = (WORLD_SEED ^ 0x5EED5EED) | 0;
+  const wr = () => {
+    seed = (seed + 0x6D2B79F5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  const CELL = 140, cells = new Map();
+  const cellOf = (x, z) => {
+    const kx = Math.floor((x + WORLD_HALF) / CELL), kz = Math.floor((z + WORLD_HALF) / CELL), k = kx * 64 + kz;
+    let c = cells.get(k);
+    if (!c) { c = { cx: (kx + 0.5) * CELL - WORLD_HALF, cz: (kz + 0.5) * CELL - WORLD_HALF, trees: [[], [], [], [], []], bushes: [[], []], rocks: [[], [], [], []], logs: [], stumps: [] }; cells.set(k, c); }
+    return c;
+  };
+  const slopeAt = (x, z, h) => Math.hypot(terrainY(x + 2, z) - h, terrainY(x, z + 2) - h) / 2;
+  const addCollider = (x, z, half) => {
+    const ix = Math.floor(x / WILD_CELL), iz = Math.floor(z / WILD_CELL), k = wildKey(ix, iz);
+    let l = wildGrid.get(k); if (!l) { l = []; wildGrid.set(k, l); }
+    l.push({ minX: x - half, maxX: x + half, minZ: z - half, maxZ: z + half });
+  };
+  const inWild = (x, z) => Math.max(Math.abs(x), Math.abs(z)) >= FLAT_HALF + 10 && Math.min(Math.abs(x), Math.abs(z)) >= 7; // у дорог просека
+
+  let nTrees = 0;
+  for (let i = 0; i < 9000 && nTrees < 3500; i++) {
+    const x = (wr() * 2 - 1) * (WORLD_WALK - 20), z = (wr() * 2 - 1) * (WORLD_WALK - 20);
+    if (!inWild(x, z)) continue;
+    const h = terrainY(x, z);
+    if (h > 58 || slopeAt(x, z, h) > 0.75 || h < WATER_Y + 0.6 || lakeShore(x, z) < 1.7) continue; // крутизна, высота, вода и пляж
+    if (_vnoise(x / 50 + 91.7, z / 50 - 33.1) < 0.45 && wr() > 0.1) continue; // лес растёт островами
+    const bio = _vnoise(x / 90 + 13, z / 90 + 7), w = [0.40 + (0.5 - bio) * 0.3, 0.18, 0.17 + (bio - 0.5) * 0.25, 0.19 + (bio - 0.5) * 0.2, 0.06];
+    let u = wr() * (w[0] + w[1] + w[2] + w[3] + w[4]), sp = 0; while (sp < 4 && u > w[sp]) { u -= w[sp]; sp++; }
+    cellOf(x, z).trees[sp].push({ x, z, h, s: 0.85 + wr() * 0.7, ry: wr() * 6.283, j1: wr(), j2: wr() });
+    nTrees++;
+  }
+  for (let i = 0; i < 1800; i++) { // кусты, чаще у леса
+    const x = (wr() * 2 - 1) * (WORLD_WALK - 10), z = (wr() * 2 - 1) * (WORLD_WALK - 10);
+    if (!inWild(x, z)) continue;
+    const h = terrainY(x, z); if (h > 50 || h < WATER_Y + 0.4 || lakeShore(x, z) < 1.3) continue;
+    if (_vnoise(x / 40 + 3.3, z / 40 + 9.1) < 0.4 && wr() > 0.15) continue;
+    cellOf(x, z).bushes[wr() < 0.25 ? 1 : 0].push({ x, z, h, s: 0.8 + wr() * 0.9, ry: wr() * 6.283, j1: wr(), j2: wr() });
+  }
+  for (let i = 0; i < 700; i++) { // коряги и пни у леса
+    const x = (wr() * 2 - 1) * (WORLD_WALK - 20), z = (wr() * 2 - 1) * (WORLD_WALK - 20);
+    if (!inWild(x, z)) continue;
+    const h = terrainY(x, z), isLog = wr() < 0.45; if (h > 50 || h < WATER_Y + 0.5 || lakeShore(x, z) < 1.5 || slopeAt(x, z, h) > 0.5) continue;
+    if (_vnoise(x / 50 + 91.7, z / 50 - 33.1) < 0.5) continue;
+    (isLog ? cellOf(x, z).logs : cellOf(x, z).stumps).push({ x, z, h, s: 0.8 + wr() * 0.5, ry: wr() * 6.283, j1: wr(), j2: wr() });
+  }
+  for (let i = 0; i < 2200; i++) {
+    const x = (wr() * 2 - 1) * (WORLD_WALK - 10), z = (wr() * 2 - 1) * (WORLD_WALK - 10);
+    if (!inWild(x, z)) continue;
+    const h = terrainY(x, z); if (h < WATER_Y - 0.1) continue;
+    const u = wr(), type = u < 0.5 ? 0 : u < 0.72 ? 1 : u < 0.88 ? 2 : 3;
+    cellOf(x, z).rocks[type].push({ x, z, h, s: 0.5 + wr() * wr() * 2.6, ry: wr() * 6.283, g: wr(), type });
+  }
+
+  const geos = makeNatureGeos(), mat = geos.mat;
+  const trunkBlock = new THREE.BoxGeometry(0.6, 3, 0.6), hiddenMat = new THREE.MeshBasicMaterial({ visible: false });
+  const dummy = new THREE.Object3D(), col = new THREE.Color();
+  const finish = (mesh, list) => {
+    mesh.instanceMatrix.needsUpdate = true;
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+    mesh.computeBoundingSphere();
+    scene.add(mesh);
+    mesh.castShadow = false;            // тени от тысяч деревьев слишком дорогие
+    list.push(mesh);
+  };
+  const place = (geo, items, cell, yOff, tintFn) => {
+    if (!items.length) return;
+    const im = new THREE.InstancedMesh(geo, mat, items.length);
+    items.forEach((t, i) => {
+      dummy.position.set(t.x, t.h + (yOff || 0), t.z); dummy.rotation.set(0, t.ry, 0); dummy.scale.setScalar(t.s);
+      dummy.updateMatrix(); im.setMatrixAt(i, dummy.matrix); im.setColorAt(i, tintFn(t));
+    });
+    finish(im, cell.meshes);
+  };
+  const treeTint = t => col.setRGB(0.9 + t.j1 * 0.2, 0.92 + t.j2 * 0.16, 0.9 + t.j1 * 0.12);
+  const rockTint = t => { const v = 0.82 + t.g * 0.3; return col.setRGB(v, v, v * 0.98); };
+  for (const c of cells.values()) {
+    c.meshes = [];
+    c.trees.forEach((list, sp) => {
+      place(geos.trees[sp], list, c, 0, treeTint);
+      list.forEach(t => addCollider(t.x, t.z, (sp === 3 ? 0.45 : 0.3) * t.s + 0.1));
+    });
+    c.bushes.forEach((list, k) => place(geos.bushes[k], list, c, 0, treeTint));
+    place(geos.log, c.logs, c, 0, treeTint); place(geos.stump, c.stumps, c, 0, treeTint);
+    c.rocks.forEach((list, k) => {
+      place(geos.rocks[k], list, c, 0, rockTint);
+      if (k !== 2) list.forEach(r => { if (r.s >= 1.3) addCollider(r.x, r.z, r.s * 0.75); }); // большие валуны твёрдые
+    });
+    const all = c.trees.flat(); // невидимые стволы только для пуль: пули не пролетают сквозь деревья, но кроны их не держат
+    if (all.length) {
+      const tb = new THREE.InstancedMesh(trunkBlock, hiddenMat, all.length);
+      all.forEach((t, i) => { dummy.position.set(t.x, t.h + 1.5 * t.s, t.z); dummy.rotation.set(0, t.ry, 0); dummy.scale.setScalar(t.s); dummy.updateMatrix(); tb.setMatrixAt(i, dummy.matrix); });
+      tb.instanceMatrix.needsUpdate = true; tb.computeBoundingSphere(); scene.add(tb); tb.castShadow = false; blockers.push(tb);
+    }
+    wildCells.push(c);
+  }
+}
+let wildTimer = 0;
+function updateWild(dt) { // дальние клетки леса не рисуем: туман их всё равно скрывает
+  wildTimer -= dt; if (wildTimer > 0) return; wildTimer = 0.3;
+  const px = camera.position.x, pz = camera.position.z;
+  for (const c of wildCells) { const vis = Math.hypot(px - c.cx, pz - c.cz) < 230; c.meshes.forEach(m => { m.visible = vis; }); }
+}
+
 stockExtras();
+buildLakes();
+buildWilderness();
 initDone = true;                 // дальше всё, что появляется, считается «новым» и сохраняется отдельно
 Math.random = _realRandom;       // обычная случайность для игры
 const initSnap = {               // что было в мире с самого начала
   items: new Set(items.map(i => i.id)), ammo: new Set(ammoBoxes.map(m => m.userData.id)),
   piles: new Map(piles.map(p => [p.id, p.n])), cases: new Set(cases.map(c => c.id)), trees: new Set(trees.map(t => t.id)),
 };
+// Кат-сцены: вступление и финал живут в папке scenes/. Им отдаются только нужные куски движка и состояния игры.
+const cutscenes = initCutscenes({
+  THREE, scene, camera, renderer, zBoxes, mulberry, m4, m4mul, mulCol, bKit, h01, colliders, blockers,
+  carK, milTruckK, sandWallK, crateK, barrelsK, mastK, textPlane, clearTrees, terrainY, WATER_Y,
+  hash: n => _hash2(n, 733),                       // число 0..1 из зерна мира: точка эвакуации у всех игроков одна
+  get yaw() { return yaw; }, set yaw(v) { yaw = v; }, get pitch() { return pitch; }, set pitch(v) { pitch = v; },
+  get hour() { return gameHour; }, set hour(v) { gameHour = v; },
+  get day() { return day; }, get health() { return health; }, get gameStarted() { return gameStarted; },
+  net, menuOpen: () => menuOpen, riding: () => riding, inBasement: () => inBasement,
+  notify, mainMenu,
+  requestLock: () => { try { const p = renderer.domElement.requestPointerLock(); if (p && p.catch) p.catch(() => {}); } catch (e) { /* клик по экрану вернёт мышь */ } },
+  hudEls: [hud, avatar, hotbar, cross, notice, promptEl, chatLog],
+  houses: housePositions, stations, warehouses, garages, towers, outposts, armories,
+});
 bootGame();
 loop();
