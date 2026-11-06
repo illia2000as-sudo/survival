@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { initCutscenes } from './scenes/index.js'; // вступление и финал (папка scenes)
+import { buildCity } from './world/city.js';       // город многоквартирных домов и стартовая квартира
 
 // --- Сохранения: мир строится от числа (зерна), поэтому его можно воссоздать точно таким же ---
 let bootInfo = null;
@@ -27,6 +28,7 @@ function disposeObject(o) { // общие (userData.shared) материалы �
     if (m) (Array.isArray(m) ? m : [m]).forEach(x => { if (!x.userData?.shared) x.dispose(); });
   });
 }
+const spawnPoint = { x: 0, y: 0, z: 0, yaw: 0 }; // где просыпается игрок в новой игре (город ставит квартиру)
 let uidCounter = 0, initDone = false, gameStarted = false, currentSlot = 0, day = 1;
 
 // --- Рельеф ---
@@ -304,6 +306,7 @@ const box = (w, h, d, color, x, y, z, solid = false) => {
 function resolveAgainst(list, pos, r, feet) {
   for (const c of list) {
     if (c.top !== undefined && feet > c.top - 0.3) continue;
+    if (c.bottom !== undefined && feet < c.bottom - 0.5) continue; // препятствие только для тех, кто стоит не ниже bottom (мебель и стены верхних этажей)
     const px = Math.max(c.minX, Math.min(pos.x, c.maxX));
     const pz = Math.max(c.minZ, Math.min(pos.z, c.maxZ));
     const dx = pos.x - px, dz = pos.z - pz;
@@ -1012,7 +1015,7 @@ function spawnZombie(ax, az, forcedType) {
   const model = buildZombie(type, rnd, skin.getHex(), shirt, type === 'soldier' ? 0x3f4a2c : 0x2a2a2a, cfg.eye);
   const g = model.group;
   g.scale.set(cfg.sx, cfg.sy, cfg.sx);
-  if (ax !== undefined) g.position.set(ax, terrainY(ax, az), az); else g.position.set(Math.cos(a) * r, 0, Math.sin(a) * r);
+  if (ax !== undefined) g.position.set(ax, terrainY(ax, az), az); else g.position.set((initDone ? camera.position.x : 0) + Math.cos(a) * r, 0, (initDone ? camera.position.z : 0) + Math.sin(a) * r);
   resolveCollisions(g.position, 0.6 * cfg.sx);
   scene.add(g);
   const zo = { mesh: g, hp: cfg.hp, cooldown: 0, parts: model.parts, phase, id: zombieUid++, mv: 0, type, cfg };
@@ -1151,6 +1154,7 @@ const ITEMS = {
   bars:   { name: 'Руль',    color: 0xc9ced4, stack: 1 },
 };
 const slots = new Array(SLOTS).fill(null); // каждый слот: null или { type, n }
+let heldSlot = -1, handDraw = 1, useT = -1, useApplied = false; // предмет в руке (1.12.0): номер слота, появление, ход применения
 const hex = c => '#' + c.toString(16).padStart(6, '0');
 
 // Пиксельные иконки 16x16 для слотов (рисуются кодом)
@@ -3608,13 +3612,13 @@ function takeFromPile(p) { // берём одну штуку, модель ум�
 }
 
 // Подсказка «[E] ...» и поиск кучи или ящика, на которые смотрит игрок
-let lookedPile = null, lookedCase = null, lookedBench = null, lookedPortal = null, lookedCar = null, lookedPump = null, lookedBuilt = null;
+let lookedItem = null, lookedAmmo = null, lookedPile = null, lookedCase = null, lookedBench = null, lookedPortal = null, lookedCar = null, lookedPump = null, lookedBuilt = null;
 const promptEl = document.createElement('div');
 promptEl.style.cssText = 'position:fixed;top:58%;left:50%;transform:translateX(-50%);color:#fff;font:20px monospace;text-shadow:1px 1px 3px #000;background:rgba(0,0,0,.35);padding:4px 12px;border-radius:6px;display:none';
 document.body.appendChild(promptEl);
 const _fwd = new THREE.Vector3(), _to = new THREE.Vector3();
 function updatePrompt() {
-  lookedPile = null; lookedCase = null; lookedBench = null; lookedBike = false; lookedPortal = null; lookedCar = null; lookedPump = null; lookedBuilt = null;
+  lookedItem = null; lookedAmmo = null; lookedPile = null; lookedCase = null; lookedBench = null; lookedBike = false; lookedPortal = null; lookedCar = null; lookedPump = null; lookedBuilt = null;
   if (!menuOpen && !buildMode && !riding && health > 0) {
     _fwd.set(0, 0, -1).applyQuaternion(camera.quaternion);
     let best = 0.88; // конус примерно 28 градусов
@@ -3678,6 +3682,18 @@ function updatePrompt() {
       const cs = _to.normalize().dot(_fwd);
       if (cs > best) { best = cs; lookedBuilt = b; lookedCar = null; lookedPump = null; lookedPortal = null; lookedBike = false; lookedBench = null; lookedCase = null; lookedPile = null; }
     }
+    for (const it of items) { // еда, вода, аптечки, канистры: берутся на E, смотря на них (до 4,2 м)
+      const ip = it.mesh.position; _to.set(ip.x - camera.position.x, ip.y + 0.15 - camera.position.y, ip.z - camera.position.z);
+      if (_to.length() > 4.2) continue;
+      const cs = _to.normalize().dot(_fwd);
+      if (cs > best) { best = cs; lookedItem = it; lookedAmmo = null; lookedBuilt = null; lookedCar = null; lookedPump = null; lookedPortal = null; lookedBike = false; lookedBench = null; lookedCase = null; lookedPile = null; }
+    }
+    for (const ab of ammoBoxes) { // патроны на земле
+      const ip = ab.position; _to.set(ip.x - camera.position.x, ip.y + 0.1 - camera.position.y, ip.z - camera.position.z);
+      if (_to.length() > 4.2) continue;
+      const cs = _to.normalize().dot(_fwd);
+      if (cs > best) { best = cs; lookedAmmo = ab; lookedItem = null; lookedBuilt = null; lookedCar = null; lookedPump = null; lookedPortal = null; lookedBike = false; lookedBench = null; lookedCase = null; lookedPile = null; }
+    }
     const tx = lookedBuilt ? lookedBuilt.mesh.position.x : lookedCar ? lookedCar.rig.root.position.x : lookedPump ? lookedPump.x : lookedPortal ? (lookedPortal.kind === 'up' ? lookedPortal.w.ladderX : lookedPortal.w.hx) : lookedBike ? bike.rig.root.position.x : lookedBench ? lookedBench.mesh.position.x : lookedCase ? lookedCase.x : lookedPile ? lookedPile.group.position.x : null;
     const tz = lookedBuilt ? lookedBuilt.mesh.position.z : lookedCar ? lookedCar.rig.root.position.z : lookedPump ? lookedPump.z : lookedPortal ? (lookedPortal.kind === 'up' ? lookedPortal.w.ladderZ : lookedPortal.w.hz) : lookedBike ? bike.rig.root.position.z : lookedBench ? lookedBench.mesh.position.z : lookedCase ? lookedCase.z : lookedPile ? lookedPile.group.position.z : null;
     if (tx !== null) { // через стену не берём
@@ -3687,6 +3703,15 @@ function updatePrompt() {
       const selfMesh = lookedBench ? lookedBench.mesh : lookedBuilt ? lookedBuilt.mesh : null; // свою же коробку (верстак, дверь) за стену не считаем
       const wall = raycaster.intersectObjects(blockers, false).find(h => h.object !== selfMesh);
       if (wall && wall.distance < d) { lookedBuilt = null; lookedPile = null; lookedCase = null; lookedBench = null; lookedBike = false; lookedPortal = null; lookedCar = null; lookedPump = null; }
+    }
+    { // через стену предмет не берём
+      const tg = lookedItem ? lookedItem.mesh : lookedAmmo;
+      if (tg) {
+        _to.set(tg.position.x - camera.position.x, tg.position.y + 0.15 - camera.position.y, tg.position.z - camera.position.z);
+        const d = _to.length(); raycaster.set(camera.position, _to.normalize());
+        const wh = raycaster.intersectObjects(blockers, false)[0];
+        if (wh && wh.distance < d - 0.25) { lookedItem = null; lookedAmmo = null; }
+      }
     }
   }
   if (riding) {
@@ -3716,6 +3741,12 @@ function updatePrompt() {
   } else if (lookedCase) {
     promptEl.textContent = lookedCase.state === 'closed' ? '[E] Открыть военный ящик' : lookedCase.kind === 'ak' ? '[E] Взять: автомат Калашникова + 30 патронов (+90 в запас)' : '[E] Взять: дробовик (5 патронов) + 20 патронов в запас';
     promptEl.style.display = 'block';
+  } else if (lookedItem) {
+    promptEl.textContent = '[E] Взять: ' + ITEMS[lookedItem.type].name;
+    promptEl.style.display = 'block';
+  } else if (lookedAmmo) {
+    promptEl.textContent = '[E] Взять патроны';
+    promptEl.style.display = 'block';
   } else if (lookedPile) {
     promptEl.textContent = `[E] Взять: ${ITEMS[lookedPile.type].name} (осталось ${lookedPile.n})`;
     promptEl.style.display = 'block';
@@ -3729,6 +3760,8 @@ function treeHint() { // E у дерева: подсказка, рубить н�
 function interact() {
   if (sleeping) return; // клавиша E: слезть/сесть, верстак, ящик, куча, иначе подсказка про дерево
   if (riding) return drive === 'car' ? dismountCar() : dismountBike();
+  if (lookedItem) return pickItem(lookedItem);
+  if (lookedAmmo) return pickAmmo(lookedAmmo);
   if (lookedCar) return mountCar(lookedCar);
   if (lookedPump) return usePump(lookedPump);
   if (lookedBuilt) return lookedBuilt.type === 'bed' ? openBedMenu(lookedBuilt) : toggleDoor(lookedBuilt);
@@ -3776,12 +3809,12 @@ function caseInteract(c) {
     if (c.kind === 'ak') {
       if (!hasAK) {
         hasAK = true; akAmmo = AK_MAG; akReserve += 90;
-        weapon = 'ak'; drawT = 0;
+        weapon = 'ak'; drawT = 0; heldSlot = -1;
         notify('Получен автомат Калашникова: 30 в магазине + 90 в запас. ЛКМ зажать - очередь, [Q] - сменить оружие');
       } else { akReserve += 120; notify('+120 патронов для АК'); }
     } else if (!hasShotgun) {
       hasShotgun = true; sgAmmo = SG_MAG; sgReserve += 20;
-      weapon = 'shotgun'; drawT = 0;
+      weapon = 'shotgun'; drawT = 0; heldSlot = -1;
       notify('Получен дробовик: 5 патронов в магазине + 20 в запас. [Q] - сменить оружие');
     } else { sgReserve += SG_MAG + 20; notify('+25 патронов для дробовика'); }
     if (!c.stash) spawnCase(); // где-то на карте появится новый ящик
@@ -3811,10 +3844,11 @@ function updateCases(dt) {
 
 // Патроны на земле
 const ammoBoxes = [];
-function spawnAmmoBox(x, z, stash) {
+function spawnAmmoBox(x, z, stash, y) {
   const m = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.3, 0.35), new THREE.MeshStandardMaterial({ color: 0xd4a017 }));
-  const px = x ?? (Math.random() - 0.5) * 200, pz = z ?? (Math.random() - 0.5) * 200;
-  m.position.set(px, 0.15, pz);
+  const [rx, rz] = x === undefined ? randomFreeSpot(200) : [0, 0];
+  const px = x ?? rx, pz = z ?? rz;
+  m.position.set(px, 0.15 + (y || 0), pz);
   scene.add(m);
   m.userData.stash = stash; m.userData.id = uidCounter++; m.userData.dyn = initDone; m.userData.px = px; m.userData.pz = pz;
   ammoBoxes.push(m);
@@ -3879,14 +3913,95 @@ function makeItemModel(type) {
   }
   return g;
 }
-function spawnItem(type, x, z, stash) {
+function randomFreeSpot(span) { // случайное место вне стен (после старта; при создании мира порядок случайных чисел не трогаем)
+  let px = (Math.random() - 0.5) * span, pz = (Math.random() - 0.5) * span;
+  if (initDone) for (let t = 0; t < 25 && colliders.some(c => c.bottom === undefined && px > c.minX - 0.6 && px < c.maxX + 0.6 && pz > c.minZ - 0.6 && pz < c.maxZ + 0.6); t++) { px = (Math.random() - 0.5) * span; pz = (Math.random() - 0.5) * span; }
+  return [px, pz];
+}
+function spawnItem(type, x, z, stash, y) {
   const m = makeItemModel(type);
-  const px = x ?? (Math.random() - 0.5) * 200, pz = z ?? (Math.random() - 0.5) * 200;
-  m.position.set(px, 0, pz);
+  const [rx, rz] = x === undefined ? randomFreeSpot(200) : [0, 0];
+  const px = x ?? rx, pz = z ?? rz;
+  m.position.set(px, y || 0, pz);
   m.rotation.y = Math.random() * Math.PI * 2;
   scene.add(m);
   items.push({ mesh: m, type, stash, id: uidCounter++, dyn: initDone, x: px, z: pz });
 }
+
+// --- Предметы в руках (1.12.0): еда, вода, аптечка и канистра берутся в руку клавишами 1-5, применяются левой кнопкой мыши ---
+const handRig = new THREE.Group(); handRig.visible = false; camera.add(handRig);
+const handArm = (() => { // рука в рукаве, держит предмет
+  const g = new THREE.Group(), sleeve = new THREE.MeshStandardMaterial({ color: 0x4a5a3a, roughness: 1, flatShading: true }), skin = new THREE.MeshStandardMaterial({ color: 0xc9a584, roughness: 0.9, flatShading: true });
+  const fore = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.1, 0.62), sleeve); fore.position.set(0.05, -0.17, 0.4); fore.rotation.x = -0.3; g.add(fore);
+  const hand = new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.085, 0.12), skin); hand.position.set(0.04, -0.1, 0.06); g.add(hand);
+  const thumb = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.03, 0.07), skin); thumb.position.set(-0.03, -0.06, 0.04); g.add(thumb);
+  return g;
+})();
+const handModels = {};
+function handModel(type) { // модель для руки: одна банка, одна бутылка, целая аптечка или канистра
+  if (handModels[type]) return handModels[type];
+  const src = makeItemModel(type); let g, dur, use;
+  if (type === 'food') { g = new THREE.Group(); const c = src.children[1]; c.position.set(0, -0.065, 0); g.add(c); g.scale.setScalar(1.25); dur = 1.6; use = { pos: [-0.2, 0.2, 0.2], rot: [-0.9, 0, 0] }; }
+  else if (type === 'water') { g = new THREE.Group(); const b = src.children[0]; b.position.set(0, -0.14, 0); g.add(b); g.scale.setScalar(1.1); dur = 1.9; use = { pos: [-0.2, 0.2, 0.2], rot: [1.45, 0, -0.15] }; }
+  else if (type === 'medkit') { g = new THREE.Group(); src.position.set(0, -0.12, 0); g.add(src); g.scale.setScalar(0.85); dur = 2.3; use = { pos: [-0.22, 0.12, 0.16], rot: [-0.35, 0.5, 0.15] }; }
+  else { g = new THREE.Group(); src.position.set(0, -0.2, 0); g.add(src); g.scale.setScalar(0.8); dur = 0.8; use = { pos: [0, 0.04, 0.04], rot: [0, 0, 0] }; }
+  return (handModels[type] = { g, dur, use });
+}
+function holdSlot(i) { // клавиши 1-5: взять предмет из быстрого слота в руку, ещё раз - убрать
+  if (health <= 0 || riding || buildMode || sleeping) return;
+  const s = slots[i];
+  if (!s || !ITEMS[s.type].use) { if (heldSlot >= 0) { heldSlot = -1; drawT = 0; useT = -1; } return; }
+  if (heldSlot === i) { heldSlot = -1; drawT = 0; useT = -1; return; }
+  heldSlot = i; handDraw = 0; useT = -1; useApplied = false;
+}
+function useHeld() { // ЛКМ с предметом в руке
+  if (heldSlot < 0 || useT >= 0 || health <= 0) return;
+  const s = slots[heldSlot]; if (!s) return;
+  const u = ITEMS[s.type].use;
+  if (u === 'eat' && hunger >= 100) return notify('Ты не голоден');
+  if (u === 'drink' && thirst >= 100) return notify('Пить не хочется');
+  if (u === 'heal' && health >= 100) return notify('Здоровье полное');
+  if (u === 'fuel') { if (!useSlot(heldSlot)) return notify('Подойди к джипу или мотоциклу'); if (!slots[heldSlot]) { heldSlot = -1; drawT = 0; } return; }
+  useT = 0; useApplied = false;
+}
+function heldHud() { const s = slots[heldSlot]; return s ? `В руках: ${ITEMS[s.type].name} x${s.n}   [ЛКМ] ${ITEMS[s.type].use === 'eat' ? 'съесть' : ITEMS[s.type].use === 'drink' ? 'выпить' : ITEMS[s.type].use === 'heal' ? 'лечиться' : 'заправить'}   [Q] убрать` : ''; }
+function updateHand(dt) {
+  if (heldSlot >= 0 && (!slots[heldSlot] || !ITEMS[slots[heldSlot].type].use)) { heldSlot = -1; drawT = 0; useT = -1; }
+  const on = heldSlot >= 0 && !buildMode && !riding && health > 0;
+  handRig.visible = on;
+  if (!on) { useT = -1; return; }
+  const type = slots[heldSlot].type, hm = handModel(type);
+  if (handRig.userData.type !== type) { handRig.userData.type = type; while (handRig.children.length) handRig.remove(handRig.children[0]); handRig.add(hm.g, handArm); }
+  handDraw = Math.min(1, handDraw + dt * 2.6);
+  let L = 0, u = 0;
+  if (useT >= 0) {
+    useT += dt / hm.dur; u = Math.min(1, useT); L = sstep(0, 0.3, u) - sstep(0.82, 1, u);
+    if (!useApplied && u >= 0.7) { useApplied = true; useSlot(heldSlot); }
+    if (useT >= 1) { useT = -1; useApplied = false; if (!slots[heldSlot]) { heldSlot = -1; drawT = 0; } }
+  }
+  const dd = Math.pow(1 - handDraw, 3), t = performance.now() / 1000;
+  handRig.position.set(0.27 + L * hm.use.pos[0], -0.3 - dd * 0.5 + L * hm.use.pos[1] + Math.sin(t * 1.7) * 0.004, -0.55 + L * hm.use.pos[2]);
+  handRig.rotation.set(-0.15 + L * hm.use.rot[0] - dd * 0.8, 0.25 + L * hm.use.rot[1], L * hm.use.rot[2]);
+  if (type === 'food' && u > 0.3 && u < 0.85) handRig.position.y += Math.sin(u * 60) * 0.006 * L;       // жуём
+  if (type === 'medkit' && u > 0.3 && u < 0.85) handRig.rotation.z += Math.sin(u * 40) * 0.03 * L;       // возимся с аптечкой
+}
+
+// Взять с земли на E взглядом (подходить вплотную не нужно)
+function pickItem(it) {
+  const type = it.type;
+  if (freeRoom(type) < 1) return notify('Инвентарь полон');
+  addItem(type, 1);
+  scene.remove(it.mesh); const k = items.indexOf(it); if (k >= 0) items.splice(k, 1);
+  if (!it.stash) spawnItem(type);
+  notify('Взято: ' + ITEMS[type].name + (ITEMS[type].use ? ' (клавиши 1-5: взять в руку)' : ''));
+}
+function pickAmmo(box) {
+  reserve += 14; if (hasShotgun) sgReserve += 4; if (hasAK) akReserve += 15;
+  const stashBox = box.userData.stash; scene.remove(box); const k = ammoBoxes.indexOf(box); if (k >= 0) ammoBoxes.splice(k, 1);
+  if (!stashBox) spawnAmmoBox();
+  notify('Взяты патроны');
+}
+
 for (let i = 0; i < 10; i++) { spawnItem('food'); spawnItem('water'); }
 for (let i = 0; i < 5; i++) spawnItem('medkit');
 for (let i = 0; i < 8; i++) spawnItem('fuel'); // канистры с бензином
@@ -4369,10 +4484,10 @@ function updateBuild(dt) {
   noticeT -= dt;
   if (noticeT <= 0) notice.textContent = '';
   chopCd -= dt;
-  gun.visible = !buildMode && !riding && weapon === 'pistol';
-  sgun.visible = !buildMode && !riding && weapon === 'shotgun';
-  axeRig.visible = !buildMode && !riding && weapon === 'axe';
-  akRig.visible = !buildMode && !riding && weapon === 'ak';
+  gun.visible = !buildMode && !riding && heldSlot < 0 && weapon === 'pistol';
+  sgun.visible = !buildMode && !riding && heldSlot < 0 && weapon === 'shotgun';
+  axeRig.visible = !buildMode && !riding && heldSlot < 0 && weapon === 'axe';
+  akRig.visible = !buildMode && !riding && heldSlot < 0 && weapon === 'ak';
   ghost.visible = buildMode && health > 0;
   if (ghost.visible) {
     const [x, z] = targetPos();
@@ -4692,9 +4807,9 @@ function renderMainMenu(view) {
 function startGame(isNew, lock) {
   gameStarted = true; mainMenu.style.display = 'none';
   Object.keys(keys).forEach(k => { keys[k] = false; });
-  if (isNew) { gameHour = 8; day = 1; camera.position.set(0, 1.7, 0); yaw = 0; pitch = 0; }
+  if (isNew) { gameHour = 8; day = 1; camera.position.set(spawnPoint.x, spawnPoint.y + 1.7, spawnPoint.z); yaw = spawnPoint.yaw; pitch = 0; }
   if (lock) { try { const p = renderer.domElement.requestPointerLock(); if (p && p.catch) p.catch(() => {}); } catch (e) { /* клик по экрану захватит мышь */ } }
-  notify(isNew ? 'Выживи. Построй кровать (B, 8), чтобы сохраняться' : 'Игра загружена' + (lock ? '' : '. Кликни по экрану, чтобы управлять'));
+  notify(isNew ? 'Ты в своей квартире. Подбирай вещи на E, 1-5 - взять в руку. Кровать (B, 8) нужна для сохранения' : 'Игра загружена' + (lock ? '' : '. Кликни по экрану, чтобы управлять'));
 }
 function startNewGame(gate) { // новая игра: вступительная сцена, потом обычный старт (параметр ?nointro в адресе её отключает)
   const begin = () => { startGame(true, true); gameHour = 6.4; };   // после вступления начинается раннее утро
@@ -5418,10 +5533,10 @@ addEventListener('keydown', e => {
     if (e.code === 'KeyQ') rot = (rot + 1) % 4;
     if (e.code === 'KeyV') removePiece();
   } else {
-    if (e.code >= 'Digit1' && e.code <= 'Digit5') useSlot(+e.code.slice(5) - 1); // быстрые слоты
+    if (e.code >= 'Digit1' && e.code <= 'Digit5') holdSlot(+e.code.slice(5) - 1); // быстрые слоты: предмет в руку
     if (e.code === 'KeyZ') craft('ammo');
     if (e.code === 'KeyX') craft('medkit');
-    if (e.code === 'KeyQ') switchWeapon();
+    if (e.code === 'KeyQ') { if (heldSlot >= 0) { heldSlot = -1; drawT = 0; useT = -1; } else switchWeapon(); }
   }
   if (e.code === 'KeyE') interact();
   if (e.code === 'KeyF') {
@@ -5434,6 +5549,7 @@ renderer.domElement.addEventListener('click', () => {
   if (!gameStarted || cutscenes.cut.active) return;
   if (document.pointerLockElement !== renderer.domElement) renderer.domElement.requestPointerLock();
   else if (buildMode) placePiece();
+  else if (heldSlot >= 0) useHeld();
   else if (weapon !== 'ak') attack();
 });
 renderer.domElement.addEventListener('mousedown', e => { if (e.button === 0 && document.pointerLockElement === renderer.domElement) mouseDown = true; });
@@ -5458,7 +5574,7 @@ function switchWeapon() { // клавиша Q
 }
 
 function startReload() { // клавиша R
-  if (health <= 0 || menuOpen || riding || weapon === 'axe') return;
+  if (health <= 0 || menuOpen || riding || weapon === 'axe' || heldSlot >= 0) return;
   if (weapon === 'shotgun') { // дробовик заряжается по одному патрону
     if (sgReloading || sgRacking || sgAmmo >= SG_MAG) return;
     if (sgReserve <= 0) return notify('Нет патронов для дробовика');
@@ -5529,7 +5645,7 @@ function attackAK() { // автомат: очередь при зажатой к
 }
 
 function attack() {
-  if (health <= 0 || riding || sleeping || cool > 0 || drawT < 0.7) return;
+  if (health <= 0 || riding || sleeping || cool > 0 || drawT < 0.7 || heldSlot >= 0) return;
   if (weapon === 'shotgun') return attackShotgun();
   if (weapon === 'axe') return startSwing();
   if (weapon === 'ak') return attackAK();
@@ -5853,37 +5969,13 @@ function loop() {
   }
   updateCases(dt);
 
-  // Подбор патронов
-  for (let i = ammoBoxes.length - 1; i >= 0; i--) {
-    const p = ammoBoxes[i].position;
-    if (Math.hypot(p.x - camera.position.x, p.z - camera.position.z) < 1.5) {
-      reserve += 14;
-      if (hasShotgun) sgReserve += 4;
-      if (hasAK) akReserve += 15;
-      const stashBox = ammoBoxes[i].userData.stash;
-      scene.remove(ammoBoxes[i]);
-      ammoBoxes.splice(i, 1);
-      if (!stashBox) spawnAmmoBox();
-    }
-  }
-
-  // Подбор еды, воды, аптечек, лома
-  for (let i = items.length - 1; i >= 0; i--) {
-    items[i].mesh.rotation.y += dt; // предметы медленно вращаются
-    const p = items[i].mesh.position;
-    if (Math.hypot(p.x - camera.position.x, p.z - camera.position.z) < 1.5) {
-      const type = items[i].type, stashItem = items[i].stash;
-      if (freeRoom(type) < 1) { if (noticeT <= 0) notify('Инвентарь полон'); continue; }
-      addItem(type, 1);
-      scene.remove(items[i].mesh);
-      items.splice(i, 1);
-      if (!stashItem) spawnItem(type);
-    }
-  }
+  // Предметы и патроны больше не подбираются сами: берём на E (см. updatePrompt и interact)
+  for (let i = items.length - 1; i >= 0; i--) items[i].mesh.rotation.y += dt; // предметы медленно вращаются
+  updateHand(dt);
 
   // Зомби
   updateCorpses(dt);
-  updateWater(dt); updateWild(dt);
+  updateWater(dt); updateWild(dt); updateCity(dt);
   for (let i = zombies.length - 1; i >= 0; i--) {
     const z = zombies[i];
     if (net.role === 'client') { clientZombie(z, dt); continue; } // у клиента зомби двигает хозяин комнаты
@@ -5931,14 +6023,14 @@ function loop() {
     if (deathShown) { deathShown = false; deathScreen.style.display = 'none'; }
     hud.textContent =
       `День ${day}   Здоровье: ${Math.ceil(health)}   Еда: ${Math.ceil(hunger)}   Вода: ${Math.ceil(thirst)}\n` +
-      `Убито: ${kills}   ` + (riding ? vehicleHud() : weapon === 'pistol' ? `Пистолет: ${reloading ? 'перезарядка...' : ammo} / ${reserve}` : weapon === 'shotgun' ? `Дробовик: ${sgReloading ? 'заряжаю... ' : ''}${sgAmmo} / ${sgReserve}` : weapon === 'ak' ? `АК-47: ${akReloading ? 'перезарядка... ' : ''}${akAmmo} / ${akReserve}` : 'Топор: ЛКМ - рубить и бить');
+      `Убито: ${kills}   ` + (riding ? vehicleHud() : heldSlot >= 0 ? heldHud() : weapon === 'pistol' ? `Пистолет: ${reloading ? 'перезарядка...' : ammo} / ${reserve}` : weapon === 'shotgun' ? `Дробовик: ${sgReloading ? 'заряжаю... ' : ''}${sgAmmo} / ${sgReserve}` : weapon === 'ak' ? `АК-47: ${akReloading ? 'перезарядка... ' : ''}${akAmmo} / ${akReserve}` : 'Топор: ЛКМ - рубить и бить');
   }
   const hh = String(Math.floor(gameHour)).padStart(2, '0');
   const mm = String(Math.floor((gameHour % 1) * 60)).padStart(2, '0');
-  const slotsRow = `<div style="display:flex;gap:6px;justify-content:center">${[0, 1, 2, 3, 4].map(i => slotHtml(i, false, false)).join('')}</div>`;
+  const slotsRow = `<div style="display:flex;gap:6px;justify-content:center">${[0, 1, 2, 3, 4].map(i => slotHtml(i, i === heldSlot, false)).join('')}</div>`;
   const info = buildMode
     ? 'СТРОЙКА: ' + pieceKeys.map((k, i) => `${selPiece === k ? '▶' : ''}[${i + 1}] ${pieces[k].name} (${pieces[k].cost} дер.)`).join('  ') + `   Дерево: ${countOf('wood')}<br>[Q] поворот   [клик] поставить   [V] убрать   [B] выйти`
-    : `[F] Фонарик ${flashOn ? 'вкл' : 'выкл'}   [R] Перезарядка${hasShotgun || hasAxe ? '   [Q] Оружие' : ''}   [E] Взять   [B] Строить   [Tab] Меню   ${hh}:${mm}<br>Дерево: ${countOf('wood')}   Лом: ${countOf('scrap')}`;
+    : `[F] Фонарик ${flashOn ? 'вкл' : 'выкл'}   [R] Перезарядка${hasShotgun || hasAxe ? '   [Q] Оружие' : ''}   [1-5] В руку   [E] Взять   [B] Строить   [Tab] Меню   ${hh}:${mm}<br>Дерево: ${countOf('wood')}   Лом: ${countOf('scrap')}`;
   const hotHtml = slotsRow + `<div style="margin-top:6px;font-size:16px">${info}</div>`;
   if (hotHtml !== lastHot) { hotbar.innerHTML = hotHtml; lastHot = hotHtml; }
 
@@ -6078,6 +6170,12 @@ function updateWater(dt) {
 // --- Дикая местность: лес, кусты, коряги и валуны на холмах за ровной зоной ---
 // Свой генератор случайных чисел: Math.random тут не трогаем. Каждый вид рисуется через InstancedMesh по клеткам 140 м, дальние клетки скрываются.
 const wildCells = [];
+let cityCells = [], cityTimer = 0;
+function updateCity(dt) { // далёкие дома города не рисуем: туман их всё равно скрывает
+  cityTimer -= dt; if (cityTimer > 0) return; cityTimer = 0.35;
+  const px = camera.position.x, pz = camera.position.z;
+  for (const c of cityCells) { const vis = Math.hypot(px - c.x, pz - c.z) < 250; c.meshes.forEach(mm => { mm.visible = vis; }); }
+}
 function makeNatureGeos() {
   const mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1, flatShading: true }); mat.userData.shared = true;
   const mk = seed => zBoxes(mulberry(seed), y => 0.78 + 0.22 * Math.min(1, y / 2.5));
@@ -6237,6 +6335,12 @@ function updateWild(dt) { // дальние клетки леса не рису�
 stockExtras();
 buildLakes();
 buildWilderness();
+{ // Город: многоквартирные дома на сетке улиц, лут по квартирам, стартовая квартира. Строится последним: прежние части мира не сдвигаются
+  const city = buildCity({ bKit, colliders, blockers, floors, scene, h01, mulCol, trees, piles, cases, items, ammoBoxes, clearTrees, spawnItem, spawnAmmoBox, spawnZombie, carK, textPlane });
+  if (city.spawn) Object.assign(spawnPoint, city.spawn);
+  cityCells = city.cells || [];
+  zombies.forEach(z => resolveCollisions(z.mesh.position, 0.6 * z.cfg.sx)); // зомби, оказавшиеся внутри новых стен, выталкиваются
+}
 initDone = true;                 // дальше всё, что появляется, считается «новым» и сохраняется отдельно
 Math.random = _realRandom;       // обычная случайность для игры
 const initSnap = {               // что было в мире с самого начала
