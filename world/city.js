@@ -39,6 +39,10 @@ export function buildCity(G) {
     const { cx, cz, ry } = bl, sg = ry === 0 ? 1 : -1, N = idx === 0 ? 4 : 4 + (h01(idx, cx, cz) > 0.5 ? 1 : 0);
     const WC = WALLC[Math.floor(h01(idx + 3, cx, cz) * WALLC.length)], K = bKit(cx, cz, 60 + idx), B = { s: K.s, d: K.d, m: K.m, g: K.g, gl: K.gl, r: K.r };
     const lw = (lx, lz) => [cx + sg * lx, cz + sg * lz];
+    // Детали дома собираются в локальных осях (центр дома = 0,0, фасад к +Z). Общая матрица переносит их на место и поворачивает на 180°
+    // для домов с sg = -1 ровно так же, как lw() считает столкновения. Без неё меши всех домов оказывались вокруг (0, 0) карты.
+    const M0 = [sg, 0, 0, 0, 0, 1, 0, 0, 0, 0, sg, 0, cx, 0, cz, 1], kitParts = [K.s, K.r, K.d, K.m, K.ms, K.g, K.gl];
+    kitParts.forEach(p => { p.base = M0; });
     const wr = (lx0, lx1, lz0, lz1) => { const [a, c] = lw(lx0, lz0), [b, d] = lw(lx1, lz1); return { minX: Math.min(a, b), maxX: Math.max(a, b), minZ: Math.min(c, d), maxZ: Math.max(c, d) }; };
     const col = (lx0, lx1, lz0, lz1, top, bottom) => { const c = wr(lx0, lx1, lz0, lz1); if (top !== undefined) c.top = top; if (bottom !== undefined) c.bottom = bottom; colliders.push(c); };
     const flo = (lx0, lx1, lz0, lz1, y) => floors.push(Object.assign(wr(lx0, lx1, lz0, lz1), { y }));
@@ -86,6 +90,8 @@ export function buildCity(G) {
     B.s.box(5.0, 0.3, 5.5, 0x4a4d50, 0, yR - 0.15, 3.25); flo(-2.5, 2.5, 0.5, 6.15, yR);
     B.r.box(26.6, 0.9, 0.25, mulCol(WC, 0.9), 0, yR + 0.45, HZ + 0.05); B.r.box(26.6, 0.9, 0.25, mulCol(WC, 0.9), 0, yR + 0.45, -HZ - 0.05);
     B.r.box(0.25, 0.9, 12.4, mulCol(WC, 0.9), HX + 0.05, yR + 0.45, 0); B.r.box(0.25, 0.9, 12.4, mulCol(WC, 0.9), -HX - 0.05, yR + 0.45, 0);
+    col(-HX - 0.2, HX + 0.2, HZ - 0.1, HZ + 0.2, yR + 0.9, yR); col(-HX - 0.2, HX + 0.2, -HZ - 0.2, -HZ + 0.1, yR + 0.9, yR);   // парапет: твёрдый только для тех, кто стоит на крыше
+    col(HX - 0.1, HX + 0.2, -HZ, HZ, yR + 0.9, yR); col(-HX - 0.2, -HX + 0.1, -HZ, HZ, yR + 0.9, yR);
     [[-7, 0, 1.4, 0.8, 1.0], [8, -2, 1.4, 0.8, 1.0], [10.5, 3, 1.0, 0.8, 0.9]].forEach(([x, z, w, h, d2]) => { B.m.box(w, h, d2, 0xb0b4b8, x, yR + h / 2, z); B.m.cyl(0.32, 0.04, 0x2a2d30, x, yR + h, z, 8); });
     B.m.cyl(1.0, 1.8, 0x6a6f75, -10, yR, -3.5, 10); B.m.cyl(1.05, 0.12, 0x3a3f45, -10, yR + 1.8, -3.5, 10);
     B.m.tube([4, yR, -4.5], [4, yR + 3.5, -4.5], 0.03, 0x4a4f55, 4); B.m.tube([3.5, yR + 3.0, -4.5], [4.5, yR + 3.0, -4.5], 0.02, 0x4a4f55, 3);
@@ -155,6 +161,7 @@ export function buildCity(G) {
       });
       function g(x, y, z) { B.g.box(0.7, 0.05, 0.25, 0xfff0cc, x, y, z); }
     }
+    kitParts.forEach(p => { p.base = null; });   // уличные детали (фонари, баки, машины) задаются уже в мировых координатах
     G.clearTrees(cx, cz, HX + 4, HZ + 4);
     return { K, lw, N, sg, wr, col };
   }

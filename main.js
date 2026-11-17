@@ -1,5 +1,7 @@
 import * as THREE from 'three';
 import { initCutscenes } from './scenes/index.js'; // вступление и финал (папка scenes)
+import { createWeaponModels } from './models/weapons.js'; // охотничья винтовка и мачете
+import { createItemModels } from './models/items.js'; // модели предметов: консервы, вода, аптечки, канистра, ящик патронов
 import { buildCity } from './world/city.js';       // город многоквартирных домов и стартовая квартира
 
 // --- Сохранения: мир строится от числа (зерна), поэтому его можно воссоздать точно таким же ---
@@ -168,7 +170,7 @@ sun.shadow.bias = -0.0004; sun.shadow.normalBias = 0.05;
 scene.add(sun.target);
 
 // --- Настройки (сохраняются на компьютере) ---
-const DEFAULT_SETTINGS = { shadows: true, fov: 75, sens: 1, exposure: 1.15, volume: 0.8, fog: 1, res: Math.min(window.devicePixelRatio || 1, 2) };
+const DEFAULT_SETTINGS = { shadows: true, weather: true, fov: 75, sens: 1, exposure: 1.15, volume: 0.8, fog: 1, res: Math.min(window.devicePixelRatio || 1, 2) };
 const SETTINGS = Object.assign({}, DEFAULT_SETTINGS);
 try { Object.assign(SETTINGS, JSON.parse(localStorage.getItem('dz_settings') || '{}')); } catch (e) { /* первый запуск */ }
 const SET_FMT = {
@@ -186,15 +188,23 @@ function applySettings() {
 applySettings();
 
 // --- Мир ---
-const groundTex = (() => { // пиксельная трава
-  const c = document.createElement('canvas'); c.width = c.height = 32;
-  const x = c.getContext('2d');
-  const cols = ['#5a6b45', '#566840', '#5f7049', '#52623d', '#647650', '#4f5e3a'];
-  for (let i = 0; i < 32; i++) for (let j = 0; j < 32; j++) { x.fillStyle = cols[Math.floor(Math.random() * cols.length)]; x.fillRect(i, j, 1, 1); }
-  for (let k = 0; k < 24; k++) { x.fillStyle = 'rgba(40,32,18,.22)'; x.fillRect(Math.floor(Math.random() * 32), Math.floor(Math.random() * 32), 2, 1); }
+const groundTex = (() => { // трава 128x128: пятна, травинки, земля и камешки, бесшовная
+  const S = 128, c = document.createElement('canvas'); c.width = c.height = S;
+  const x = c.getContext('2d'), id = x.createImageData(S, S);
+  const h = (a, b) => { const s = Math.sin(a * 127.1 + b * 311.7) * 43758.5453; return s - Math.floor(s); };
+  const sm = (u, v, w) => { const iu = Math.floor(u), iv = Math.floor(v), fu = u - iu, fv = v - iv, g = (i, j) => h(((i % w) + w) % w, ((j % w) + w) % w);
+    const a = g(iu, iv), b = g(iu + 1, iv), c2 = g(iu, iv + 1), d = g(iu + 1, iv + 1), su = fu * fu * (3 - 2 * fu), sv = fv * fv * (3 - 2 * fv);
+    return a + (b - a) * su + (c2 - a) * sv + (a - b - c2 + d) * su * sv; };
+  for (let j = 0; j < S; j++) for (let i = 0; i < S; i++) {
+    const n = sm(i / 32, j / 32, 4) * 0.45 + sm(i / 8, j / 8, 16) * 0.35 + sm(i / 2, j / 2, 64) * 0.2, k = (j * S + i) * 4, soil = Math.max(0, sm(i / 24 + 3, j / 24, 5) - 0.66) * 3;
+    id.data[k] = (78 + n * 52) * (1 - soil * 0.3) + soil * 30; id.data[k + 1] = (96 + n * 56) * (1 - soil * 0.3) + soil * 16; id.data[k + 2] = (56 + n * 34) * (1 - soil * 0.3); id.data[k + 3] = 255;
+  }
+  x.putImageData(id, 0, 0);
+  for (let q = 0; q < 260; q++) { const px = Math.random() * S, py = Math.random() * S, l = 2 + Math.random() * 4; x.strokeStyle = Math.random() < 0.5 ? 'rgba(150,180,90,.55)' : 'rgba(30,50,20,.5)'; x.lineWidth = 1; x.beginPath(); x.moveTo(px, py); x.lineTo(px + (Math.random() - 0.5) * 2, py - l); x.stroke(); }
+  for (let q = 0; q < 14; q++) { x.fillStyle = 'rgba(120,115,105,.7)'; x.fillRect(Math.floor(Math.random() * S), Math.floor(Math.random() * S), 2, 1); }
   const t = new THREE.CanvasTexture(c);
   t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(WORLD_HALF / 2, WORLD_HALF / 2); // клетка 4 м, как раньше
-  t.magFilter = THREE.NearestFilter; t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4;
+  t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 8;
   return t;
 })();
 // Земля: сетка 3,3 м, высоты из terrainY; цвет вершин: трава внизу, серая порода на крутых склонах и вершинах
@@ -763,7 +773,26 @@ function pickZombieType(night) { // ночью больше опасных
 // --- Зомби: части тела склеены в меши с цветами вершин, материалы общие для всех зомби ---
 // Вариации (волосы, раны, рюкзак, босые ноги) считаются из чисел, которые spawnZombie и так получает от Math.random:
 // количество и порядок вызовов Math.random не менялись, поэтому мир из сохранений не сдвигается.
-const zombieMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.92, flatShading: true });
+const zombieTex = (() => { // процедурная текстура: ткань, кожа, грязь (умножается на цвета вершин), бесшовная
+  const S = 128, c = document.createElement('canvas'); c.width = c.height = S;
+  const x = c.getContext('2d'), id = x.createImageData(S, S);
+  const h = (a, b) => { const s = Math.sin(a * 127.1 + b * 311.7) * 43758.5453; return s - Math.floor(s); };
+  const sm = (u, v, w) => {
+    const iu = Math.floor(u), iv = Math.floor(v), fu = u - iu, fv = v - iv, g = (i, j) => h(((i % w) + w) % w, ((j % w) + w) % w);
+    const a = g(iu, iv), b = g(iu + 1, iv), c2 = g(iu, iv + 1), d = g(iu + 1, iv + 1), su = fu * fu * (3 - 2 * fu), sv = fv * fv * (3 - 2 * fv);
+    return a + (b - a) * su + (c2 - a) * sv + (a - b - c2 + d) * su * sv;
+  };
+  for (let j = 0; j < S; j++) for (let i = 0; i < S; i++) {
+    const n = sm(i / 16, j / 16, 8) * 0.5 + sm(i / 8, j / 8, 16) * 0.3 + sm(i / 2, j / 2, 64) * 0.2;
+    const weave = ((i % 4 < 2) !== (j % 4 < 2)) ? 0.04 : 0, stain = Math.max(0, sm(i / 32, j / 32, 4) - 0.62) * 0.9;
+    const v = Math.max(0.35, Math.min(1, 0.9 + (n - 0.5) * 0.34 + weave - stain)) * 255, k = (j * S + i) * 4;
+    id.data[k] = id.data[k + 1] = id.data[k + 2] = v; id.data[k + 3] = 255;
+  }
+  x.putImageData(id, 0, 0);
+  const t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4;
+  return t;
+})();
+const zombieMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.92, flatShading: true, map: zombieTex, bumpMap: zombieTex, bumpScale: 1.6 });
 const zombieEyeMat = new THREE.MeshBasicMaterial({ vertexColors: true });
 const bellyGeo = new THREE.SphereGeometry(0.5, 10, 8);
 const bellyMat = new THREE.MeshStandardMaterial({ color: 0xc8d45a, roughness: 0.5, flatShading: true });
@@ -827,7 +856,8 @@ function zBoxes(rnd, ao) { // набор коробок одной части т
       }
     },
     cyl(r, h, color, x, y0, z, seg = 10, cap = true) { api.frustum(r, r, h, seg, color, m4(x, y0 + h / 2, z), cap); }, // вертикальный цилиндр, y0 - низ
-    cone(r0, r1, h, color, x, y0, z, seg = 10) { api.frustum(r0, r1, h, seg, color, m4(x, y0 + h / 2, z)); },
+    cone(r0, r1, h, color, x, y0, z, seg = 10, rx = 0, rz = 0) { api.frustum(r0, r1, h, seg, color, m4(x, y0 + h / 2, z, rx || 0, 0, rz || 0)); },
+    ball(r, color, x, y, z, sx = 1, sy = 1, sz = 1, jit = 0.1) { api.blob(r, color, m4(x, y, z), sx, sy, sz, 1, jit); }, // бугристый шар (черепа, плечи, суставы)
     cylX(r, len, color, x, y, z, seg = 10, cap = true) { api.frustum(r, r, len, seg, color, m4(x, y, z, 0, 0, Math.PI / 2), cap); }, // лежит вдоль X, центр в (x,y,z)
     cylZ(r, len, color, x, y, z, seg = 10, cap = true) { api.frustum(r, r, len, seg, color, m4(x, y, z, Math.PI / 2, 0, 0), cap); }, // лежит вдоль Z
     tube(p1, p2, r, color, seg = 6, cap = false) { // труба или стержень между двумя точками
@@ -866,6 +896,7 @@ function zBoxes(rnd, ao) { // набор коробок одной части т
       geo.setAttribute('position', new THREE.Float32BufferAttribute(P, 3));
       geo.setAttribute('normal', new THREE.Float32BufferAttribute(N, 3));
       geo.setAttribute('color', new THREE.Float32BufferAttribute(C, 3));
+      if (mat.map) { const U = []; for (let i = 0; i < P.length; i += 3) U.push((P[i] + P[i + 2] * 0.7) * 2.2, P[i + 1] * 2.2); geo.setAttribute('uv', new THREE.Float32BufferAttribute(U, 2)); } // развёртка для текстуры (только у материалов с map)
       return new THREE.Mesh(geo, mat);
     },
   };
@@ -880,120 +911,98 @@ function mulberry(seed) { // маленький генератор случай�
   };
 }
 
-// Собирает зомби: g -> torso (голова и руки на нём, наклоняются вместе) и ноги. Начало координат у ног, лицо смотрит в +Z.
-function buildZombie(type, rnd, skinHex, shirtHex, pantsHex, eyeHex) {
-  const g = new THREE.Group();
-  g.rotation.order = 'YXZ'; // наклон при падении считается относительно направления взгляда, а не мировой оси
-  const isRun = type === 'runner', isBrute = type === 'brute', isSold = type === 'soldier', isBloat = type === 'bloater';
-  const sk = skinHex, skD = mulCol(sk, 0.7), skL = mulCol(sk, 1.12);
-  const shD = mulCol(shirtHex, 0.72), shL = mulCol(shirtHex, 1.22), pnD = mulCol(pantsHex, 0.72);
-  const BONE = 0xd8d0b8, BLOOD = 0x6a1010, BLOOD_D = 0x3f0a0a;
-  const pick = arr => arr[Math.floor(rnd() * arr.length)];
-  const grp = (x, y, z) => { const o = new THREE.Group(); o.position.set(x, y, z); return o; };
-  const dirt = lo => y => lo + (1 - lo) * Math.min(1, Math.max(0, (y + 0.95) / 0.95)); // внизу темнее
-  const lw = isRun ? 0.82 : 1; // бегун худой
+// --- Модели зомби по частям (1.14.0): голова, тело, руки, ноги; те же формы, что в zombies.html ---
+const ZP = (() => {
+const mc = (h, k) => mulCol(h, k), grp = (x, y, z) => { const o = new THREE.Group(); o.position.set(x, y, z); return o; };
+const dirt = (lo, top) => y => lo + (1 - lo) * Math.min(1, Math.max(0, (y + top) / top));
+const BONE = 0xd8d0b8, BL = 0x6a1010, BD = 0x3f0a0a, DK = 0x120808, TEETH = 0xe6dfc8;
+// ===== ГОЛОВА =====
+function Head(t,c,R){const H=zBoxes(R),E=zBoxes(R),sk=c.sk,sd=mc(sk,.7),sl=mc(sk,1.12),run=t==='runner',br=t==='brute',bl=t==='bloater',so=t==='soldier';
+ H.ball(.27,sk,0,.05,0,run?.85:br?1.1:bl?1.12:1,run?1.2:1,1,.05);          // череп
+ H.box(br?.44:.34,.16,.34,sl,0,-.17,.06);                                    // челюсть
+ H.box(br?.5:.46,br?.08:.05,br?.12:.08,sd,0,.115,.2);                        // надбровья
+ [-1,1].forEach(s=>{H.box(.13,.1,.05,DK,s*.1,.05,.225);E.box(.07,.05,.03,c.eye,s*.1,.05,.25);
+  H.box(.03,.12,.02,mc(sk,.55),s*.2,-.07,.2,0,0,s*.3);                       // вены
+  if(s===1&&R()<.35)H.box(.05,.1,.07,BL,.27,-.02,0);else H.box(.05,.12,.09,sk,s*.27,-.02,0)}); // уши
+ H.box(.07,.1,.06,sd,0,-.03,.25);H.box(.04,.03,.02,DK,0,-.07,.285);          // нос
+ if(run){H.box(.22,.16,.05,0x2a0a0a,0,-.2,.2);H.box(.28,.07,.26,sl,.02,-.34,.1,.3,0,.1);H.box(.08,.03,.12,0x8a3a3a,0,-.28,.2);
+  for(let k=0;k<4;k++)H.box(.035,.06,.03,TEETH,-.075+k*.05,-.13,.232)}
+ else{H.box(.24,.07,.04,DK,0,-.16,.22);for(let k=0;k<5;k++)H.box(.035,.05,.03,TEETH,-.08+k*.04,-.14,.235);for(let k=0;k<4;k++)H.box(.035,.04,.03,TEETH,-.06+k*.04,-.19,.235)}
+ H.box(.1,.18,.03,BL,(R()-.5)*.1,-.3,.2);                                     // кровь
+ if(R()<.5){H.box(.15,.1,.03,BL,.11,.22,.22,.5,0,.4);H.box(.08,.05,.03,BONE,.11,.22,.235,.5,0,.4)} // рана на черепе
+ if(br){[-1,1].forEach(s=>H.cone(.045,.005,.17,BONE,s*.13,-.24,.2,6,-.25,s*.1));H.box(.03,.32,.02,0x7a2a2a,.16,.08,.255,0,0,.2);
+  H.box(.3,.04,.3,0x555555,0,.3,-.02);[-1,1].forEach(s=>H.cyl(.02,.03,0x999999,s*.1,.3,.1,6))}
+ if(bl){[[-.1,.05,.24],[.22,-.1,.12],[-.2,.2,.14],[.1,.25,.1]].forEach(([x,y,z],k)=>H.ball(.05+k%2*.03,0xd8d060,x,y,z,1,1,1,.2));H.ball(.075,0xc8d45a,-.1,.05,.24)}
+ if(so){H.ball(.3,0x3f4a2c,0,.13,-.01,1,.75,1.05,.04);H.box(.5,.04,.55,0x343d24,0,.06,.0);for(let k=0;k<5;k++)H.box(.1,.03,.1,0x55603a,-.2+k*.1,.3,(R()-.5)*.3);
+  [-1,1].forEach(s=>{H.box(.03,.2,.03,0x14181a,s*.21,-.08,.12);H.box(.14,.05,.02,0x4a6a7a,s*.1,.22,.3)});H.box(.38,.07,.05,0x14181a,0,.22,.29)}
+ else{const hair=[0x2b2118,0x1a1a1a,0x4a3a28,0x6a5a3a,0x7a7a72][Math.floor(R()*5)],st=run?2:Math.floor(R()*4);
+  if(st===1||st===2)H.ball(.29,hair,0,.12,-.03,1,.62,1.06,.12);
+  if(st===2){H.box(.46,.5,.08,hair,0,-.08,-.26);[-1,1].forEach(s=>H.box(.06,.4,.14,hair,s*.25,-.02,-.08))}
+  if(st===3)H.ball(.14,hair,.05,.27,0,1,.7,1,.25);
+  if(st===0)[-1,1].forEach(s=>H.box(.05,.1,.1,hair,s*.26,.1,-.02))}
+ return[H.mesh(zombieMat),E.mesh(zombieEyeMat)]}
 
-  // --- Торс (начало координат на уровне y=1.45) ---
-  const torso = grp(0, 1.45, 0), T = zBoxes(rnd, y => 0.84 + 0.16 * Math.min(1, Math.max(0, (y + 0.55) / 1.1)));
-  const cw = isRun ? 0.62 : isSold ? 0.74 : 0.7;
-  if (isRun) { // тощий: рёбра и позвоночник, лохмотья вместо рубашки
-    T.box(cw, 0.56, 0.38, sk, 0, 0.2, 0); T.box(cw - 0.08, 0.46, 0.34, skD, 0, -0.26, 0);
-    for (let k = 0; k < 4; k++) T.box(cw - 0.14, 0.04, 0.02, BONE, 0, 0.38 - k * 0.12, 0.2);
-    for (let k = 0; k < 5; k++) T.box(0.07, 0.06, 0.05, BONE, 0, 0.42 - k * 0.15, -0.2);
-    [-1, 0, 1].forEach(k => T.box(0.14, 0.34 + rnd() * 0.2, 0.04, shirtHex, k * 0.2, 0.15, 0.19)); // лохмотья спереди
-    T.box(0.5, 0.3, 0.04, shD, -0.04, 0.2, -0.19);
-  } else {
-    T.box(cw, 0.56, 0.4, shirtHex, 0, 0.2, 0); T.box(cw - 0.08, isBloat ? 0.3 : 0.46, 0.36, shirtHex, 0, isBloat ? -0.18 : -0.26, 0);
-    [-1, 1].forEach(sd => T.box(0.27, 0.18, 0.32, shirtHex, sd * 0.4, 0.42, 0));     // плечи
-    T.box(0.16, 0.14, 0.02, shL, -0.2, 0.1, 0.205);                                    // карман
-    T.box(0.22, 0.3, 0.02, skD, 0.18, -0.05, 0.205); T.box(0.12, 0.18, 0.02, BLOOD, 0.18, -0.05, 0.215); T.box(0.14, 0.03, 0.02, BONE, 0.18, 0.04, 0.222); // дыра в рубашке, рана
-    T.box(0.16, 0.14, 0.02, sk, -0.2, 0.36, 0.205);                                    // дыра на плече
-    for (let k = 0; k < 3; k++) T.box(0.1 + rnd() * 0.14, 0.1 + rnd() * 0.16, 0.02, BLOOD_D, (rnd() - 0.5) * 0.5, (rnd() - 0.5) * 0.6, 0.208); // кровь
-    for (let k = -3; k <= 3; k++) T.box(0.1, 0.05 + rnd() * 0.12, 0.38, shD, k * 0.095, -0.5, 0);        // рваный подол
-  }
-  T.box(0.34, 0.08, 0.3, isRun ? sk : shD, 0, 0.5, 0.02); T.box(0.2, 0.16, 0.2, sk, 0, 0.58, 0.02);   // воротник, шея
-  if (!isBloat) { T.box(cw + 0.02, 0.1, 0.4, 0x1f2a1f, 0, -0.52, 0); T.box(0.1, 0.07, 0.02, 0xc9a227, 0, -0.52, 0.21); } // ремень
-  if (isSold) { // бронежилет, подсумки, рюкзак со скаткой
-    T.box(0.8, 0.62, 0.46, 0x2f3a22, 0, 0.1, 0); T.box(0.42, 0.3, 0.05, 0x3a4a32, 0, 0.2, 0.25);
-    [-1, 1].forEach(sd => { T.box(0.16, 0.14, 0.08, 0x55603a, sd * 0.2, -0.14, 0.26); T.box(0.12, 0.1, 0.44, 0x2f3a22, sd * 0.25, 0.44, 0); });
-    T.box(0.5, 0.5, 0.24, 0x3a4228, 0, 0.05, -0.34); T.box(0.5, 0.14, 0.14, 0x55603a, 0, 0.42, -0.4);
-  } else if (isBrute) { // горб, цепь вместо ремня, наплечники с шипами
-    T.box(0.56, 0.32, 0.3, shirtHex, 0, 0.5, -0.28);
-    T.box(0.78, 0.06, 0.44, 0x555555, 0, -0.2, 0); T.box(0.1, 0.16, 0.04, 0x666666, 0.2, -0.3, 0.22);
-    [-1, 1].forEach(sd => { T.box(0.4, 0.22, 0.4, 0x2a2a2a, sd * 0.52, 0.52, 0); T.box(0.07, 0.2, 0.07, 0xa0a0a0, sd * 0.52, 0.72, 0); T.box(0.05, 0.14, 0.05, 0xa0a0a0, sd * 0.62, 0.68, 0.08, 0, 0, sd * -0.5); });
-  } else if (!isRun && !isBloat && rnd() < 0.3) { // рюкзак
-    T.box(0.5, 0.52, 0.22, pick([0x4a3a2a, 0x3a4a5a, 0x5a2a2a]), 0, 0.1, -0.3); T.box(0.04, 0.4, 0.04, 0x1a1a1a, -0.18, 0.2, 0.2); T.box(0.04, 0.4, 0.04, 0x1a1a1a, 0.18, 0.2, 0.2);
-  }
-  torso.add(T.mesh(zombieMat));
+// ===== ТЕЛО (торс) =====
+function Torso(t,c,R){const T=zBoxes(R,dirt(.84,.55)),sk=c.sk,sh=c.sh,shD=mc(sh,.72),sd=mc(sk,.7),run=t==='runner',br=t==='brute',bl=t==='bloater',so=t==='soldier',cw=run?.6:so?.72:br?.78:.7;
+ if(run){T.box(cw,.56,.36,sk,0,.2,0);T.box(cw-.08,.46,.32,sd,0,-.26,0);
+  for(let k=0;k<5;k++)T.box(cw-.1,.035,.04,BONE,0,.42-k*.1,.18);T.box(.04,.5,.04,BONE,0,.2,.19);
+  for(let k=0;k<6;k++)T.ball(.05,BONE,0,.44-k*.14,-.2);
+  [-1,0,1].forEach(k=>T.box(.14,.3+R()*.2,.04,c.sh,k*.2,.15,.2));T.box(.5,.3,.04,shD,-.04,.2,-.2)}
+ else{T.box(cw,.56,.4,sh,0,.2,0);
+  T.box(cw-.08,.46,.36,sh,0,-.26,0);
+  [-1,1].forEach(s=>T.ball(.17,sh,s*.37,.42,0,1,.9,1,.05));
+  T.box(.16,.14,.02,shD,-.2,.1,.205);
+  if(!bl){T.box(.24,.3,.03,sd,.16,-.04,.205);T.box(.14,.2,.03,BL,.16,-.04,.215);for(let k=0;k<3;k++)T.box(.14,.025,.02,BONE,.16,.04-k*.06,.226)}
+  T.box(.16,.14,.02,sk,-.2,.36,.205);
+  for(let k=0;k<4;k++)T.box(.1+R()*.14,.1+R()*.16,.02,BD,(R()-.5)*.5,(R()-.5)*.6,.208);
+  if(!so)for(let k=-3;k<=3;k++)T.box(.1,.05+R()*.14,.38,shD,k*.095,-.52,0)}
+ T.cyl(.09,.14,sk,0,.5,.02);T.box(.34,.07,.3,run?sk:shD,0,.5,.02);
+ if(!bl)T.box(cw+.02,.1,.4,0x1f2a1f,0,-.52,0);if(!bl)T.box(.1,.07,.02,0xc9a227,0,-.52,.21);
+ if(so){T.box(.8,.62,.46,0x2f3a22,0,.1,0);T.box(.42,.3,.05,0x3a4a32,0,.2,.25);T.box(.06,.1,.01,0xaaaaaa,0,.4,.26);
+  [-1,1].forEach(s=>{T.box(.16,.14,.08,0x55603a,s*.2,-.14,.26);T.box(.12,.1,.44,0x2f3a22,s*.25,.44,0)});T.box(.5,.5,.24,0x3a4228,0,.05,-.34);T.box(.5,.14,.14,0x55603a,0,.42,-.4)}
+ else if(br){T.ball(.3,sh,0,.5,-.26,1.1,.8,1,.1);T.box(.8,.06,.44,0x555555,0,-.2,0);for(let k=-2;k<=2;k++)T.box(.1,.16,.04,0x666666,k*.14,-.3,.22);
+  [-1,1].forEach(s=>{T.box(.4,.22,.4,0x2a2a2a,s*.52,.52,0);T.cone(.06,0,.22,0xa0a0a0,s*.52,.62,0,6);T.cone(.05,0,.16,0xa0a0a0,s*.64,.52,.08,6,0,s*-.9)})}
+ else if(!run&&!bl&&R()<.3)T.box(.5,.52,.22,[0x4a3a2a,0x3a4a5a,0x5a2a2a][Math.floor(R()*3)],0,.1,-.3);
+ const m=T.mesh(zombieMat);
+ return m}
 
-  // --- Голова (центр головы, локально от торса y=+0.7) ---
-  const head = grp(0, 0.7, 0.02), Hd = zBoxes(rnd), Ey = zBoxes(rnd);
-  Hd.box(0.44, 0.36, 0.44, sk, 0, 0.04, 0);
-  if (isRun) Hd.box(0.36, 0.2, 0.34, skL, 0.04, -0.22, 0.05, 0, 0, 0.12); // вывихнутая челюсть
-  else Hd.box(0.38, 0.15, 0.38, skL, 0, -0.18, 0.03);
-  Hd.box(0.46, 0.06, 0.08, skD, 0, 0.1, 0.22);                              // надбровья
-  [-1, 1].forEach(sd => { Hd.box(0.14, 0.1, 0.04, 0x1a0f0f, sd * 0.11, 0.04, 0.225); Hd.box(0.03, 0.14, 0.02, mulCol(sk, 0.6), sd * 0.19, -0.08, 0.222); }); // глазницы, вены
-  Hd.box(0.07, 0.12, 0.08, skD, 0, -0.04, 0.235);                           // нос
-  [-1, 1].forEach(sd => { if (sd === 1 && rnd() < 0.35) Hd.box(0.05, 0.1, 0.07, BLOOD, 0.245, -0.02, 0); else Hd.box(0.05, 0.12, 0.09, sk, sd * 0.245, -0.02, 0); }); // уши, одно может быть оторвано
-  Hd.box(0.26, 0.08, 0.04, 0x1a0f0f, 0, -0.17, 0.205);                      // рот
-  for (let k = 0; k < 4; k++) Hd.box(0.04, 0.05, 0.03, 0xe6dfc8, -0.09 + k * 0.06, -0.14, 0.2);
-  for (let k = 0; k < 3; k++) Hd.box(0.04, 0.04, 0.03, 0xe6dfc8, -0.06 + k * 0.06, -0.2, 0.2);
-  Hd.box(0.12, 0.16, 0.03, BLOOD, (rnd() - 0.5) * 0.1, -0.3, 0.2);          // кровь на подбородке
-  if (rnd() < 0.3) Hd.box(0.16, 0.1, 0.02, BONE, (rnd() - 0.5) * 0.2, 0.2, 0.225); // видна кость
-  Ey.box(0.1, 0.07, 0.03, eyeHex, -0.11, 0.04, 0.245); Ey.box(0.1, 0.07, 0.03, eyeHex, 0.11, 0.04, 0.245);
-  if (isBrute) { [-1, 1].forEach(sd => Hd.box(0.05, 0.14, 0.05, 0xe0d8c0, sd * 0.1, -0.22, 0.22)); Hd.box(0.04, 0.3, 0.02, 0x7a2a2a, 0.18, 0.1, 0.228); } // клыки, шрам
-  if (isBloat) { for (let k = 0; k < 3; k++) Hd.box(0.08, 0.08, 0.06, 0xd8d060, (k - 1) * 0.14, 0.18 - k * 0.04, 0.23); }       // нарывы
-  if (isSold) { // каска, ремешок, козырёк
-    Hd.box(0.52, 0.2, 0.52, 0x3f4a2c, 0, 0.27, 0); Hd.box(0.54, 0.06, 0.56, 0x343d24, 0, 0.18, 0.02); Hd.box(0.4, 0.06, 0.04, 0x14181a, 0, 0.14, 0.27);
-    [-1, 1].forEach(sd => Hd.box(0.04, 0.2, 0.04, 0x14181a, sd * 0.2, -0.06, 0.18));
-  } else {
-    const hair = pick([0x2b2118, 0x1a1a1a, 0x4a3a28, 0x6a5a3a, 0x7a7a72]), style = isRun ? 2 : Math.floor(rnd() * 4);
-    if (style === 1 || style === 2) { Hd.box(0.48, 0.1, 0.48, hair, 0, 0.25, 0); Hd.box(0.5, 0.2, 0.1, hair, 0, 0.14, -0.21); }
-    if (style === 2) { Hd.box(0.46, 0.5, 0.08, hair, 0, -0.08, -0.25); [-1, 1].forEach(sd => Hd.box(0.06, 0.4, 0.14, hair, sd * 0.25, -0.02, -0.08)); }
-    if (style === 3) { Hd.box(0.3, 0.08, 0.3, hair, (rnd() - 0.5) * 0.15, 0.25, 0); }
-    if (style === 0) { [-1, 1].forEach(sd => Hd.box(0.05, 0.1, 0.1, hair, sd * 0.24, 0.1, -0.02)); }
-  }
-  head.add(Hd.mesh(zombieMat), Ey.mesh(zombieEyeMat));
-  torso.add(head);
+// ===== РУКИ =====
+function Arm(t,c,s,R){const a=grp(s*(t==='brute'?.5:.46),.37,0),fo=grp(0,-.36,0),run=t==='runner',br=t==='brute',bl=t==='bloater',so=t==='soldier',k=run?.8:br?1.3:bl?1.15:1;
+ const A=zBoxes(R,dirt(.7,.4)),F=zBoxes(R,dirt(.7,.6)),sk=c.sk,skD=mc(sk,.7),sl=run?skD:c.sh,short=!so&&R()<.3,hand=so?0x1a1a1a:sk;
+ A.ball(.13*k,short?sk:sl,0,0,0);A.box(.2*k,.36,.2*k,short?sk:sl,0,-.18,0);
+ if(short)A.box(.22*k,.12,.22*k,sl,0,-.06,0);else A.box(.22*k,.05,.22*k,mc(c.sh,.72),0,-.34,0);
+ F.ball(.1*k,sk,0,0,0);F.box(.17*k,.36,.17*k,so?0x3a4a2c:sk,0,-.18,0);F.box(.02,.3,.02,mc(sk,.55),.09*k,-.18,.02);
+ if(so)F.box(.19,.2,.19,0x3a4a2c,0,-.1,0);
+ if(R()<.5){F.box(.19*k,.1,.19*k,BL,0,-.14,0);F.box(.04,.13,.04,BONE,.04,-.2,.08)}
+ F.box(.15*k,.13,.13*k,hand,0,-.42,0);
+ for(let i=0;i<4;i++){const x=(-.05+i*.033)*k,l=run?.2:.1;F.box(.03*k,l,.035*k,so?0x111111:skD,x,-.5-l/2+.06,.03,.35,0,0);if(run)F.cone(.02,0,.08,BONE,x,-.7,.1,5,-2.9,0)}
+ if(br){F.cyl(.14,.08,0x3a3a3a,0,-.4,0,8);F.box(.05,.16,.05,0x777777,0,-.3,.15)}
+ if(bl)F.ball(.07,0xe8f08a,.08,-.25,.08,1,1,1,.2);
+ fo.add(F.mesh(zombieMat));a.add(A.mesh(zombieMat),fo);a.fore=fo;a.rotation.x=-1.35;return a}
 
-  // --- Руки: плечо с рукавом и предплечье с кистью на локте; вращаются вокруг плеча и локтя ---
-  const arm = sd => {
-    const a = grp(sd * (0.46 * (isBrute ? 1.04 : 1)), 0.37, 0), fo = grp(0, -0.36, 0);
-    const A = zBoxes(rnd, dirt(0.7)), F = zBoxes(rnd, y => dirt(0.7)(y - 0.36)), short = !isSold && rnd() < 0.3;
-    const sleeve = isRun ? skD : shirtHex;
-    A.box(0.2 * lw, 0.36, 0.2 * lw, short ? sk : sleeve, 0, -0.18, 0);
-    if (short) A.box(0.22 * lw, 0.12, 0.22 * lw, sleeve, 0, -0.06, 0);
-    else A.box(0.22 * lw, 0.06, 0.22 * lw, shD, 0, -0.33, 0);                    // рваный край рукава
-    F.box(0.17 * lw, 0.12, 0.17 * lw, sk, 0, 0, 0);                                // локоть: скрывает стык
-    F.box(0.17 * lw, 0.36, 0.17 * lw, sk, 0, -0.18, 0);
-    if (rnd() < 0.5) { F.box(0.19 * lw, 0.12, 0.19 * lw, BLOOD, 0, -0.14, 0); F.box(0.05, 0.14, 0.05, BONE, 0.04, -0.3, 0.06); } // рана с костью
-    const hand = isSold ? 0x1a1a1a : sk, hs = isBrute ? 1.35 : 1;
-    F.box(0.15 * hs, 0.14, 0.15 * hs, hand, 0, -0.41, 0);
-    for (let k = 0; k < 3; k++) F.box(0.035 * hs, 0.12, 0.04 * hs, isSold ? 0x111111 : skD, (-0.045 + k * 0.045) * hs, -0.54, 0.03, 0.35, 0, 0);
-    if (isBrute) { F.box(0.24, 0.08, 0.24, 0x3a3a3a, 0, -0.34, 0); F.box(0.05, 0.16, 0.05, 0x555555, 0, -0.46, 0.14); } // кандалы
-    fo.add(F.mesh(zombieMat)); a.add(A.mesh(zombieMat), fo); a.fore = fo; torso.add(a); return a;
-  };
-  const armL = arm(-1), armR = arm(1);
-  g.add(torso);
+// ===== НОГИ =====
+function Leg(t,c,s,R){const l=grp(s*.17,.95,0),sh=grp(0,-.5,0),run=t==='runner',br=t==='brute',bl=t==='bloater',so=t==='soldier',k=run?.8:br?1.15:bl?1.1:1;
+ const L=zBoxes(R,dirt(.62,.5)),S=zBoxes(R,dirt(.62,.5)),sk=c.sk,pc=c.pn,sho=br||R()<.15,bare=!so&&(bl||R()<.2),sc=sho?sk:pc;
+ L.ball(.15*k,pc,0,0,0);L.box(.27*k,.5,.29*k,pc,0,-.25,0);
+ S.ball(.13*k,sc,0,0,0);S.box(.25*k,.4,.27*k,sc,0,-.2,0);
+ if(!sho){S.box(.2,.13,.02,sk,0,-.04,.14*k);S.box(.28*k,.05,.3*k,mc(pc,.7),0,-.36,0)}
+ if(so){S.box(.27,.15,.08,0x2a2e24,0,0,.16);S.box(.28,.1,.3,0x14110d,0,-.3,0)}
+ if(bare){S.box(.26*k,.08,.34,sk,0,-.42,.05);for(let i=0;i<4;i++)S.box(.05,.05,.06,mc(sk,.7),-.09+i*.06,-.43,.24)}
+ else{S.box(.28*k,.14,.38,so?0x14110d:0x1a1410,0,-.4,.05);S.box(.29*k,.04,.4,0x0e0a08,0,-.46,.05);S.box(.14,.03,.1,0x555,0,-.34,.18)}
+ sh.add(S.mesh(zombieMat));l.add(L.mesh(zombieMat),sh);l.shin=sh;return l}
 
-  // --- Ноги: бедро и голень на колене; штанины, дыры на коленях, ботинки или босые ступни ---
-  const leg = sd => {
-    const l = grp(sd * 0.17, 0.95, 0), sh = grp(0, -0.5, 0);
-    const L = zBoxes(rnd, dirt(0.62)), S2 = zBoxes(rnd, y => dirt(0.62)(y - 0.5)), shorts = isBrute || rnd() < 0.15, bare = !isSold && rnd() < 0.2;
-    L.box(0.27 * lw, 0.5, 0.29 * lw, pantsHex, 0, -0.25, 0);
-    S2.box(0.26 * lw, 0.1, 0.28 * lw, shorts ? sk : pantsHex, 0, 0, 0);          // колено: скрывает стык
-    S2.box(0.25 * lw, 0.4, 0.27 * lw, shorts ? sk : pantsHex, 0, -0.2, 0);
-    if (!shorts) { S2.box(0.2, 0.13, 0.02, sk, 0, -0.04, 0.145 * lw); S2.box(0.28 * lw, 0.06, 0.3 * lw, pnD, 0, -0.36, 0); }
-    if (isSold) S2.box(0.27, 0.15, 0.08, 0x2a2e24, 0, 0, 0.17);                    // наколенник
-    if (bare) { S2.box(0.26, 0.1, 0.34, sk, 0, -0.41, 0.04); for (let k = 0; k < 3; k++) S2.box(0.06, 0.05, 0.06, skD, -0.08 + k * 0.08, -0.43, 0.23); }
-    else { S2.box(0.28, 0.14, 0.38, isSold ? 0x14110d : 0x1a1410, 0, -0.4, 0.05); S2.box(0.29, 0.04, 0.39, 0x0e0a08, 0, -0.46, 0.05); }
-    sh.add(S2.mesh(zombieMat)); l.add(L.mesh(zombieMat), sh); l.shin = sh; g.add(l); return l;
-  };
-  const legL = leg(-1), legR = leg(1);
 
+return { Head, Torso, Arm, Leg };
+})();
+function buildZombie(type, rnd, skinHex, shirtHex, pantsHex, eyeHex) { // части собираются отдельно: ZP.Head / Torso / Arm / Leg
+  const g = new THREE.Group(); g.rotation.order = 'YXZ'; // наклон при падении считается относительно направления взгляда
+  const c = { sk: skinHex, sh: shirtHex, pn: pantsHex, eye: eyeHex };
+  const torso = new THREE.Group(); torso.position.set(0, 1.45, 0); torso.add(ZP.Torso(type, c, rnd));
+  const head = new THREE.Group(); head.position.set(0, 0.7, 0.02); ZP.Head(type, c, rnd).forEach(m => head.add(m)); torso.add(head);
+  const armL = ZP.Arm(type, c, -1, rnd), armR = ZP.Arm(type, c, 1, rnd); torso.add(armL, armR); g.add(torso);
+  const legL = ZP.Leg(type, c, -1, rnd), legR = ZP.Leg(type, c, 1, rnd); g.add(legL, legR);
   const parts = { body: torso, head, headY: 0.7, armL, armR, legL, legR };
-  armL.rotation.x = armR.rotation.x = -1.35;
-  if (isBloat) { // раздутый живот и светящиеся волдыри
+  if (type === 'bloater') { // раздутый живот и светящиеся волдыри
     const belly = new THREE.Mesh(bellyGeo, bellyMat);
     belly.position.set(0, 1.25, 0.1); belly.scale.set(1.2, 1, 0.9); g.add(belly); parts.belly = belly;
     const G = zBoxes(rnd);
@@ -1134,6 +1143,12 @@ let hasAxe = false, swingT = -1, swingHitDone = false; // топор
 // Автомат Калашникова (АК-47)
 const AK_MAG = 30;                          // патронов в магазине
 let hasAK = false, akAmmo = AK_MAG, akReserve = 0, akRecoil = 0, akFlashT = 0, mouseDown = false;
+// Охотничья винтовка и мачете (1.13.0, часть 2)
+const RF_MAG = 5;                                                                    // патронов в магазине винтовки
+let hasRifle = false, rfAmmo = RF_MAG, rfReserve = 0, rfRecoil = 0, rfFlashT = 0;
+let rfReloading = false, rfRT = 0, rfLoaded = false, rfCycleT = -1, rfCased = false; // перезарядка и ход затвора после выстрела
+let rfAim = 0, aiming = false, fovZoomed = false;                                    // оптика: правая кнопка мыши
+let hasMachete = false;
 let akReloading = false, akRT = 0, akLoaded = false;
 const sgLastLh = new THREE.Vector3();
 const casings = [];                        // вылетевшие гильзы
@@ -1239,6 +1254,51 @@ function makeIcons() {
     f('#c9ced4', 3, 5, 1, 3); f('#c9ced4', 12, 5, 1, 3);
     f('#111111', 1, 3, 2, 4); f('#111111', 13, 3, 2, 4); f('#444444', 7, 6, 2, 3);
   });
+  out.wall = mk(f => { // бревенчатая стена
+    f('#4e3825', 1, 1, 2, 14); f('#4e3825', 13, 1, 2, 14);
+    for (let r = 0; r < 6; r++) { f(['#8b6b3e', '#94744a', '#7f6036'][r % 3], 3, 2 + r * 2, 10, 1); f('#5e4528', 3, 3 + r * 2, 10, 1); }
+    [3, 12].forEach(y => [2, 13].forEach(x => f('#d0d4d8', x, y)));
+  });
+  out.door = mk(f => { // дверь в раме
+    f('#4e3825', 3, 1, 10, 14); f('#7a5c34', 4, 3, 8, 12); f('#5e4528', 6, 3, 1, 12); f('#5e4528', 9, 3, 1, 12);
+    f('#4e3825', 4, 5, 8, 1); f('#4e3825', 4, 11, 8, 1); f('#c9ced4', 10, 8, 1, 2); f('#2f3236', 4, 4, 2, 1); f('#2f3236', 4, 12, 2, 1);
+  });
+  out.gate = mk(f => { // двойные ворота
+    f('#4e3825', 0, 1, 16, 2); f('#4e3825', 0, 3, 2, 12); f('#4e3825', 14, 3, 2, 12);
+    f('#7a5c34', 2, 4, 6, 11); f('#8b6b3e', 8, 4, 6, 11); f('#2f3236', 7, 4, 2, 11);
+    f('#6f757c', 2, 6, 6, 1); f('#6f757c', 8, 6, 6, 1); f('#6f757c', 2, 12, 6, 1); f('#6f757c', 8, 12, 6, 1); f('#c9ced4', 6, 9, 1, 2); f('#c9ced4', 9, 9, 1, 2);
+  });
+  out.roof = mk(f => { // настил: крыша или пол
+    for (let y = 3; y < 13; y++) { const ins = Math.floor((12 - y) * 0.45); for (let x = ins; x < 16 - ins; x++) f(((x >> 1) + (y >> 2)) % 2 ? '#8b6b3e' : '#7a5c34', x, y); }
+    f('#4e3825', 0, 13, 16, 2); f('#5e4528', 1, 12, 14, 1);
+  });
+  out.stairs = mk(f => { // лестница из ступеней
+    for (let i = 0; i < 5; i++) { const x = 1 + i * 3, top = 12 - i * 2; f('#a07a46', x, top, 3, 1); f('#6b4f2e', x, top + 1, 3, 14 - top); }
+    f('#4e3825', 1, 14, 15, 1);
+  });
+  out.fire = mk(f => { // костёр
+    f('#3a2412', 2, 13, 12, 2); f('#5a3a1c', 3, 12, 10, 1); [1, 4, 8, 12].forEach(x => f('#6e6e6a', x, 14, 3, 2));
+    f('#d83a10', 5, 9, 6, 4); f('#ff7a1a', 6, 6, 4, 6); f('#ffd23a', 7, 4, 2, 8); f('#fff1a0', 7, 8, 2, 3);
+  });
+  out.bed = mk(f => { // кровать
+    f('#6b4f2e', 1, 5, 2, 9); f('#6b4f2e', 1, 12, 14, 2); f('#6b4f2e', 14, 8, 1, 6);
+    f('#d8d4c8', 3, 9, 11, 3); f('#f0eee6', 3, 7, 4, 3); f('#4a5a3a', 8, 8, 6, 4); f('#7a8a5a', 10, 8, 1, 4);
+  });
+  out.ammo = mk(f => { // три латунные гильзы с медными пулями
+    [2, 6, 10].forEach(x => { f('#b87333', x, 3, 3, 1); f('#d08a4a', x, 4, 3, 2); f('#c9a227', x, 6, 3, 7); f('#e6c24a', x, 6, 1, 7); f('#8a6a18', x, 13, 3, 1); });
+  });
+  out.axe = mk(f => { // топор: рукоять и клин
+    for (let k = 0; k < 10; k++) { f('#7a4a24', 2 + k, 14 - k, 2, 1); f('#a56a35', 3 + k, 13 - k, 1, 1); }
+    f('#b4bbc3', 8, 2, 5, 5); f('#e8ecef', 12, 3, 1, 4); f('#6f757c', 8, 6, 5, 1); f('#8a9097', 9, 2, 1, 4);
+  });
+  out.machete = mk(f => { // мачете: длинный клинок и обмотанная рукоять
+    for (let k = 0; k < 11; k++) { f('#c9ced4', 4 + k, 10 - k, 2, 1); f('#eef1f4', 5 + k, 9 - k, 1, 1); f('#7d848c', 4 + k, 11 - k, 1, 1); }
+    f('#4a3220', 1, 13, 3, 2); f('#6a4a2a', 2, 12, 2, 1); f('#2b2b2b', 3, 11, 2, 1);
+  });
+  out.bike = mk(f => { // мотоцикл: два колеса, рама, бак, руль
+    [4, 12].forEach(cx => { for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) { const r = Math.hypot(x - cx, y - 11); if (r <= 3.6 && r > 2.2) f('#1c1c1c', x, y); else if (r <= 2.2 && r > 0.8) f('#9aa0a6', x, y); } });
+    f('#8f2b21', 5, 6, 5, 2); f('#c2493a', 5, 6, 4, 1); f('#55595e', 4, 9, 8, 1); f('#c9ced4', 10, 4, 3, 1); f('#111111', 12, 3, 2, 1); f('#55595e', 11, 5, 1, 5);
+  });
   return out;
 }
 const ICONS = makeIcons();
@@ -1304,7 +1364,7 @@ function useSlot(i) {
 function slotHtml(i, picked, clickable) {
   const s = slots[i], def = s && ITEMS[s.type];
   const border = picked ? '#c8e07a' : (i < HOTBAR ? '#8a9a5a' : '#4a5a3a');
-  return `<div ${clickable ? `data-slot="${i}"` : ''} title="${def ? def.name : ''}" style="position:relative;width:56px;height:56px;box-sizing:border-box;border:2px solid ${border};background:${picked ? '#3d4a2a' : 'rgba(20,26,18,.85)'};border-radius:6px;cursor:${clickable ? 'pointer' : 'default'};flex:none">` +
+  return `<div ${clickable ? `data-slot="${i}"` : ''} title="${def ? def.name : ''}" style="position:relative;width:56px;height:56px;box-sizing:border-box;border:2px solid ${border};background:${picked ? 'linear-gradient(#4a5d30,#33411f)' : 'linear-gradient(rgba(38,46,34,.92),rgba(18,23,16,.92))'};box-shadow:inset 0 0 8px rgba(0,0,0,.55);border-radius:10px;cursor:${clickable ? 'pointer' : 'default'};flex:none">` +
     (i < HOTBAR ? `<div style="position:absolute;left:4px;top:1px;font-size:12px;opacity:.8">${i + 1}</div>` : '') +
     (s ? `<img src="${ICONS[s.type]}" style="position:absolute;left:50%;top:44%;width:34px;height:34px;transform:translate(-50%,-50%);image-rendering:pixelated">` +
          `<div style="position:absolute;right:4px;top:1px;font-size:14px">${s.n > 1 ? s.n : ''}</div>` +
@@ -1790,6 +1850,48 @@ const AK_F = new THREE.Vector3(0, 0, -0.33);     // левая рука на ц�
 const AK_M = new THREE.Vector3(0, -0.1, -0.04);  // левая рука у магазина
 const AK_B = new THREE.Vector3(-0.28, -0.5, 0.2);// за кадром: берёт новый магазин
 camera.add(axeRig);
+
+// Охотничья винтовка: руки, вспышка, свет. Подвижные части: затвор (bolt) и левая рука (leftHand)
+const WM = createWeaponModels({ THREE, zBoxes, mulberry }); // models/weapons.js
+const rifle = WM.createRifle();
+const rifleRig = rifle.root;
+rifleRig.position.set(0.2, -0.27, -0.45);
+rifleRig.rotation.y = 0.12;
+rifleRig.visible = false;
+camera.add(rifleRig);
+const rfFlashMat = new THREE.MeshBasicMaterial({ color: 0xffe0a0 });
+const rfFlashG = new THREE.Group();
+rfFlashG.add(new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.07, 0.04), rfFlashMat));
+const rfFa = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.016, 0.016), rfFlashMat);
+const rfFb = rfFa.clone(); rfFb.rotation.z = Math.PI / 2;
+rfFlashG.add(rfFa, rfFb); rfFlashG.visible = false;
+rifle.muzzle.add(rfFlashG);
+const rfLight = new THREE.PointLight(0xffb060, 0, 5, 2);
+rifle.muzzle.add(rfLight);
+const RF_F = new THREE.Vector3(0, -0.01, 0.40);      // левая рука на цевье (оси модели: ствол в +Z)
+const RF_PORT = new THREE.Vector3(-0.015, 0.075, 0.1); // левая рука над открытым затвором: досылает патроны
+const rfCaseGeo = new THREE.CylinderGeometry(0.0065, 0.0065, 0.05, 6); rfCaseGeo.rotateX(Math.PI / 2);
+const rfCaseMat = new THREE.MeshStandardMaterial({ color: 0xc8a040, roughness: 0.35, metalness: 0.8, flatShading: true });
+[rfCaseGeo, rfCaseMat].forEach(o => { o.userData.shared = true; });
+function ejectRifleCasing() { // гильза вылетает вправо при отведении затвора
+  const m = new THREE.Mesh(rfCaseGeo, rfCaseMat); scene.add(m);
+  const wp = new THREE.Vector3(); rifle.bolt.getWorldPosition(wp); m.position.copy(wp);
+  const q = new THREE.Quaternion(); rifleRig.getWorldQuaternion(q);
+  const v = new THREE.Vector3(1.7 + Math.random() * 0.6, 1.5 + Math.random() * 0.5, 0.3 + Math.random() * 0.5).applyQuaternion(q);
+  casings.push({ m, v, spin: new THREE.Vector3(Math.random() * 12, Math.random() * 12, Math.random() * 12), life: 4 });
+}
+// Оптика: тёмная рамка с перекрестием, проявляется при приближении
+const scopeEl = document.createElement('div');
+scopeEl.style.cssText = 'position:fixed;inset:0;pointer-events:none;opacity:0;z-index:4;background:radial-gradient(circle at 50% 50%,rgba(0,0,0,0) 0,rgba(0,0,0,0) 27vmin,rgba(0,0,0,.55) 27.6vmin,#000 29vmin)';
+scopeEl.innerHTML = '<div style="position:absolute;left:50%;top:50%;width:54vmin;height:1px;margin:0 0 0 -27vmin;background:rgba(0,0,0,.75)"></div><div style="position:absolute;left:50%;top:50%;width:1px;height:54vmin;margin:-27vmin 0 0 0;background:rgba(0,0,0,.75)"></div><div style="position:absolute;left:50%;top:50%;width:4px;height:4px;margin:-2px 0 0 -2px;border-radius:50%;background:#e03020"></div>';
+document.body.appendChild(scopeEl);
+// Мачете в руке
+const machete = WM.createMachete();
+const macheteRig = machete.root;
+macheteRig.position.set(0.28, -0.4, -0.5);
+macheteRig.rotation.set(-0.5, 0, 0.3);
+macheteRig.visible = false;
+camera.add(macheteRig);
 
 // Дробовик в руках (камера), показывается только после находки в ящике
 const sg = createShotgun();
@@ -3739,7 +3841,7 @@ function updatePrompt() {
     promptEl.textContent = '[E] Верстак: делать детали и собирать мотоцикл';
     promptEl.style.display = 'block';
   } else if (lookedCase) {
-    promptEl.textContent = lookedCase.state === 'closed' ? '[E] Открыть военный ящик' : lookedCase.kind === 'ak' ? '[E] Взять: автомат Калашникова + 30 патронов (+90 в запас)' : '[E] Взять: дробовик (5 патронов) + 20 патронов в запас';
+    promptEl.textContent = lookedCase.state === 'closed' ? '[E] Открыть военный ящик' : lookedCase.kind === 'ak' ? '[E] Взять: автомат Калашникова + 30 патронов (+90 в запас)' : lookedCase.kind === 'rifle' ? '[E] Взять: охотничья винтовка (5 патронов) + 15 в запас' : '[E] Взять: дробовик (5 патронов) + 20 патронов в запас';
     promptEl.style.display = 'block';
   } else if (lookedItem) {
     promptEl.textContent = '[E] Взять: ' + ITEMS[lookedItem.type].name;
@@ -3787,9 +3889,9 @@ function spawnCase(x, z, rotY, stash, kind) {
   const mc = createMilCase();
   mc.root.position.set(x, 0, z);
   mc.root.rotation.y = rotY;
-  const lootGun = kind === 'ak' ? createAK({ hands: false }) : createShotgun({ hands: false });
-  lootGun.root.rotation.y = Math.PI / 2;
-  lootGun.root.position.set(0.05, kind === 'ak' ? 0.16 : 0.14, -0.05);
+  const lootGun = kind === 'ak' ? createAK({ hands: false }) : kind === 'rifle' ? WM.createRifle({ hands: false, world: true }) : createShotgun({ hands: false });
+  lootGun.root.rotation.y = kind === 'rifle' ? -Math.PI / 2 : Math.PI / 2; // ствол вдоль ящика в -X
+  lootGun.root.position.set(0.05, kind === 'ak' ? 0.16 : kind === 'rifle' ? 0.1 : 0.14, -0.05);
   if (kind === 'ak') { // магазины лежат рядом с автоматом
     lootGun.mag.visible = false;
     [0.1, 0.22].forEach(oz => { const mg = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.045, 0.075), new THREE.MeshStandardMaterial({ color: 0x2a2d30, roughness: 0.5, metalness: 0.7, flatShading: true })); mg.position.set(0.45, 0.04, oz); mc.loot.add(mg); });
@@ -3812,12 +3914,18 @@ function caseInteract(c) {
         weapon = 'ak'; drawT = 0; heldSlot = -1;
         notify('Получен автомат Калашникова: 30 в магазине + 90 в запас. ЛКМ зажать - очередь, [Q] - сменить оружие');
       } else { akReserve += 120; notify('+120 патронов для АК'); }
+    } else if (c.kind === 'rifle') {
+      if (!hasRifle) {
+        hasRifle = true; rfAmmo = RF_MAG; rfReserve += 15;
+        weapon = 'rifle'; drawT = 0; heldSlot = -1;
+        notify('Получена охотничья винтовка: 5 в магазине + 15 в запас. ПКМ - оптика, R - перезарядка, [Q] - сменить оружие');
+      } else { rfReserve += 15; notify('+15 патронов для винтовки'); }
     } else if (!hasShotgun) {
       hasShotgun = true; sgAmmo = SG_MAG; sgReserve += 20;
       weapon = 'shotgun'; drawT = 0; heldSlot = -1;
       notify('Получен дробовик: 5 патронов в магазине + 20 в запас. [Q] - сменить оружие');
     } else { sgReserve += SG_MAG + 20; notify('+25 патронов для дробовика'); }
-    if (!c.stash) spawnCase(); // где-то на карте появится новый ящик
+    if (!c.stash) spawnCase(undefined, undefined, undefined, undefined, c.kind === 'rifle' ? 'rifle' : undefined); // где-то на карте появится новый ящик
   }
 }
 function updateCases(dt) {
@@ -3843,9 +3951,10 @@ function updateCases(dt) {
 }
 
 // Патроны на земле
+const itemModels = createItemModels({ THREE, zBoxes, mulberry, mulCol, m4, m4mul }); // models/items.js (1.13.0)
 const ammoBoxes = [];
 function spawnAmmoBox(x, z, stash, y) {
-  const m = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.3, 0.35), new THREE.MeshStandardMaterial({ color: 0xd4a017 }));
+  const m = itemModels.ammo();
   const [rx, rz] = x === undefined ? randomFreeSpot(200) : [0, 0];
   const px = x ?? rx, pz = z ?? rz;
   m.position.set(px, 0.15 + (y || 0), pz);
@@ -3857,71 +3966,16 @@ for (let i = 0; i < 15; i++) spawnAmmoBox();
 
 // Предметы на земле: консервы (еда), бутылки (вода), аптечка с красным крестом
 const items = [];
-function makeItemModel(type) {
-  const g = new THREE.Group();
-  const mat = (c, r, m, extra) => new THREE.MeshStandardMaterial(Object.assign({ color: c, roughness: r, metalness: m, flatShading: true }, extra || {}));
-  const add = (geo, m, x, y, z) => { const o = new THREE.Mesh(geo, m); o.position.set(x, y, z); g.add(o); return o; };
-  const cyl = (rt, rb, h, seg) => new THREE.CylinderGeometry(rt, rb, h, seg || 10);
-  const box = (w, h, d) => new THREE.BoxGeometry(w, h, d);
-  if (type === 'medkit') {
-    const red = mat(0xd63030, 0.6, 0), white = mat(0xf2f2f2, 0.6, 0), dark = mat(0x2b2b2b, 0.8, 0.2);
-    add(box(0.42, 0.26, 0.3), white, 0, 0.13, 0);
-    add(box(0.44, 0.03, 0.32), mat(0xd0d0d0, 0.6, 0), 0, 0.17, 0);      // шов крышки
-    add(box(0.16, 0.012, 0.05), red, 0, 0.266, 0); add(box(0.05, 0.012, 0.16), red, 0, 0.266, 0); // крест сверху
-    add(box(0.16, 0.05, 0.012), red, 0, 0.13, 0.151); add(box(0.05, 0.16, 0.012), red, 0, 0.13, 0.151); // крест спереди
-    add(box(0.16, 0.03, 0.03), dark, 0, 0.29, 0);                           // ручка
-    add(box(0.03, 0.05, 0.03), dark, -0.075, 0.275, 0); add(box(0.03, 0.05, 0.03), dark, 0.075, 0.275, 0);
-    [-1, 1].forEach(s => add(box(0.03, 0.06, 0.02), mat(0x8a8f96, 0.4, 0.7), s * 0.17, 0.18, 0.155)); // замки
-  } else if (type === 'food') {
-    const can = (x, z, label, lying) => {
-      const c = new THREE.Group();
-      const add2 = (geo, m, y) => { const o = new THREE.Mesh(geo, m); o.position.y = y; c.add(o); };
-      add2(cyl(0.085, 0.085, 0.13), mat(0xb9bec4, 0.4, 0.7), 0.065);
-      add2(cyl(0.0875, 0.0875, 0.075), mat(label, 0.8, 0), 0.065);
-      add2(cyl(0.09, 0.09, 0.012), mat(0xe2e6ea, 0.35, 0.8), 0.134);
-      add2(cyl(0.09, 0.09, 0.012), mat(0x8a9097, 0.4, 0.7), 0.006);
-      if (lying) { c.rotation.z = Math.PI / 2; c.position.set(x, 0.085, z); c.rotation.y = 0.5; }
-      else c.position.set(x, 0, z);
-      g.add(c);
-    };
-    can(-0.1, 0, 0xc2552a, false); can(0.12, 0.04, 0x6b8f3a, false); can(0.0, -0.17, 0xc9a227, true);
-  } else if (type === 'water') {
-    const bottle = (x, z, lying) => {
-      const b = new THREE.Group();
-      const water = mat(0x5fb0ec, 0.25, 0, { transparent: true, opacity: 0.82 });
-      const add2 = (geo, m, y) => { const o = new THREE.Mesh(geo, m); o.position.y = y; b.add(o); };
-      add2(cyl(0.07, 0.07, 0.22), water, 0.11);
-      add2(cyl(0.035, 0.07, 0.06), water, 0.25);       // плечи
-      add2(cyl(0.032, 0.032, 0.04), water, 0.30);      // горлышко
-      add2(cyl(0.036, 0.036, 0.035), mat(0x1f5f9e, 0.6, 0), 0.337); // крышка
-      add2(cyl(0.0715, 0.0715, 0.07), mat(0xf4f4f4, 0.7, 0), 0.11); // этикетка
-      add2(cyl(0.0722, 0.0722, 0.018), mat(0x2f7fc4, 0.7, 0), 0.11);
-      if (lying) { b.rotation.z = Math.PI / 2; b.position.set(x, 0.07, z); b.rotation.y = 0.4; }
-      else b.position.set(x, 0, z);
-      g.add(b);
-    };
-    bottle(-0.08, 0, false); bottle(0.04, 0.2, true);
-  } else if (type === 'fuel') { // канистра с бензином
-    const red = mat(0xa83222, 0.55, 0.15), dark = mat(0x5a1a12, 0.7, 0.1), yellow = mat(0xe0b020, 0.5, 0.2);
-    add(box(0.32, 0.42, 0.15), red, 0, 0.21, 0);
-    add(box(0.34, 0.03, 0.17), dark, 0, 0.05, 0); add(box(0.34, 0.03, 0.17), dark, 0, 0.37, 0);
-    add(box(0.14, 0.06, 0.05), dark, -0.06, 0.45, 0);
-    add(box(0.04, 0.1, 0.04), dark, -0.12, 0.43, 0); add(box(0.04, 0.1, 0.04), dark, 0.0, 0.43, 0);
-    add(cyl(0.025, 0.025, 0.06, 8), yellow, 0.1, 0.45, 0);
-    add(box(0.18, 0.12, 0.012), mat(0xe8e0c8, 0.8, 0), 0, 0.2, 0.082);
-    add(box(0.05, 0.05, 0.014), dark, 0, 0.2, 0.084);
-  }
-  return g;
-}
+function makeItemModel(type, seed) { return itemModels.item(type, seed || 0) || new THREE.Group(); } // seed выбирает вариант модели; из Math.random не берём: мир создаётся тем же рядом чисел
 function randomFreeSpot(span) { // случайное место вне стен (после старта; при создании мира порядок случайных чисел не трогаем)
   let px = (Math.random() - 0.5) * span, pz = (Math.random() - 0.5) * span;
   if (initDone) for (let t = 0; t < 25 && colliders.some(c => c.bottom === undefined && px > c.minX - 0.6 && px < c.maxX + 0.6 && pz > c.minZ - 0.6 && pz < c.maxZ + 0.6); t++) { px = (Math.random() - 0.5) * span; pz = (Math.random() - 0.5) * span; }
   return [px, pz];
 }
 function spawnItem(type, x, z, stash, y) {
-  const m = makeItemModel(type);
   const [rx, rz] = x === undefined ? randomFreeSpot(200) : [0, 0];
   const px = x ?? rx, pz = z ?? rz;
+  const m = makeItemModel(type, h01(px, pz, type.length * 7 + 3)); // вариант по координатам
   m.position.set(px, y || 0, pz);
   m.rotation.y = Math.random() * Math.PI * 2;
   scene.add(m);
@@ -3940,11 +3994,11 @@ const handArm = (() => { // рука в рукаве, держит предме�
 const handModels = {};
 function handModel(type) { // модель для руки: одна банка, одна бутылка, целая аптечка или канистра
   if (handModels[type]) return handModels[type];
-  const src = makeItemModel(type); let g, dur, use;
-  if (type === 'food') { g = new THREE.Group(); const c = src.children[1]; c.position.set(0, -0.065, 0); g.add(c); g.scale.setScalar(1.25); dur = 1.6; use = { pos: [-0.2, 0.2, 0.2], rot: [-0.9, 0, 0] }; }
-  else if (type === 'water') { g = new THREE.Group(); const b = src.children[0]; b.position.set(0, -0.14, 0); g.add(b); g.scale.setScalar(1.1); dur = 1.9; use = { pos: [-0.2, 0.2, 0.2], rot: [1.45, 0, -0.15] }; }
-  else if (type === 'medkit') { g = new THREE.Group(); src.position.set(0, -0.12, 0); g.add(src); g.scale.setScalar(0.85); dur = 2.3; use = { pos: [-0.22, 0.12, 0.16], rot: [-0.35, 0.5, 0.15] }; }
-  else { g = new THREE.Group(); src.position.set(0, -0.2, 0); g.add(src); g.scale.setScalar(0.8); dur = 0.8; use = { pos: [0, 0.04, 0.04], rot: [0, 0, 0] }; }
+  const src = itemModels.held(type) || makeItemModel(type); let g, dur, use;
+  if (type === 'food') { g = new THREE.Group(); src.position.set(0, -0.06, 0); g.add(src); g.scale.setScalar(1.25); dur = 1.6; use = { pos: [-0.2, 0.2, 0.2], rot: [-0.9, 0, 0] }; }
+  else if (type === 'water') { g = new THREE.Group(); src.position.set(0, -0.14, 0); g.add(src); g.scale.setScalar(1.1); dur = 1.9; use = { pos: [-0.2, 0.2, 0.2], rot: [1.45, 0, -0.15] }; }
+  else if (type === 'medkit') { g = new THREE.Group(); src.position.set(0, -0.15, 0); g.add(src); g.scale.setScalar(0.85); dur = 2.3; use = { pos: [-0.22, 0.12, 0.16], rot: [-0.35, 0.5, 0.15] }; }
+  else { g = new THREE.Group(); src.position.set(0, -0.3, 0); g.add(src); g.scale.setScalar(0.8); dur = 0.8; use = { pos: [0, 0.04, 0.04], rot: [0, 0, 0] }; }
   return (handModels[type] = { g, dur, use });
 }
 function holdSlot(i) { // клавиши 1-5: взять предмет из быстрого слота в руку, ещё раз - убрать
@@ -3996,7 +4050,7 @@ function pickItem(it) {
   notify('Взято: ' + ITEMS[type].name + (ITEMS[type].use ? ' (клавиши 1-5: взять в руку)' : ''));
 }
 function pickAmmo(box) {
-  reserve += 14; if (hasShotgun) sgReserve += 4; if (hasAK) akReserve += 15;
+  reserve += 14; if (hasShotgun) sgReserve += 4; if (hasAK) akReserve += 15; if (hasRifle) rfReserve += 5;
   const stashBox = box.userData.stash; scene.remove(box); const k = ammoBoxes.indexOf(box); if (k >= 0) ammoBoxes.splice(k, 1);
   if (!stashBox) spawnAmmoBox();
   notify('Взяты патроны');
@@ -4020,8 +4074,8 @@ for (const h of housePositions) {
 }
 
 // Военные ящики: по одному в первых трёх домах и ещё три снаружи
-housePositions.slice(0, 3).forEach(h => spawnCase(h.x, h.z - 3.3, 0));
-for (let i = 0; i < 3; i++) spawnCase();
+housePositions.slice(0, 3).forEach((h, i) => spawnCase(h.x, h.z - 3.3, 0, undefined, i === 1 ? 'rifle' : undefined));
+for (let i = 0; i < 3; i++) spawnCase(undefined, undefined, undefined, undefined, i === 2 ? 'rifle' : undefined);
 stockWarehouses();
 
 // HUD
@@ -4117,7 +4171,45 @@ const pieces = {
   bench: { name: 'Верстак', cost: 6, color: 0x8b6b3e },
   bed: { name: 'Кровать', cost: 6, color: 0x8b6b3e },
 };
-const pieceKeys = ['wall', 'door', 'gate', 'roof', 'stairs', 'fire', 'bench', 'bed'];
+const pieceKeys = ['wall', 'door', 'gate', 'roof', 'stairs', 'fire', 'bed']; // верстак убран из меню (старые в сохранениях остаются)
+const PIECE_DESC = { wall: 'Бревенчатая стена 2 x 3 м', door: 'Открывается на E', gate: 'Двойные ворота шириной 4 м', roof: 'Крыша или пол второго этажа', stairs: 'Подъём на второй этаж', fire: 'Свет, тепло, лечит рядом', bed: 'Сон с 19:30 до 05:30' };
+const woodTex = (() => { // доски: волокна, сучки, шероховатость (бесшовная)
+  const S = 128, c = document.createElement('canvas'); c.width = c.height = S;
+  const x = c.getContext('2d'), id = x.createImageData(S, S);
+  const h = (a, b) => { const s = Math.sin(a * 127.1 + b * 311.7) * 43758.5453; return s - Math.floor(s); };
+  const sm = (u, v, w) => { const iu = Math.floor(u), iv = Math.floor(v), fu = u - iu, fv = v - iv, g = (i, j) => h(((i % w) + w) % w, ((j % w) + w) % w);
+    const a = g(iu, iv), b = g(iu + 1, iv), c2 = g(iu, iv + 1), d = g(iu + 1, iv + 1), su = fu * fu * (3 - 2 * fu), sv = fv * fv * (3 - 2 * fv);
+    return a + (b - a) * su + (c2 - a) * sv + (a - b - c2 + d) * su * sv; };
+  for (let j = 0; j < S; j++) for (let i = 0; i < S; i++) {
+    const streak = sm(i / 64, j / 2, 2) * 0.55 + sm(i / 32, j / 6, 4) * 0.45, speck = sm(i / 2, j / 2, 64);
+    const v = Math.max(0.4, Math.min(1, 0.76 + streak * 0.2 + (speck - 0.5) * 0.1 - (Math.sin(j * 0.8 + streak * 6) > 0.8 ? 0.07 : 0))) * 255, k = (j * S + i) * 4;
+    id.data[k] = id.data[k + 1] = id.data[k + 2] = v; id.data[k + 3] = 255;
+  }
+  x.putImageData(id, 0, 0);
+  [[30, 40], [96, 90], [60, 112]].forEach(([kx, ky]) => { for (let r = 2; r < 9; r += 2) { x.strokeStyle = `rgba(55,32,14,${0.5 - r * 0.04})`; x.beginPath(); x.ellipse(kx, ky, r * 1.8, r * 0.8, 0, 0, Math.PI * 2); x.stroke(); } });
+  const t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4; return t;
+})();
+const woodMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.93, flatShading: true, map: woodTex, bumpMap: woodTex, bumpScale: 1.4 });
+const ironMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.45, metalness: 0.7, flatShading: true });
+const WOODS = [0x8b6b3e, 0x7f6036, 0x94744a, 0x86663a, 0x73562f], WOOD_D = 0x4e3825, IRON = 0x33373b;
+const pieceGroup = (W, I) => { const g = new THREE.Group(); g.add(W.mesh(woodMat)); if (I) g.add(I.mesh(ironMat)); return g; };
+const finishPiece = g => { g.traverse(o => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } }); return g; };
+function makeWall(rnd) { // стена: каркас, 10 досок разного тона, раскосы с двух сторон, гвозди
+  const W = zBoxes(rnd), I = zBoxes(rnd), tone = () => WOODS[Math.floor(rnd() * WOODS.length)];
+  [-0.89, 0.89].forEach(x => W.box(0.22, 3, 0.3, 0x5e4528, x, 1.5, 0));
+  W.box(2, 0.16, 0.3, WOOD_D, 0, 0.08, 0); W.box(2, 0.16, 0.3, WOOD_D, 0, 2.92, 0);
+  for (let i = 0; i < 10; i++) W.box(1.6 + (rnd() - 0.5) * 0.03, 0.255, 0.2 + (rnd() - 0.5) * 0.03, tone(), 0, 0.16 + 0.134 + i * 0.268, (rnd() - 0.5) * 0.02);
+  const ang = Math.atan2(2.6, 1.6);
+  [-1, 1].forEach(s => { W.box(3.05, 0.12, 0.06, 0x6a4e2c, 0, 1.5, s * 0.13, 0, 0, s * ang); [-0.89, 0.89].forEach(x => [0.5, 1.5, 2.5].forEach(y => I.box(0.05, 0.05, 0.03, IRON, x, y, s * 0.152))); });
+  return finishPiece(pieceGroup(W, I));
+}
+function makeRoof(rnd) { // настил: балки снизу, 8 досок, шляпки гвоздей
+  const W = zBoxes(rnd), I = zBoxes(rnd), tone = () => WOODS[Math.floor(rnd() * WOODS.length)];
+  [-0.8, 0, 0.8].forEach(z => W.box(2, 0.12, 0.16, WOOD_D, 0, 3.0, z));
+  for (let i = 0; i < 8; i++) { const x = -0.875 + i * 0.25; W.box(0.235, 0.12, 1.98 - rnd() * 0.02, tone(), x, 3.14, 0); [-0.8, 0, 0.8].forEach(z => I.box(0.04, 0.02, 0.04, IRON, x, 3.205, z)); }
+  return finishPiece(pieceGroup(W, I));
+}
+
 const floors = [];        // поверхности, по которым можно ходить: крыши-полы и ступени лестниц
 let fallV = 0, sleeping = false;
 const MAX_BENCHES = 2;
@@ -4140,6 +4232,8 @@ const ghost = new THREE.Mesh(
   new THREE.MeshBasicMaterial({ color: 0x44ff44, transparent: true, opacity: 0.4 })
 );
 ghost.visible = false;
+ghost.userData.edges = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1)), new THREE.LineBasicMaterial({ color: 0xaaffaa })); // яркий контур
+ghost.add(ghost.userData.edges);
 scene.add(ghost);
 
 // Размеры детали: ширина, высота, глубина, высота центра
@@ -4189,22 +4283,26 @@ function placePieceAt(type, rotv, x, z, free) {
   if (!free && type === 'bench' && built.filter(b => b.type === 'bench').length >= MAX_BENCHES) return notify('Верстаков не больше 2');
   if (!free && !adm('freeBuild')) takeItem('wood', p.cost);
 
-  const invisible = ['fire', 'bench', 'door', 'gate', 'bed', 'stairs'].includes(type); // у них своя модель, а коробка нужна для прицела (V)
+  const invisible = ['fire', 'bench', 'door', 'gate', 'bed', 'stairs', 'wall', 'roof'].includes(type); // у них своя модель, а коробка нужна для прицела (V)
   const mat = invisible
     ? new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false })
     : new THREE.MeshStandardMaterial({ color: p.color });
   const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
   mesh.position.set(x, y, z);
   scene.add(mesh);
+  const rr = mulberry((Math.round(x * 31) * 73856093) ^ (Math.round(z * 31) * 19349663)); // постоянный облик детали в своей клетке
 
   const b = { key, type: type, mesh, collider: null, light: null, colliders: [], open: false, ang: 0, px: x, pz: z, prot: rotv };
   const addCol = (c, top) => { c.top = top; colliders.push(c); b.colliders.push(c); return c; };
   if (type === 'wall') {
+    b.vis = makeWall(rr); b.vis.position.set(x, 0, z); b.vis.rotation.y = a === 0 ? 0 : Math.PI / 2; scene.add(b.vis);
     b.collider = { minX: x - w / 2, maxX: x + w / 2, minZ: z - d / 2, maxZ: z + d / 2, top: 3.0 };
     colliders.push(b.collider);
     blockers.push(mesh);
   }
-  if (type === 'roof') { // крышу можно использовать как пол второго этажа
+  if (type === 'roof') {
+    b.vis = makeRoof(rr); b.vis.position.set(x, 0, z); scene.add(b.vis);
+    // крышу можно использовать как пол второго этажа
     blockers.push(mesh);
     b.floor = { minX: x - 1, maxX: x + 1, minZ: z - 1, maxZ: z + 1, y: 3.2 };
     floors.push(b.floor);
@@ -4222,14 +4320,14 @@ function placePieceAt(type, rotv, x, z, free) {
     b.vis = makeWorkbench(); b.vis.position.set(x, 0, z); b.vis.rotation.y = a === 0 ? 0 : Math.PI / 2; scene.add(b.vis);
   }
   if (type === 'door') {
-    b.vis = makeDoor(); b.vis.position.set(x, 0, z); b.vis.rotation.y = a === 0 ? 0 : Math.PI / 2; scene.add(b.vis);
+    b.vis = makeDoor(rr); b.vis.position.set(x, 0, z); b.vis.rotation.y = a === 0 ? 0 : Math.PI / 2; scene.add(b.vis);
     b.leaf = b.vis.userData.leaf;
     addCol(aabbSeg(x, z, a, -1, -0.55, 0.3), 3.0); addCol(aabbSeg(x, z, a, 0.55, 1, 0.3), 3.0);
     b.doorCol = addCol(aabbSeg(x, z, a, -0.55, 0.55, 0.3), 2.4);
     blockers.push(mesh);
   }
   if (type === 'gate') {
-    b.vis = makeGate(); b.vis.position.set(x, 0, z); b.vis.rotation.y = a === 0 ? 0 : Math.PI / 2; scene.add(b.vis);
+    b.vis = makeGate(rr); b.vis.position.set(x, 0, z); b.vis.rotation.y = a === 0 ? 0 : Math.PI / 2; scene.add(b.vis);
     b.leaves = b.vis.userData.leaves;
     addCol(aabbSeg(x, z, a, -2, -1.7, 0.3), 2.8); addCol(aabbSeg(x, z, a, 1.7, 2, 0.3), 2.8);
     b.doorCol = addCol(aabbSeg(x, z, a, -1.7, 1.7, 0.3), 2.6);
@@ -4241,7 +4339,7 @@ function placePieceAt(type, rotv, x, z, free) {
     b.vis = makeBed(); b.vis.position.set(x, 0, z); b.vis.rotation.y = a === 0 ? 0 : Math.PI / 2; scene.add(b.vis);
   }
   if (type === 'stairs') { // 16 ступеней по 0,2 м: по ним можно подняться на крышу-пол
-    b.vis = makeStairs(); b.vis.position.set(x, 0, z); b.vis.rotation.y = -rotv * Math.PI / 2; scene.add(b.vis);
+    b.vis = makeStairs(rr); b.vis.position.set(x, 0, z); b.vis.rotation.y = -rotv * Math.PI / 2; scene.add(b.vis);
     const th = -rotv * Math.PI / 2, cs = Math.round(Math.cos(th)), sn = Math.round(Math.sin(th));
     b.floorEntries = [];
     for (let i = 0; i < 16; i++) {
@@ -4264,39 +4362,44 @@ function placePiece() { // ставит деталь перед игроком
 }
 
 // Модели новых деталей
-function makeDoor() { // дверь на петлях: рама и полотно
-  const g = new THREE.Group();
-  const wood = std(0x8b6b3e, 0.9), woodD = std(0x5e4528, 0.95), iron = std(0x2f3236, 0.5, 0.7);
-  const add = (w2, h2, d2, m, x2, y2, z2, parent) => { const o = new THREE.Mesh(new THREE.BoxGeometry(w2, h2, d2), m); o.position.set(x2, y2, z2); (parent || g).add(o); return o; };
-  add(0.45, 3, 0.3, wood, -0.775, 1.5, 0); add(0.45, 3, 0.3, wood, 0.775, 1.5, 0);
-  add(1.1, 0.8, 0.3, wood, 0, 2.6, 0);
-  add(1.2, 0.06, 0.34, woodD, 0, 0.03, 0);
+function makeDoor(rnd) { // дверь на петлях: рама с наличником, полотно из досок с раскосом, петли и ручка
+  const g = new THREE.Group(), F = zBoxes(rnd), tone = () => WOODS[Math.floor(rnd() * WOODS.length)];
+  [-0.775, 0.775].forEach(x => { F.box(0.45, 3, 0.3, 0x5e4528, x, 1.5, 0); F.box(0.5, 0.1, 0.34, WOOD_D, x, 3.02, 0); });
+  for (let i = 0; i < 3; i++) F.box(1.1, 0.267, 0.3, tone(), 0, 2.2 + 0.134 + i * 0.267, 0);
+  [-0.525, 0.525].forEach(x => F.box(0.05, 2.2, 0.34, WOOD_D, x, 1.1, 0)); F.box(1.1, 0.06, 0.34, WOOD_D, 0, 2.23, 0);
+  F.box(1.2, 0.06, 0.34, 0x3a2c1c, 0, 0.03, 0);
+  g.add(F.mesh(woodMat));
   const pivot = new THREE.Group(); pivot.position.set(-0.55, 0, 0); g.add(pivot);
-  add(1.06, 2.2, 0.08, std(0x7a5c34), 0.55, 1.1, 0, pivot);
-  [0.4, 1.1, 1.8].forEach(y2 => add(1.0, 0.1, 0.1, woodD, 0.55, y2, 0.05, pivot));
-  add(0.06, 0.06, 0.12, iron, 1.0, 1.05, 0.06, pivot);
-  [0.4, 1.8].forEach(y2 => add(0.12, 0.08, 0.12, iron, 0.04, y2, 0.02, pivot));
+  const L = zBoxes(rnd), M = zBoxes(rnd);
+  for (let i = 0; i < 5; i++) L.box(0.21, 2.2 - rnd() * 0.03, 0.08, tone(), 0.55 + (i - 2) * 0.21, 1.1, 0);
+  [0.35, 1.1, 1.85].forEach(y => L.box(1.0, 0.14, 0.05, WOOD_D, 0.55, y, 0.065));
+  L.box(1.8, 0.12, 0.05, 0x6a4e2c, 0.55, 1.1, 0.07, 0, 0, Math.atan2(1.5, 1.0));
+  [0.35, 1.85].forEach(y => { M.box(0.45, 0.09, 0.04, IRON, 0.22, y, 0.1); M.box(0.07, 0.17, 0.08, IRON, 0.0, y, 0.02); }); // петли
+  M.box(0.1, 0.16, 0.04, IRON, 0.92, 1.0, 0.08); M.box(0.05, 0.22, 0.07, IRON, 0.92, 1.05, 0.1); M.box(0.14, 0.03, 0.05, IRON, 0.88, 0.93, 0.12); // замок, ручка, кольцо
+  [0.2, 0.55, 0.9].forEach(x => [0.35, 1.85].forEach(y => M.box(0.035, 0.035, 0.03, IRON, x, y, 0.1)));
+  pivot.add(L.mesh(woodMat), M.mesh(ironMat));
   g.userData.leaf = pivot;
-  return g;
+  return finishPiece(g);
 }
-function makeGate() { // двустворчатые ворота
-  const g = new THREE.Group();
-  const wood = std(0x7a5c34, 0.9), woodD = std(0x4e3825, 0.95), iron = std(0x2f3236, 0.5, 0.7);
-  const add = (w2, h2, d2, m, x2, y2, z2, parent, rz) => { const o = new THREE.Mesh(new THREE.BoxGeometry(w2, h2, d2), m); o.position.set(x2, y2, z2); if (rz) o.rotation.z = rz; (parent || g).add(o); return o; };
-  add(0.3, 2.8, 0.3, woodD, -1.85, 1.4, 0); add(0.3, 2.8, 0.3, woodD, 1.85, 1.4, 0);
-  add(4, 0.2, 0.22, woodD, 0, 2.7, 0);
+function makeGate(rnd) { // двустворчатые ворота: столбы с навершиями, балка, створки из досок, железные полосы
+  const g = new THREE.Group(), F = zBoxes(rnd), tone = () => WOODS[Math.floor(rnd() * WOODS.length)];
+  [-1.85, 1.85].forEach(x => { F.box(0.3, 2.8, 0.3, 0x5e4528, x, 1.4, 0); F.box(0.38, 0.1, 0.38, WOOD_D, x, 2.85, 0); F.box(0.26, 0.12, 0.26, tone(), x, 2.96, 0); });
+  F.box(4, 0.2, 0.22, WOOD_D, 0, 2.7, 0); F.box(3.9, 0.08, 0.26, 0x3a2c1c, 0, 2.58, 0);
+  g.add(F.mesh(woodMat));
   const leaves = [];
   [-1, 1].forEach(s => {
     const pivot = new THREE.Group(); pivot.position.set(s * 1.7, 0, 0); g.add(pivot);
-    const cx = -s * 0.85;
-    add(1.7, 2.4, 0.08, wood, cx, 1.25, 0, pivot);
-    [0.35, 1.2, 2.05].forEach(y2 => add(1.7, 0.12, 0.1, woodD, cx, y2, 0.06, pivot));
-    add(2.1, 0.1, 0.1, woodD, cx, 1.25, 0.07, pivot, s * 0.7);
-    add(0.1, 0.4, 0.12, iron, -s * 1.6, 1.25, 0.08, pivot);
-    leaves.push(pivot);
+    const L = zBoxes(rnd), M = zBoxes(rnd), cx = -s * 0.85;
+    for (let i = 0; i < 7; i++) L.box(0.24, 2.4 - rnd() * 0.04, 0.08, tone(), cx + (i - 3) * 0.243, 1.25, 0);
+    [0.35, 1.2, 2.05].forEach(y => L.box(1.7, 0.12, 0.05, WOOD_D, cx, y, 0.065));
+    L.box(2.1, 0.1, 0.05, 0x6a4e2c, cx, 1.25, 0.07, 0, 0, s * 0.7);
+    [0.55, 1.95].forEach(y => { M.box(1.2, 0.08, 0.03, IRON, -s * 0.6, y, 0.1); M.box(0.1, 0.18, 0.1, IRON, -s * 0.02, y, 0.03); });
+    M.box(0.1, 0.4, 0.05, IRON, -s * 1.6, 1.25, 0.09); M.box(0.16, 0.03, 0.05, IRON, -s * 1.55, 1.1, 0.11);
+    [0.3, 0.6, 0.9, 1.2].forEach(x => [0.55, 1.95].forEach(y => M.box(0.04, 0.04, 0.03, IRON, -s * x, y + 0.0, 0.12)));
+    pivot.add(L.mesh(woodMat), M.mesh(ironMat)); leaves.push(pivot);
   });
   g.userData.leaves = leaves;
-  return g;
+  return finishPiece(g);
 }
 function makeBed() { // кровать: рама, матрас, подушка, одеяло
   const g = new THREE.Group();
@@ -4311,20 +4414,20 @@ function makeBed() { // кровать: рама, матрас, подушка, 
   add(0.92, 0.065, 0.1, stripe, 0, 0.54, 0.0);
   return g;
 }
-function makeStairs() { // 16 ступеней, подъём к -Z, перила
-  const g = new THREE.Group();
-  const wood = std(0x7a5c34, 0.9), woodD = std(0x5e4528, 0.95);
+function makeStairs(rnd) { // 16 ступеней: тёмные подступенки, светлые доски, тетивы, перила со стойками
+  const W = zBoxes(rnd), tone = () => WOODS[Math.floor(rnd() * WOODS.length)];
   for (let i = 0; i < 16; i++) {
-    const top = (i + 1) * 0.2;
-    const st = new THREE.Mesh(new THREE.BoxGeometry(1.8, top, 0.25), i % 2 ? wood : std(0x84643a, 0.9));
-    st.position.set(0, top / 2, 2 - 0.125 - i * 0.25); g.add(st);
+    const top = (i + 1) * 0.2, z = 2 - 0.125 - i * 0.25;
+    W.box(1.76, top, 0.23, 0x5e4528, 0, top / 2, z); W.box(1.8, 0.05, 0.27, tone(), 0, top - 0.025, z + 0.02);
   }
+  const slope = 0.675;
   [-1, 1].forEach(sx => {
-    const rail = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.06, 5.12), woodD);
-    rail.position.set(sx * 0.9, 2.5, 0); rail.rotation.x = 0.675; g.add(rail);
-    [-1.9, 0, 1.9].forEach(zz => { const post = new THREE.Mesh(new THREE.BoxGeometry(0.06, 1.0, 0.06), woodD); post.position.set(sx * 0.9, (1.6 - zz * 0.8) + 0.5, zz); g.add(post); });
+    W.box(0.08, 0.5, 5.12, 0x4e3825, sx * 0.94, 1.55, 0, slope);
+    W.box(0.07, 0.07, 5.12, 0x6a4e2c, sx * 0.94, 2.5, 0, slope);
+    [-1.9, -0.95, 0, 0.95, 1.9].forEach(zz => W.box(0.07, 1.0, 0.07, 0x5e4528, sx * 0.94, (1.6 - zz * 0.8) + 0.5, zz));
+    [-1.9, 1.9].forEach(zz => W.box(0.12, 0.07, 0.12, tone(), sx * 0.94, (1.6 - zz * 0.8) + 1.03, zz));
   });
-  return g;
+  return finishPiece(pieceGroup(W));
 }
 
 // Дверь и ворота открываются на E; кровать - сон ночью
@@ -4430,6 +4533,7 @@ function craft(type) {
   if (adm('freeCraft')) {
     if (type === 'ammo') { reserve += 7; return notify('Сделано (админ): +7 патронов'); }
     if (type === 'axe') { hasAxe = true; weapon = 'axe'; drawT = 0; return notify('Топор выдан (админ)'); }
+    if (type === 'machete') { hasMachete = true; weapon = 'machete'; drawT = 0; return notify('Мачете выдано (админ)'); }
     if (type === 'medkit') { addItem('medkit', 1); return notify('Сделано (админ): +1 аптечка'); }
   }
   if (type === 'ammo') {
@@ -4441,6 +4545,12 @@ function craft(type) {
     if (countOf('wood') < 3 || countOf('scrap') < 2) return notify('Нужно 3 дерева и 2 лома');
     takeItem('wood', 3); takeItem('scrap', 2);
     hasAxe = true; weapon = 'axe'; drawT = 0; notify('Сделан топор! Рубить: ЛКМ у дерева. [Q] - сменить оружие');
+  }
+  if (type === 'machete') {
+    if (hasMachete) return notify('Мачете уже есть');
+    if (countOf('wood') < 1 || countOf('scrap') < 3) return notify('Нужно 1 дерево и 3 лома');
+    takeItem('wood', 1); takeItem('scrap', 3);
+    hasMachete = true; weapon = 'machete'; drawT = 0; notify('Сделано мачете! ЛКМ - быстрый широкий удар. [Q] - сменить оружие');
   }
   if (type === 'medkit') {
     if (countOf('scrap') < 4) return notify('Нужно 4 лома');
@@ -4462,7 +4572,6 @@ function nearBench() {
 function benchCraft(id) {
   const r = BENCH_RECIPES.find(x => x.id === id);
   if (!r || health <= 0) return;
-  if (!nearBench() && !adm('freeCraft')) return notify('Подойди к верстаку');
   if (!adm('freeCraft')) for (const k in r.need) if (countOf(k) < r.need[k]) return notify('Не хватает: ' + ITEMS[k].name);
   if (id === 'bike') {
     if (bike) return notify('Мотоцикл уже собран');
@@ -4488,13 +4597,17 @@ function updateBuild(dt) {
   sgun.visible = !buildMode && !riding && heldSlot < 0 && weapon === 'shotgun';
   axeRig.visible = !buildMode && !riding && heldSlot < 0 && weapon === 'axe';
   akRig.visible = !buildMode && !riding && heldSlot < 0 && weapon === 'ak';
+  rifleRig.visible = !buildMode && !riding && heldSlot < 0 && weapon === 'rifle' && rfAim < 0.5; // в прицеле саму винтовку не рисуем
+  macheteRig.visible = !buildMode && !riding && heldSlot < 0 && weapon === 'machete';
   ghost.visible = buildMode && health > 0;
   if (ghost.visible) {
     const [x, z] = targetPos();
     const [w, h, d, y] = pieceGeometry(selPiece, rot);
     ghost.scale.set(w, h, d);
     ghost.position.set(x, y, z);
-    ghost.material.color.set(adm('freeBuild') || countOf('wood') >= pieces[selPiece].cost ? 0x44ff44 : 0xff4444);
+    const okBuild = adm('freeBuild') || countOf('wood') >= pieces[selPiece].cost;
+    ghost.material.color.set(okBuild ? 0x44ff44 : 0xff4444); ghost.userData.edges.material.color.set(okBuild ? 0xaaffaa : 0xff9a9a);
+    ghost.material.opacity = 0.2 + 0.1 * Math.sin(gunT * 6); // дышит, чтобы заметнее
   }
   for (const b of built) { // створки дверей и ворот плавно открываются
     if (b.type !== 'door' && b.type !== 'gate') continue;
@@ -4515,19 +4628,50 @@ function updateBuild(dt) {
 // --- Меню с вкладками: Инвентарь / Крафт / Стройка (клавиша Tab) ---
 let menuOpen = false, menuTab = 'inv', pick = null;
 const menu = document.createElement('div');
-menu.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.65);display:none;align-items:center;justify-content:center;font:18px monospace;color:#fff;z-index:10';
+menu.style.cssText = 'position:fixed;inset:0;background:radial-gradient(ellipse at center,rgba(10,14,8,.72),rgba(0,0,0,.9));backdrop-filter:blur(4px);display:none;align-items:center;justify-content:center;font:16px "Segoe UI",system-ui,sans-serif;color:#eef2e6;z-index:10';
 document.body.appendChild(menu);
 
+const uiCss = document.createElement('style');
+uiCss.textContent = `
+.dzm-panel{width:min(780px,94vw);max-height:90vh;display:flex;flex-direction:column;background:linear-gradient(160deg,#262e22,#141912);border:1px solid #6b7d4c;border-radius:16px;box-shadow:0 20px 60px #000c,inset 0 1px 0 #ffffff14}
+.dzm-tabs{display:flex;flex-wrap:wrap;gap:6px;padding:12px 14px;border-bottom:1px solid #3a4530;background:#0003;border-radius:16px 16px 0 0}
+.dzm-body{padding:14px 18px;overflow:auto}
+.dzm-foot{padding:10px 18px;font-size:13px;opacity:.6;border-top:1px solid #3a4530}
+.dzm-btn{font:inherit;color:#eef2e6;padding:8px 14px;margin:2px;border:1px solid #5a6b45;border-radius:9px;background:linear-gradient(#3a472f,#273020);cursor:pointer;transition:filter .12s,transform .12s}
+.dzm-btn:hover:not(:disabled){filter:brightness(1.25);transform:translateY(-1px)}
+.dzm-btn.on{background:linear-gradient(#7d9a3f,#566f2a);border-color:#c8e07a;color:#fff}
+.dzm-btn:disabled{opacity:.4;cursor:not-allowed}
+.dzm-row{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid #3a4530}
+.dzm-card{display:flex;align-items:center;gap:14px;padding:10px 12px;margin:8px 0;background:#ffffff09;border:1px solid #3a4530;border-radius:12px}
+.dzm-ico{width:56px;height:56px;image-rendering:pixelated;background:#0006;border:1px solid #4a5a3a;border-radius:10px;padding:5px;box-sizing:border-box}
+.dzm-ct{flex:1;display:flex;flex-direction:column;gap:4px}.dzm-ct small{opacity:.65}
+.dzm-chips{display:flex;gap:6px;flex-wrap:wrap}
+.dzm-chip{display:flex;align-items:center;gap:4px;font-size:13px;padding:2px 9px 2px 4px;border-radius:20px;background:#0006}
+.dzm-chip img{width:18px;height:18px;image-rendering:pixelated}
+.dzm-chip.ok{color:#9fd36a}.dzm-chip.no{color:#e07a6a}
+.dzm-sec{margin:16px 0 4px;color:#c8e07a;font-weight:700;letter-spacing:.08em;text-transform:uppercase;font-size:13px}
+.dzm-done{opacity:.75;color:#9fd36a;padding:0 10px}
+.dzm-bar{display:flex;align-items:center;gap:10px;margin:6px 0}.dzm-bar>span{width:84px}
+.dzm-bar>div{flex:1;height:12px;background:#0008;border-radius:6px;overflow:hidden;border:1px solid #3a4530}
+.dzm-bar i{display:block;height:100%;border-radius:6px}.dzm-bar b{width:34px;text-align:right}`;
+uiCss.textContent += `
+.dzm-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:10px}
+.dzm-bcard{display:flex;align-items:center;gap:12px;padding:10px;background:#ffffff09;border:1px solid #3a4530;border-radius:12px}
+.dzm-bcard.sel{border-color:#c8e07a;background:#c8e07a14}
+.dzh{display:flex;flex-wrap:wrap;gap:6px;justify-content:center;margin:6px 0}
+.dzh-c{display:flex;align-items:center;gap:5px;padding:3px 10px 3px 4px;border-radius:10px;background:#12170fcc;border:1px solid #4a5a3a;font-size:14px}
+.dzh-c.on{border-color:#c8e07a;background:#33411fdd;box-shadow:0 0 10px #c8e07a55}
+.dzh-c b{background:#0008;border-radius:6px;padding:0 6px}.dzh-c img{width:22px;height:22px;image-rendering:pixelated}`;
+document.head.appendChild(uiCss);
 const btn = (label, act, on = true, active = false) =>
-  `<button ${on ? `data-act="${act}"` : 'disabled'} style="font:inherit;color:#fff;padding:8px 14px;margin:2px;border:2px solid ${active ? '#c8e07a' : '#5a6b45'};border-radius:6px;background:${active ? '#3d4a2a' : '#2a3324'};cursor:${on ? 'pointer' : 'not-allowed'};opacity:${on ? 1 : 0.4}">${label}</button>`;
-const row = (name, right) =>
-  `<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid #3a4530"><span>${name}</span><span>${right}</span></div>`;
+  `<button class="dzm-btn${active ? ' on' : ''}" ${on ? `data-act="${act}"` : 'disabled'}>${label}</button>`;
+const row = (name, right) => `<div class="dzm-row"><span>${name}</span><span>${right}</span></div>`;
 const bar = (label, v, color) =>
-  `<div style="margin:4px 0">${label}: ${Math.ceil(v)}<div style="height:10px;background:#111;border-radius:5px"><div style="height:10px;width:${Math.max(0, Math.min(100, v))}%;background:${color};border-radius:5px"></div></div></div>`;
+  `<div class="dzm-bar"><span>${label}</span><div><i style="width:${Math.max(0, Math.min(100, v))}%;background:${color}"></i></div><b>${Math.ceil(v)}</b></div>`;
 
 function renderMenu() {
   if (menuTab === 'bed') { renderBedMenu(); return; }
-  const tabs = [['inv', 'Инвентарь'], ['craft', 'Крафт'], ['bench', 'Верстак'], ['build', 'Стройка'], ['settings', '⚙ Настройки']];
+  const tabs = [['inv', '🎒 Инвентарь'], ['craft', '🛠 Крафт'], ['build', '🏗 Стройка'], ['settings', '⚙ Настройки']];
   if (admin.on) tabs.push(['admin', '🛠 Админ']);
   if (!gameStarted) { tabs.length = 0; tabs.push(['settings', '⚙ Настройки']); } // из главного меню доступны только настройки
   let body = '';
@@ -4544,29 +4688,30 @@ function renderMenu() {
       ? `<b>${ITEMS[sel.type].name}</b> x${sel.n} ` + btn('Использовать', 'use', !!ITEMS[sel.type].use) + btn('Выбросить 1', 'drop:1') + btn('Выбросить всё', 'drop:all') +
         ` <span style="opacity:.7;font-size:14px">или нажми на другой слот, чтобы переложить</span>`
       : `<span style="opacity:.7;font-size:14px">Нажми на предмет, чтобы выбрать, потом на другой слот, чтобы переложить. Одинаковые предметы объединяются.</span>`) + `</div>`;
-    body += `<div style="opacity:.85">Пистолет: ${ammo} в обойме, ${reserve} в запасе` + (hasShotgun ? `<br>Дробовик: ${sgAmmo} в магазине, ${sgReserve} в запасе` : '') + (hasAK ? `<br>АК-47: ${akAmmo} в магазине, ${akReserve} в запасе` : '') + `</div>`;
+    body += `<div style="opacity:.85">Пистолет: ${ammo} в обойме, ${reserve} в запасе` + (hasShotgun ? `<br>Дробовик: ${sgAmmo} в магазине, ${sgReserve} в запасе` : '') + (hasAK ? `<br>АК-47: ${akAmmo} в магазине, ${akReserve} в запасе` : '') + (hasRifle ? `<br>Винтовка: ${rfAmmo} в магазине, ${rfReserve} в запасе` : '') + `</div>`;
   }
-  if (menuTab === 'craft') {
-    body += row('Патроны x7 <small>(2 лома)</small>', btn('Создать', 'craft:ammo', countOf('scrap') >= 2));
-    body += row('Топор <small>(3 дерева + 2 лома)</small>', hasAxe ? '<span style="opacity:.7">есть</span>' : btn('Создать', 'craft:axe', countOf('wood') >= 3 && countOf('scrap') >= 2));
-    body += row('Аптечка <small>(4 лома)</small>', btn('Создать', 'craft:medkit', countOf('scrap') >= 4));
-    body += `<div style="margin-top:12px;opacity:.8">У тебя: лом x${countOf('scrap')}. Лом лежит на земле и в домах.</div>`;
-  }
-  if (menuTab === 'bench') {
-    const near = nearBench() || adm('freeCraft');
-    body += near ? '<div style="margin-bottom:8px;color:#9fd36a">Ты у верстака</div>'
-      : '<div style="margin-bottom:8px;color:#e07a6a">Подойди к верстаку. Построить: B, затем 4 (Верстак, 6 дерева)</div>';
+  if (menuTab === 'craft') { // карточки с иконками; детали и сборка мотоцикла здесь же, верстак не нужен
+    const have = need => adm('freeCraft') || Object.keys(need).every(k => countOf(k) >= need[k]);
+    const chips = need => Object.keys(need).map(k => `<span class="dzm-chip ${countOf(k) >= need[k] ? 'ok' : 'no'}"><img src="${ICONS[k]}">${countOf(k)}/${need[k]}</span>`).join('');
+    const card = (ic, name, sub, need, right) => `<div class="dzm-card"><img class="dzm-ico" src="${ICONS[ic]}"><div class="dzm-ct"><b>${name}</b><small>${sub}</small><div class="dzm-chips">${chips(need)}</div></div><div>${right}</div></div>`;
+    const sec = t => `<div class="dzm-sec">${t}</div>`, got = '<span class="dzm-done">есть</span>';
+    body += sec('Оружие и припасы');
+    body += card('ammo', 'Патроны', '+7 патронов для пистолета', { scrap: 2 }, btn('Создать', 'craft:ammo', have({ scrap: 2 })));
+    body += card('axe', 'Топор', 'Рубит деревья и заколоченные люки', { wood: 3, scrap: 2 }, hasAxe ? got : btn('Создать', 'craft:axe', have({ wood: 3, scrap: 2 })));
+    body += card('machete', 'Мачете', 'Широкий удар по всем зомби вокруг', { wood: 1, scrap: 3 }, hasMachete ? got : btn('Создать', 'craft:machete', have({ wood: 1, scrap: 3 })));
+    body += card('medkit', 'Аптечка', 'Лечит раны', { scrap: 4 }, btn('Создать', 'craft:medkit', have({ scrap: 4 })));
+    body += sec('Мотоцикл');
+    const subs = { wheel: 'Нужно два', tank: 'Под бензин', bars: 'Для управления', bike: 'Собирается из деталей, где угодно' };
     for (const r of BENCH_RECIPES) {
-      const req = Object.keys(r.need).map(k => `<span style="color:${countOf(k) >= r.need[k] ? '#9fd36a' : '#e07a6a'}">${ITEMS[k].name} ${countOf(k)}/${r.need[k]}</span>`).join(' · ');
       const done = r.id === 'bike' && bike;
-      const can = near && !done && (adm('freeCraft') || Object.keys(r.need).every(k => countOf(k) >= r.need[k]));
-      body += row(`${r.name}<br><small>${req}</small>`, done ? '<span style="opacity:.7">собран</span>' : btn('Создать', 'bench:' + r.id, can));
+      body += card(r.id === 'bike' ? 'bike' : r.give, r.name, subs[r.id] || '', r.need, done ? '<span class="dzm-done">собран</span>' : btn('Создать', 'bench:' + r.id, have(r.need)));
     }
-    body += `<div style="margin-top:12px;opacity:.8;font-size:14px">Резина: кучи старых покрышек (E). Лом: железные кучи. Бензин: канистры, заправка - слот 1-5 рядом с мотоциклом.</div>`;
+    body += `<div style="margin-top:12px;opacity:.75;font-size:14px">Лом: железные кучи и дома. Резина: кучи старых покрышек (E). Дерево: рубка деревьев (E). Бензин: канистры, заправка - слот 1-5 рядом с мотоциклом.</div>`;
   }
   if (menuTab === 'settings') {
     const sl = (k, label, min, max, step) => `<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;padding:7px 0;border-bottom:1px solid #3a4530"><span>${label}: <b id="v-${k}">${SET_FMT[k](SETTINGS[k])}</b></span><input type="range" data-set="${k}" min="${min}" max="${max}" step="${step}" value="${SETTINGS[k]}" style="width:240px;max-width:50%"></div>`;
     body += row('Тени', btn(SETTINGS.shadows ? 'Включены' : 'Выключены', 'tog:shadows'));
+    body += row('Погода (дождь, гроза)', btn(SETTINGS.weather !== false ? 'Включена' : 'Выключена', 'tog:weather'));
     body += sl('fov', 'Поле зрения', 60, 100, 1) + sl('sens', 'Чувствительность мыши', 0.3, 2.5, 0.05) + sl('exposure', 'Яркость', 0.6, 1.8, 0.05);
     body += sl('volume', 'Громкость', 0, 1, 0.05) + sl('fog', 'Дальность видимости', 0.6, 1.6, 0.05) + sl('res', 'Разрешение картинки', 0.5, 2, 0.25);
     body += row('Окно', btn('Полный экран', 'fs') + btn('Сбросить настройки', 'resetset'));
@@ -4587,25 +4732,27 @@ function renderMenu() {
     body += `<div style="opacity:.7;font-size:13px;margin-top:4px">Полёт: W/A/S/D по взгляду, Пробел вверх, C вниз, Shift быстрее. Сквозь стены: проходишь любые препятствия.</div>`;
     body += sl('speedMul', 'Скорость ходьбы', 1, 5, 0.25, admin.speedMul) + sl('flySpeed', 'Скорость полёта', 0.5, 10, 0.5, admin.flySpeed) + sl('hour', 'Время суток', 0, 24, 0.25, gameHour);
     body += sec('Выдать предметы') + Object.keys(ITEMS).map(t => row(`<img src="${ICONS[t]}" style="width:22px;height:22px;image-rendering:pixelated;vertical-align:middle"> ${ITEMS[t].name}`, btn('+1', `admgive:${t}:1`) + btn('+стак', `admgive:${t}:max`))).join('');
-    body += sec('Оружие и патроны') + wrap(btn('Дробовик', 'admweapon:shotgun') + btn('Топор', 'admweapon:axe') + btn('АК-47', 'admweapon:ak') + btn('Всё оружие', 'admweapon:all') + btn('+50 патр. пистолета', 'admammo:pistol') + btn('+50 патр. дробовика', 'admammo:shotgun') + btn('+90 патр. АК', 'admammo:ak'));
+    body += sec('Оружие и патроны') + wrap(btn('Дробовик', 'admweapon:shotgun') + btn('Топор', 'admweapon:axe') + btn('АК-47', 'admweapon:ak') + btn('Винтовка', 'admweapon:rifle') + btn('Мачете', 'admweapon:machete') + btn('Всё оружие', 'admweapon:all') + btn('+50 патр. пистолета', 'admammo:pistol') + btn('+50 патр. дробовика', 'admammo:shotgun') + btn('+90 патр. АК', 'admammo:ak') + btn('+20 патр. винтовки', 'admammo:rifle'));
     body += sec('Игрок') + wrap(btn('Вылечить и накормить', 'admheal') + btn('Очистить инвентарь', 'admclear'));
     body += sec('Транспорт') + wrap(btn('Мотоцикл рядом', 'admbike:spawn') + btn('Притянуть мотоцикл', 'admbike:come') + btn('Заправить', 'admbike:fuel') + btn('Убрать мотоцикл', 'admbike:remove') + btn('Джип рядом', 'admcar:spawn') + btn('Притянуть джип', 'admcar:come') + btn('Заправить джип', 'admcar:fuel') + btn('Убрать джип', 'admcar:remove'));
     body += sec('Зомби') + wrap(btn('Бегун', 'admzombie:t:runner') + btn('Громила', 'admzombie:t:brute') + btn('Вздутый', 'admzombie:t:bloater') + btn('Солдат', 'admzombie:t:soldier') + btn('+1', 'admzombie:1') + btn('+5', 'admzombie:5') + btn('+10', 'admzombie:10') + btn('Убить всех', 'admzombie:kill'));
     body += sec('Мир') + wrap(btn('Открыть все ящики', 'admworld:cases') + btn('Ящик рядом', 'admworld:case') + btn('Рассыпать ресурсы', 'admworld:resources') + btn('Верстак рядом', 'admworld:bench') + btn('Костёр рядом', 'admworld:fire'));
     body += sec('Время') + wrap(btn('Утро 06:00', 'admtime:6') + btn('День 12:00', 'admtime:12') + btn('Вечер 19:00', 'admtime:19') + btn('Ночь 00:00', 'admtime:0'));
+    body += sec('Погода') + wrap(btn('Ясно', 'admwx:clear') + btn('Пасмурно', 'admwx:cloud') + btn('Дождь', 'admwx:rain') + btn('Гроза', 'admwx:storm'));
     body += sec('Телепорт') + wrap(btn('На старт', 'admtp:home') + btn('Склад 1', 'admtp:w1') + btn('Склад 2', 'admtp:w2') + btn('Подвал 1', 'admtp:b1') + btn('Подвал 2', 'admtp:b2') + btn('Ближайший ящик', 'admtp:case') + btn('К мотоциклу', 'admtp:bike') + btn('Заправка', 'admtp:gs') + btn('Гараж', 'admtp:gar') + btn('Водокачка', 'admtp:wt') + btn('К джипу', 'admtp:car') + btn('Блокпост', 'admtp:op') + btn('Арсенал', 'admtp:ar'));
   }
-  if (menuTab === 'build') {
-    for (const k of pieceKeys) {
-      body += row(`${pieces[k].name} <small>(${pieces[k].cost} дерева)</small>`, btn('Строить', `build:${k}`, true));
-    }
-    body += `<div style="margin-top:12px;opacity:.8">У тебя: дерево x${countOf('wood')}. Дерево добывается рубкой деревьев (клавиша E).</div>`;
+  if (menuTab === 'build') { // карточки деталей с иконками, ценой и подсказками
+    body += `<div class="dzm-sec">Строительство</div><div style="opacity:.8;margin-bottom:8px">Дерево: <b>${countOf('wood')}</b> &middot; B включает стройку, 1-${pieceKeys.length} выбирают деталь, Q поворот, V убрать (вернётся половина дерева)</div>`;
+    body += `<div class="dzm-grid">` + pieceKeys.map((k, i) => {
+      const p = pieces[k], ok = adm('freeBuild') || countOf('wood') >= p.cost;
+      return `<div class="dzm-bcard${buildMode && selPiece === k ? ' sel' : ''}"><img class="dzm-ico" src="${ICONS[k]}"><div class="dzm-ct"><b>${i + 1}. ${p.name}</b><small>${PIECE_DESC[k] || ''}</small><div class="dzm-chips"><span class="dzm-chip ${ok ? 'ok' : 'no'}"><img src="${ICONS.wood}">${countOf('wood')}/${p.cost}</span></div></div>${btn('Строить', `build:${k}`, true)}</div>`;
+    }).join('') + `</div>`;
   }
   menu.innerHTML =
-    `<div style="width:min(720px,94vw);max-height:92vh;overflow:auto;background:#1d231c;border:2px solid #5a6b45;border-radius:10px;padding:18px">` +
-    `<div style="margin-bottom:12px">${tabs.map(([id, n]) => btn(n, 'tab:' + id, true, menuTab === id)).join('')}</div>` +
-    body +
-    `<div style="margin-top:14px;opacity:.7;font-size:14px">[Tab] или [Esc] - закрыть меню. Игра на паузе.</div></div>`;
+    `<div class="dzm-panel">` +
+    `<div class="dzm-tabs">${tabs.map(([id, n]) => btn(n, 'tab:' + id, true, menuTab === id)).join('')}</div>` +
+    `<div class="dzm-body">${body}</div>` +
+    `<div class="dzm-foot">[Tab] или [Esc] - закрыть меню. Игра на паузе.</div></div>`;
 }
 
 function toggleMenu(open) {
@@ -4697,7 +4844,7 @@ function makeSave() { // всё, что нужно, чтобы вернуть и
     v: 2, seed: WORLD_SEED, time: Date.now(), day, hour: gameHour,
     player: { x: camera.position.x, y: camera.position.y, z: camera.position.z, yaw, health, hunger, thirst, kills },
     inv: slots.map(sl => sl ? [sl.type, sl.n] : null),
-    w: { weapon, hasShotgun, hasAxe, hasAK, ammo, reserve, lock, sgAmmo, sgReserve, akAmmo, akReserve },
+    w: { weapon, hasShotgun, hasAxe, hasAK, ammo, reserve, lock, sgAmmo, sgReserve, akAmmo, akReserve, hasRifle, hasMachete, rfAmmo, rfReserve },
     basement: curW ? curW.id : -1,
     takenItems: [...initSnap.items].filter(id => !here.items.has(id)),
     takenAmmo: [...initSnap.ammo].filter(id => !here.ammo.has(id)),
@@ -4743,6 +4890,7 @@ function applySave(sv) { // накладываем сохранение на т�
   const W = sv.w;
   weapon = W.weapon; hasShotgun = W.hasShotgun; hasAxe = W.hasAxe; hasAK = W.hasAK;
   ammo = W.ammo; reserve = W.reserve; lock = W.lock; sgAmmo = W.sgAmmo; sgReserve = W.sgReserve; akAmmo = W.akAmmo; akReserve = W.akReserve;
+  hasRifle = !!W.hasRifle; hasMachete = !!W.hasMachete; rfAmmo = W.rfAmmo ?? RF_MAG; rfReserve = W.rfReserve || 0; rfReloading = false; rfCycleT = -1; // старые сохранения без винтовки
   drawT = 0;
   // собранный лут и срубленные деревья
   const tI = new Set(sv.takenItems); for (let i = items.length - 1; i >= 0; i--) if (tI.has(items[i].id)) { scene.remove(items[i].mesh); items.splice(i, 1); }
@@ -4930,6 +5078,7 @@ document.body.appendChild(mpHud);
 
 // --- Оружие в руках других игроков: упрощённые модели (ствол смотрит в +Z, начало координат у рукояти) ---
 function buildWorldGun(kind) {
+  if (kind === 'rifle') return WM.createRifle({ world: true, hands: false }).root; // модель из models/weapons.js: ствол в +Z, начало в центре рукояти
   const B = zBoxes(mulberry(7 + kind.length));
   const STEEL = 0x2a2d30, STEEL_L = 0x4a5057, WOOD = 0x7a4a22, WOOD_D = 0x4e3119, BLACK = 0x0d0e10, FRAME = 0x26292d;
   let gy = 0.06, gz = 0.04; // смещение: центр рукояти попадает в начало координат
@@ -5068,7 +5217,9 @@ const WEAPON_HOLD = {
   pistol:  { pos: [-0.10, 0.38, 0.40], gun: true,  sup: [0.05, -0.05, 0.01], muzzle: [0, 0.10, 0.20] },
   shotgun: { pos: [-0.10, 0.30, 0.10], gun: true,  sup: [0, 0.03, 0.42], muzzle: [0, 0.118, 0.91] },
   ak:      { pos: [-0.10, 0.30, 0.10], gun: true,  sup: [0, 0.03, 0.40], muzzle: [0, 0.10, 0.89] },
+  rifle:   { pos: [-0.10, 0.30, 0.10], gun: true,  sup: [0, 0.045, 0.43], muzzle: [0, 0.125, 0.80] },
   axe:     { pos: [-0.30, 0.02, 0.14], gun: false, rot: 0.5, sup: [0, 0.34, 0] },
+  machete: { pos: [-0.30, 0.02, 0.14], gun: false, rot: 0.5, sup: [0, 0.10, 0] },
 };
 const IK_POLE_R = [-0.6, -1, -0.3], IK_POLE_L = [0.6, -1, -0.3]; // локоть смотрит вниз и в сторону
 const flashMat = new THREE.MeshBasicMaterial({ color: 0xffe0a0 }), flashGeo = new THREE.BoxGeometry(0.16, 0.014, 0.014), flashGeo2 = new THREE.BoxGeometry(0.014, 0.16, 0.014), flashGeo3 = new THREE.BoxGeometry(0.05, 0.05, 0.08);
@@ -5078,6 +5229,7 @@ function avatarWeapon(av, kind) { // модель создаётся при пе
   if (h) return h;
   h = new THREE.Group();
   if (kind === 'axe') { const a = createAxe({ hands: false }).root; a.position.y = -0.14; h.add(a); }
+  else if (kind === 'machete') { const a = WM.createMachete({ hands: false }).root; a.position.y = -0.07; h.add(a); }
   else {
     h.add(buildWorldGun(kind));
     const f = new THREE.Group(), mz = WEAPON_HOLD[kind].muzzle;
@@ -5102,7 +5254,7 @@ function animateSurvivor(av, p, dt) {
   const moving = !!p.mv && !dead, sprint = moving && !!p.sp;
   s.gait += ((moving ? 1 : 0) - s.gait) * Math.min(1, 10 * dt);
   s.run += ((sprint ? 1 : 0) - s.run) * Math.min(1, 8 * dt);
-  s.low += (((sprint && p.w !== 'axe') ? 0.7 : 0) - s.low) * Math.min(1, 6 * dt);     // на бегу ствол опущен
+  s.low += (((sprint && WEAPON_HOLD[p.w] && WEAPON_HOLD[p.w].gun) ? 0.7 : 0) - s.low) * Math.min(1, 6 * dt);     // на бегу ствол опущен
   s.phase += dt * (moving ? 7.5 + 3.5 * s.run : 0); s.idle += dt * 1.4;
   const ph = s.phase, sw = Math.sin(ph), cw = Math.cos(ph), G = s.gait, R = s.run, amp = (0.5 + 0.4 * R) * G, kn = (0.7 + 0.7 * R) * G, flinch = s.hitT / 0.3;
   // ноги
@@ -5424,17 +5576,20 @@ function adminAction(act, arg, arg2) {
     if (arg === 'shotgun' || arg === 'all') { hasShotgun = true; sgReserve += 20; weapon = 'shotgun'; drawT = 0; }
     if (arg === 'axe' || arg === 'all') { hasAxe = true; if (arg === 'axe') { weapon = 'axe'; drawT = 0; } }
     if (arg === 'ak' || arg === 'all') { hasAK = true; akReserve += 90; if (arg === 'ak') { weapon = 'ak'; drawT = 0; } }
+    if (arg === 'rifle' || arg === 'all') { hasRifle = true; rfReserve += 20; if (arg === 'rifle') { weapon = 'rifle'; drawT = 0; } }
+    if (arg === 'machete' || arg === 'all') { hasMachete = true; if (arg === 'machete') { weapon = 'machete'; drawT = 0; } }
     notify('Оружие выдано');
     return;
   }
   if (act === 'admammo') {
-    if (arg === 'pistol') reserve += 50; else if (arg === 'ak') { hasAK = true; akReserve += 90; } else { hasShotgun = true; sgReserve += 50; }
+    if (arg === 'pistol') reserve += 50; else if (arg === 'ak') { hasAK = true; akReserve += 90; } else if (arg === 'rifle') { hasRifle = true; rfReserve += 20; } else { hasShotgun = true; sgReserve += 50; }
     notify('+50 патронов');
     return;
   }
   if (act === 'admheal') { health = 100; hunger = 100; thirst = 100; notify('Здоровье, еда и вода восстановлены'); return; }
   if (act === 'admclear') { slots.fill(null); notify('Инвентарь очищен'); return; }
   if (act === 'admtime') { gameHour = parseFloat(arg); return; }
+  if (act === 'admwx') { SETTINGS.weather = true; setWeather(arg); WX.t = 600; return; }
   if (act === 'admzombie') {
     if (arg === 'kill') { zombies.forEach(z => { z.hp = 0; }); return notify('Зомби убиты'); }
     if (inBasement) return notify('В подвале зомби не нужны');
@@ -5529,7 +5684,7 @@ addEventListener('keydown', e => {
   if (e.code === 'KeyB' && !riding) buildMode = !buildMode;
   if (e.code === 'KeyC' && riding) camView = camView === 'fp' ? 'chase' : 'fp';
   if (buildMode) {
-    if (e.code >= 'Digit1' && e.code <= 'Digit8') selPiece = pieceKeys[+e.code.slice(5) - 1];
+    if (e.code >= 'Digit1' && e.code <= ('Digit' + pieceKeys.length)) selPiece = pieceKeys[+e.code.slice(5) - 1];
     if (e.code === 'KeyQ') rot = (rot + 1) % 4;
     if (e.code === 'KeyV') removePiece();
   } else {
@@ -5552,12 +5707,17 @@ renderer.domElement.addEventListener('click', () => {
   else if (heldSlot >= 0) useHeld();
   else if (weapon !== 'ak') attack();
 });
-renderer.domElement.addEventListener('mousedown', e => { if (e.button === 0 && document.pointerLockElement === renderer.domElement) mouseDown = true; });
-addEventListener('mouseup', e => { if (e.button === 0) mouseDown = false; });
+renderer.domElement.addEventListener('mousedown', e => {
+  if (e.button === 0 && document.pointerLockElement === renderer.domElement) mouseDown = true;
+  if (e.button === 2 && document.pointerLockElement === renderer.domElement && weapon === 'rifle' && !rfReloading) aiming = true; // оптика винтовки
+});
+renderer.domElement.addEventListener('contextmenu', e => e.preventDefault());
+addEventListener('mouseup', e => { if (e.button === 0) mouseDown = false; if (e.button === 2) aiming = false; });
 addEventListener('mousemove', e => {
   if (document.pointerLockElement !== renderer.domElement) return;
-  yaw -= e.movementX * 0.002 * SETTINGS.sens;
-  pitch = Math.max(-1.5, Math.min(1.5, pitch - e.movementY * 0.002 * SETTINGS.sens));
+  const zs = 1 / (1 + 2.2 * rfAim); // в оптике мышь медленнее
+  yaw -= e.movementX * 0.002 * SETTINGS.sens * zs;
+  pitch = Math.max(-1.5, Math.min(1.5, pitch - e.movementY * 0.002 * SETTINGS.sens * zs));
 });
 
 // Стрельба (пули останавливаются о стены и деревья)
@@ -5568,13 +5728,21 @@ function switchWeapon() { // клавиша Q
   if (hasShotgun) owned.push('shotgun');
   if (hasAxe) owned.push('axe');
   if (hasAK) owned.push('ak');
-  if (owned.length < 2 || reloading || sgReloading || akReloading || sgRacking || swingT >= 0 || cool > 0.3) return;
+  if (hasRifle) owned.push('rifle');
+  if (hasMachete) owned.push('machete');
+  if (owned.length < 2 || reloading || sgReloading || akReloading || rfReloading || rfCycleT >= 0 || sgRacking || swingT >= 0 || cool > 0.3) return;
   weapon = owned[(owned.indexOf(weapon) + 1) % owned.length];
-  drawT = 0;
+  drawT = 0; aiming = false;
 }
 
 function startReload() { // клавиша R
-  if (health <= 0 || menuOpen || riding || weapon === 'axe' || heldSlot >= 0) return;
+  if (health <= 0 || menuOpen || riding || weapon === 'axe' || weapon === 'machete' || heldSlot >= 0) return;
+  if (weapon === 'rifle') { // винтовка: открыть затвор и дослать патроны в магазин
+    if (rfReloading || rfCycleT >= 0 || rfAmmo >= RF_MAG) return;
+    if (rfReserve <= 0) return notify('Нет патронов для винтовки');
+    rfReloading = true; rfRT = 0; rfLoaded = false; aiming = false;
+    return;
+  }
   if (weapon === 'shotgun') { // дробовик заряжается по одному патрону
     if (sgReloading || sgRacking || sgAmmo >= SG_MAG) return;
     if (sgReserve <= 0) return notify('Нет патронов для дробовика');
@@ -5595,7 +5763,16 @@ function startReload() { // клавиша R
 
 function startSwing() { // ЛКМ с топором: замах, удар, возврат
   if (swingT >= 0) return;
-  swingT = 0; swingHitDone = false; cool = 0.6; axeCount++;
+  swingT = 0; swingHitDone = false; cool = weapon === 'machete' ? 0.4 : 0.6; axeCount++;
+}
+function macheteHit() { // мачете: шире и быстрее топора, но слабее; деревья и люки не рубит
+  const fwd2 = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw));
+  for (const z of zombies) {
+    const to = z.mesh.position.clone().sub(camera.position).setY(0);
+    const d = to.length();
+    if (d < 2.4 && to.normalize().dot(fwd2) > 0.4) { damageZombie(z, 1.5); z.mesh.position.addScaledVector(to, 0.5); }
+  }
+  kick += 0.02;
 }
 function axeHit() { // момент удара: дерево перед тобой и зомби рядом
   chopCd = 0; chop(true);
@@ -5630,6 +5807,29 @@ function attackShotgun() { // 6 дробинок с разбросом
   }
 }
 
+function rifleDamage(z, y) { // винтовка: голова смертельна почти для всех, броня солдата её почти не держит
+  const head = y - z.mesh.position.y > 1.8 * z.cfg.sy;
+  return head ? 8 : z.cfg.armor ? 2.5 : 4;
+}
+function attackRifle() { // выстрел: точный, пробивает до двух зомби на линии огня, затем ход затвора
+  if (rfReloading || rfCycleT >= 0) return;
+  if (rfAmmo <= 0) { if (noticeT <= 0) notify('Магазин пуст, нажми R'); return; }
+  rfAmmo--; shotCount++;
+  cool = 0.3; rfRecoil = 1; kick += 0.06; rfFlashT = 0.07; rfCycleT = 0; rfCased = false;
+  raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
+  const zHits = raycaster.intersectObjects(zombies.map(z => z.mesh), true);
+  if (!zHits.length) return;
+  const wallHits = raycaster.intersectObjects(blockers, false);
+  const wall = wallHits.length ? wallHits[0].distance : Infinity;
+  const seen = new Set(); let n = 0;
+  for (const h of zHits) {
+    if (h.distance > wall) break;
+    const z = zombieOf(h.object); if (!z || seen.has(z)) continue;
+    seen.add(z); damageZombie(z, rifleDamage(z, h.point.y) * (n ? 0.6 : 1)); // второй зомби получает 60%
+    if (++n >= 2) break;
+  }
+}
+
 function attackAK() { // автомат: очередь при зажатой кнопке мыши
   if (akReloading) return;
   if (akAmmo <= 0) { if (noticeT <= 0) notify('Магазин пуст, нажми R'); return; }
@@ -5649,6 +5849,8 @@ function attack() {
   if (weapon === 'shotgun') return attackShotgun();
   if (weapon === 'axe') return startSwing();
   if (weapon === 'ak') return attackAK();
+  if (weapon === 'rifle') return attackRifle();
+  if (weapon === 'machete') return startSwing();
   if (reloading) return;
   if (ammo <= 0) return notify('Магазин пуст, нажми R');
   ammo--; shotCount++;
@@ -5692,12 +5894,109 @@ deathScreen.addEventListener('click', e => {
 
 // --- Цикл ---
 const clock = new THREE.Clock();
+// --- Погода и радар (1.16.0): дождь, пасмурно, гроза с молниями и громом; компас-радар в углу ---
+const WX_KINDS = { clear: { wet: 0, storm: 0, cloud: 0, name: 'Ясно' }, cloud: { wet: 0, storm: 0, cloud: 0.5, name: 'Пасмурно' }, rain: { wet: 0.75, storm: 0, cloud: 0.85, name: 'Дождь' }, storm: { wet: 1, storm: 1, cloud: 1, name: 'Гроза' } };
+const WX = { kind: 'clear', wet: 0, storm: 0, cloud: 0, t: 90 + Math.random() * 120, flash: 0, bolt: 8, strikes: 0, sheltered: false, vol: 0, resumeT: 0 };
+function setWeather(k) { if (!WX_KINDS[k]) return; WX.kind = k; WX.t = 150 + Math.random() * 200; WX.bolt = 4; }
+const RAIN_N = 1800, rainPos = new Float32Array(RAIN_N * 6), rainDrop = [];
+for (let i = 0; i < RAIN_N; i++) rainDrop.push({ x: (Math.random() - 0.5) * 36, y: Math.random() * 14 - 4, z: (Math.random() - 0.5) * 36, s: 0.85 + Math.random() * 0.4 });
+const rainGeo = new THREE.BufferGeometry(); rainGeo.setAttribute('position', new THREE.BufferAttribute(rainPos, 3));
+const rainMat = new THREE.LineBasicMaterial({ color: 0xc4d4e0, transparent: true, opacity: 0.35, depthWrite: false });
+const rain = new THREE.LineSegments(rainGeo, rainMat); rain.frustumCulled = false; rain.visible = false; scene.add(rain);
+let wxA = null, wxRainGain = null, wxNoise = null;
+function wxAudio() { // дождь: шум через фильтры; гром: низкий шум с затуханием
+  if (wxA) return wxA;
+  try {
+    wxA = new (window.AudioContext || window.webkitAudioContext)();
+    wxNoise = wxA.createBuffer(1, wxA.sampleRate * 2, wxA.sampleRate); const d = wxNoise.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    const src = wxA.createBufferSource(); src.buffer = wxNoise; src.loop = true;
+    const hp = wxA.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 800; const lp = wxA.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 7000;
+    wxRainGain = wxA.createGain(); wxRainGain.gain.value = 0; src.connect(hp); hp.connect(lp); lp.connect(wxRainGain); wxRainGain.connect(wxA.destination); src.start();
+  } catch (err) { wxA = null; }
+  return wxA;
+}
+function thunder(delay) {
+  const a = wxAudio(); if (!a || a.state !== 'running') return;
+  const t = a.currentTime + delay, src = a.createBufferSource(); src.buffer = wxNoise;
+  const lp = a.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.setValueAtTime(520, t); lp.frequency.exponentialRampToValueAtTime(70, t + 2.6);
+  const g = a.createGain(); g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.9 * SETTINGS.volume + 0.001, t + 0.1); g.gain.exponentialRampToValueAtTime(0.0001, t + 3);
+  src.connect(lp); lp.connect(g); g.connect(a.destination); src.start(t); src.stop(t + 3.2);
+}
+function updateWeather(dt) { // вызывается после расчёта неба: сдвигает туман, свет и цвет неба к серому, рисует капли
+  if (SETTINGS.weather === false) WX.kind = 'clear';
+  else if (dt > 0) { WX.t -= dt; if (WX.t <= 0) { const r = Math.random(); setWeather(r < 0.45 ? 'clear' : r < 0.65 ? 'cloud' : r < 0.9 ? 'rain' : 'storm'); } }
+  const tg = WX_KINDS[WX.kind], k = 1 - Math.exp(-dt * 0.35);
+  WX.wet += (tg.wet - WX.wet) * k; WX.storm += (tg.storm - WX.storm) * k; WX.cloud += (tg.cloud - WX.cloud) * k;
+  WX.sheltered = floors.some(f => camera.position.x > f.minX && camera.position.x < f.maxX && camera.position.z > f.minZ && camera.position.z < f.maxZ && f.y > camera.position.y && f.y < camera.position.y + 4);
+  const showRain = WX.wet > 0.03 && !inBasement && !WX.sheltered;
+  rain.visible = showRain;
+  if (WX.wet > 0.03 && gameStarted) { // звук дождя: запускается после первого клика (правило браузеров)
+    const a = wxAudio(); WX.resumeT -= dt;
+    if (a && a.state === 'suspended' && WX.resumeT <= 0) { WX.resumeT = 1; try { a.resume(); } catch (err) { /* нужен клик */ } }
+  }
+  if (wxRainGain && wxA) { const target = (WX.wet > 0.03 && gameStarted && !menuOpen ? WX.wet * 0.1 * SETTINGS.volume * (WX.sheltered || inBasement ? 0.3 : 1) : 0); wxRainGain.gain.value += (target - wxRainGain.gain.value) * Math.min(1, dt * 3 + 0.02); }
+  if (showRain && dt > 0) {
+    const fall = 22 * (1 + WX.storm * 0.35), wind = 2.5 + WX.storm * 3, n = Math.floor(RAIN_N * WX.wet);
+    for (let i = 0; i < RAIN_N; i++) {
+      const d = rainDrop[i]; d.y -= fall * d.s * dt; d.x -= wind * dt * 0.3;
+      if (d.y < -2.2) { d.y = 10 + Math.random() * 4; d.x = (Math.random() - 0.5) * 36; d.z = (Math.random() - 0.5) * 36; }
+      if (d.x < -18) d.x += 36;
+      const o = i * 6; rainPos[o] = d.x; rainPos[o + 1] = d.y; rainPos[o + 2] = d.z; rainPos[o + 3] = d.x + wind * 0.035; rainPos[o + 4] = d.y + 0.55 * d.s; rainPos[o + 5] = d.z;
+    }
+    rainGeo.attributes.position.needsUpdate = true; rainGeo.setDrawRange(0, n * 2);
+    rain.position.set(camera.position.x, camera.position.y, camera.position.z);
+    rainMat.opacity = (0.16 + 0.22 * daylight) * (0.6 + 0.4 * WX.wet);
+  }
+  if (inBasement) { WX.flash = 0; return; }
+  const g1 = new THREE.Color(0.46, 0.5, 0.54).multiplyScalar(0.07 + 0.93 * daylight), g2 = new THREE.Color(0.56, 0.6, 0.64).multiplyScalar(0.07 + 0.93 * daylight), m = Math.min(0.88, WX.cloud * 0.8);
+  if (m > 0.001) { // небо, горизонт и туман серые, солнце тускнеет
+    skyMat.uniforms.top.value.lerp(g1, m); skyMat.uniforms.bottom.value.lerp(g2, m); scene.background.lerp(g2, m); scene.fog.color.lerp(g2, m);
+    skyMat.uniforms.sunCol.value.multiplyScalar(1 - 0.92 * WX.cloud);
+    sun.intensity *= 1 - 0.75 * WX.cloud; hemi.intensity *= 1 - 0.2 * WX.cloud;
+    scene.fog.far *= 1 - 0.5 * WX.wet - 0.1 * WX.cloud; scene.fog.near = Math.min(scene.fog.near, 12);
+  }
+  if (WX.storm > 0.5 && dt > 0) { // молния: одна или две вспышки подряд, гром с задержкой по расстоянию
+    WX.bolt -= dt;
+    if (WX.bolt <= 0) { WX.flash = 1; WX.strikes = Math.random() < 0.5 ? 1 : 0; WX.bolt = 7 + Math.random() * 14; thunder(0.4 + Math.random() * 2.2); if (WX.strikes) setTimeout(() => { WX.flash = 0.9; }, 140); }
+  }
+  if (WX.flash > 0.01) {
+    skyMat.uniforms.top.value.lerp(WHITE, WX.flash * 0.7); skyMat.uniforms.bottom.value.lerp(WHITE, WX.flash * 0.5); scene.background.lerp(WHITE, WX.flash * 0.5); scene.fog.color.lerp(WHITE, WX.flash * 0.4);
+    hemi.intensity += WX.flash * 2.4; WX.flash *= Math.exp(-dt * 9);
+  }
+}
+const radar = document.createElement('canvas'); radar.width = radar.height = 160;
+radar.style.cssText = 'position:fixed;top:10px;right:10px;width:160px;height:160px;border-radius:50%;border:2px solid #6b7d4c;background:rgba(10,14,8,.6);box-shadow:0 0 14px #000a,inset 0 0 20px #0008';
+document.body.appendChild(radar);
+const radarInfo = document.createElement('div');
+radarInfo.style.cssText = 'position:fixed;top:178px;right:10px;width:160px;text-align:center;font:14px "Segoe UI",system-ui,sans-serif;color:#eef2e6;text-shadow:1px 1px 3px #000';
+document.body.appendChild(radarInfo);
+let radarT = 0;
+function updateRadar(dt) { // компас и радар: север (N) вверху карты = -Z; зомби видны на 30 м, костры и мотоцикл на 45 м
+  radarT -= rawRadarDt(dt); if (radarT > 0) return; radarT = 0.06;
+  const x = radar.getContext('2d'), C = 80, R = 72, sc = R / 45, cs = Math.cos(yaw), sn = Math.sin(yaw);
+  const px = camera.position.x, pz = camera.position.z, to = (wx, wz) => { const dx = wx - px, dz = wz - pz; return [C + (dx * cs - dz * sn) * sc, C - (-dx * sn - dz * cs) * sc]; };
+  x.clearRect(0, 0, 160, 160);
+  x.strokeStyle = 'rgba(160,190,110,.28)'; x.lineWidth = 1; [R, R * 0.66, R * 0.33].forEach(r => { x.beginPath(); x.arc(C, C, r, 0, Math.PI * 2); x.stroke(); });
+  x.beginPath(); x.moveTo(C, C - R); x.lineTo(C, C + R); x.moveTo(C - R, C); x.lineTo(C + R, C); x.stroke();
+  const sw = performance.now() / 1400 % 1 * Math.PI * 2; x.fillStyle = 'rgba(160,220,110,.10)'; x.beginPath(); x.moveTo(C, C); x.arc(C, C, R, sw - 0.5, sw); x.closePath(); x.fill();
+  x.font = 'bold 12px sans-serif'; x.textAlign = 'center'; x.textBaseline = 'middle';
+  [['N', 0, -1, '#ff6a5a'], ['E', 1, 0, '#cfe6a0'], ['S', 0, 1, '#cfe6a0'], ['W', -1, 0, '#cfe6a0']].forEach(([t, ex, ez, col]) => { const sx = ex * cs - ez * sn, sy = -ex * sn - ez * cs; x.fillStyle = col; x.fillText(t, C + sx * (R - 8), C - sy * (R - 8)); });
+  const dot = (p, col, r) => { const dd = Math.hypot(p[0] - C, p[1] - C); if (dd > R - 3) return; x.fillStyle = col; x.beginPath(); x.arc(p[0], p[1], r, 0, Math.PI * 2); x.fill(); };
+  for (const b of built) if (b.type === 'fire') dot(to(b.px, b.pz), '#ff9a3a', 3);
+  if (bike && bike.rig && bike.rig.root) dot(to(bike.rig.root.position.x, bike.rig.root.position.z), '#4aa3e8', 4);
+  const pulse = 2.5 + Math.sin(performance.now() / 180) * 0.8;
+  for (const z of zombies) { if (z.dead || !z.mesh) continue; if (Math.hypot(z.mesh.position.x - px, z.mesh.position.z - pz) > 30) continue; dot(to(z.mesh.position.x, z.mesh.position.z), '#ff3a2a', pulse); }
+  x.fillStyle = '#eef2e6'; x.beginPath(); x.moveTo(C, C - 7); x.lineTo(C + 5, C + 5); x.lineTo(C, C + 2); x.lineTo(C - 5, C + 5); x.closePath(); x.fill();
+  const hh = String(Math.floor(gameHour)).padStart(2, '0'), mm = String(Math.floor((gameHour % 1) * 60)).padStart(2, '0');
+  radarInfo.textContent = `${hh}:${mm}  ·  ${WX_KINDS[WX.kind].name}`;
+}
+const rawRadarDt = dt => dt > 0 ? dt : 0.016; // на паузе радар всё равно перерисовывается
 function loop() {
   const rawDt = clock.getDelta();
   const dt = ((menuOpen && !net.active) || sleeping || !gameStarted || cutscenes.cut.active) ? 0 : Math.min(rawDt, 0.1); // в меню и во сне игра на паузе
   if (rawDt > 0) fpsSmooth = fpsSmooth * 0.95 + (1 / rawDt) * 0.05;
   if (adm('god')) { health = 100; hunger = 100; thirst = 100; }
-  if (adm('infAmmo')) { ammo = MAG; sgAmmo = SG_MAG; reserve = Math.max(reserve, 30); if (hasShotgun) sgReserve = Math.max(sgReserve, 30); akAmmo = AK_MAG; if (hasAK) akReserve = Math.max(akReserve, 60); }
+  if (adm('infAmmo')) { ammo = MAG; sgAmmo = SG_MAG; reserve = Math.max(reserve, 30); if (hasShotgun) sgReserve = Math.max(sgReserve, 30); akAmmo = AK_MAG; if (hasAK) akReserve = Math.max(akReserve, 60); rfAmmo = RF_MAG; if (hasRifle) rfReserve = Math.max(rfReserve, 15); }
 
   // День и ночь
   if (!adm('freezeTime')) { const prevH = gameHour; gameHour = (gameHour + dt * 0.1) % 24; if (gameHour < prevH) day++; }
@@ -5730,6 +6029,8 @@ function loop() {
     basementLamp.intensity = 26 + Math.sin(gunT * 9) * 2 + Math.random() * 3;
   } else { sky.visible = true; basementLamp.intensity = 0; }
   updateClouds(dt);
+  updateWeather(dt);
+  updateRadar(dt);
 
   if (health > 0 && !cutscenes.cut.active) {
     if (!riding) {
@@ -5761,7 +6062,7 @@ function loop() {
 
     // Голод и жажда
     hunger = Math.max(0, hunger - 0.4 * dt);
-    thirst = Math.max(0, thirst - 0.6 * dt);
+    thirst = Math.max(0, thirst - 0.6 * (1 - 0.4 * WX.wet) * dt); // в дождь жажда копится медленнее
     if (hunger <= 0 || thirst <= 0) health -= 2 * dt;          // урон от голода/жажды
     else if (hunger > 70 && thirst > 70) health = Math.min(100, health + 0.5 * dt); // медленное лечение
   }
@@ -5899,7 +6200,7 @@ function loop() {
       const st = gunT * (keys.ShiftLeft ? 12 : 9);
       px += Math.sin(st) * 0.012; py += Math.abs(Math.cos(st)) * 0.014 - 0.007; rz += Math.sin(st) * 0.02;
     }
-    if (swingT >= 0) {
+    if (swingT >= 0 && weapon !== 'machete') {
       swingT += dt;
       if (!swingHitDone && swingT >= 0.3) { swingHitDone = true; axeHit(); }
       const w = sstep(0, 0.2, swingT), s = sstep(0.2, 0.32, swingT), r = sstep(0.36, 0.6, swingT);
@@ -5955,6 +6256,83 @@ function loop() {
     akFlashG.visible = akFlashT > 0;
     akLight.intensity = akFlashT > 0 ? 8 : 0;
     if (akFlashT > 0) akFlashG.rotation.z = Math.random() * 6;
+  }
+
+  // Анимация мачете: замах вправо-вверх, быстрый косой удар влево-вниз, возврат
+  {
+    let px = 0.28, py = -0.4, pz = -0.5, rx = -0.5, ry = 0, rz = 0.3;
+    px += Math.sin(gunT * 0.8) * 0.003; py += Math.sin(gunT * 1.6) * 0.005;
+    if (health > 0 && (keys.KeyW || keys.KeyA || keys.KeyS || keys.KeyD)) {
+      const st = gunT * (keys.ShiftLeft ? 12 : 9);
+      px += Math.sin(st) * 0.012; py += Math.abs(Math.cos(st)) * 0.014 - 0.007; rz += Math.sin(st) * 0.02;
+    }
+    if (swingT >= 0 && weapon === 'machete') {
+      swingT += dt;
+      if (!swingHitDone && swingT >= 0.17) { swingHitDone = true; macheteHit(); }
+      const w = sstep(0, 0.12, swingT), sl = sstep(0.12, 0.24, swingT), r = sstep(0.26, 0.42, swingT);
+      px += 0.12 * w - 0.5 * sl + 0.38 * r;
+      py += 0.1 * w - 0.2 * sl + 0.1 * r;
+      pz += -0.05 * sl + 0.05 * r;
+      rx += 0.5 * w - 1.3 * sl + 0.8 * r;
+      ry += -0.2 * w + 0.9 * sl - 0.7 * r;
+      rz += 0.5 * w - 1.9 * sl + 1.4 * r;
+      if (swingT >= 0.42) swingT = -1;
+    }
+    const dd = Math.pow(1 - drawT, 3); py -= dd * 0.5; rx -= dd * 0.6;
+    macheteRig.position.set(px, py, pz);
+    macheteRig.rotation.set(rx, ry, rz);
+  }
+
+  // Анимация винтовки: отдача, ход затвора после выстрела, перезарядка, оптика
+  rfRecoil *= Math.exp(-dt * 7); rfFlashT = Math.max(0, rfFlashT - dt);
+  if (weapon !== 'rifle' || heldSlot >= 0 || riding || menuOpen || buildMode || health <= 0 || rfReloading) aiming = false;
+  if (menuOpen) rfAim = 0; // в меню игра на паузе (dt = 0): приближение сбрасываем сразу
+  rfAim += ((aiming ? 1 : 0) - rfAim) * Math.min(1, 10 * dt);
+  if (rfAim > 0.002) { camera.fov = SETTINGS.fov / (1 + 2.2 * rfAim); camera.updateProjectionMatrix(); fovZoomed = true; }
+  else if (fovZoomed) { camera.fov = SETTINGS.fov; camera.updateProjectionMatrix(); fovZoomed = false; rfAim = 0; }
+  scopeEl.style.opacity = gameStarted ? clamp((rfAim - 0.55) / 0.35, 0, 1) : 0;
+  {
+    let px = 0.2, py = -0.27, pz = -0.45, rx = 0, rz = 0, lift = 0, back = 0;
+    px += Math.sin(gunT * 0.8) * 0.003; py += Math.sin(gunT * 1.6) * 0.004;
+    if (health > 0 && (keys.KeyW || keys.KeyA || keys.KeyS || keys.KeyD)) {
+      const st = gunT * (keys.ShiftLeft ? 12 : 9);
+      const k = 1 - 0.8 * rfAim; // в прицеле почти не качает
+      px += Math.sin(st) * 0.012 * k; py += (Math.abs(Math.cos(st)) * 0.014 - 0.007) * k; rz += Math.sin(st) * 0.02 * k;
+    }
+    const dd = Math.pow(1 - drawT, 3); py -= dd * 0.45; rx -= dd * 0.7;
+    pz += rfRecoil * 0.09; rx += rfRecoil * 0.14; py += rfRecoil * 0.012;
+    px -= rfAim * 0.18; py += rfAim * 0.1;
+    if (rfCycleT >= 0) { // затвор: рукоятка вверх, назад, вперёд, вниз; гильза вылетает на отходе
+      rfCycleT += dt;
+      const t = rfCycleT;
+      lift = sstep(0.12, 0.26, t) - sstep(0.7, 0.86, t);
+      back = sstep(0.26, 0.46, t) - sstep(0.52, 0.7, t);
+      if (t >= 0.44 && !rfCased) { rfCased = true; ejectRifleCasing(); }
+      rz -= lift * 0.05; pz += back * 0.015;
+      if (t >= 0.92) rfCycleT = -1;
+    }
+    const lh = _akLh.copy(RF_F);
+    if (rfReloading) { // открыть затвор, левая рука к окну, пять патронов по одному, закрыть затвор
+      rfRT += dt;
+      const p = Math.min(1, rfRT / 2.6);
+      const open = sstep(0, 0.12, p) - sstep(0.78, 0.95, p);
+      lift = Math.max(lift, open); back = Math.max(back, open);
+      const tilt = sstep(0.08, 0.25, p) - sstep(0.85, 1, p);
+      rz += tilt * 0.3; rx -= tilt * 0.1; py -= tilt * 0.03;
+      const reach = sstep(0.1, 0.3, p) - sstep(0.8, 0.95, p);
+      lh.lerpVectors(RF_F, RF_PORT, reach);
+      if (p > 0.3 && p < 0.76) lh.y -= Math.abs(Math.sin((p - 0.3) / 0.46 * Math.PI * 5)) * 0.02; // патроны вдавливаются по одному
+      if (p >= 0.78 && !rfLoaded) { rfLoaded = true; const take = Math.min(RF_MAG - rfAmmo, rfReserve); rfAmmo += take; rfReserve -= take; }
+      if (rfRT >= 2.6) rfReloading = false;
+    }
+    rifle.bolt.rotation.z = -lift * 1.25;   // рукоятка у стрелка справа: при подъёме идёт вверх
+    rifle.bolt.position.z = -0.075 * back;  // и отъезжает назад (по оси модели назад - это -Z)
+    rifle.leftHand.position.copy(lh);
+    rifleRig.position.set(px, py, pz);
+    rifleRig.rotation.set(rx, 0.12 - rfAim * 0.12, rz);
+    rfFlashG.visible = rfFlashT > 0;
+    rfLight.intensity = rfFlashT > 0 ? 9 : 0;
+    if (rfFlashT > 0) rfFlashG.rotation.z = Math.random() * 6;
   }
 
   // Гильзы падают на землю
@@ -6023,14 +6401,14 @@ function loop() {
     if (deathShown) { deathShown = false; deathScreen.style.display = 'none'; }
     hud.textContent =
       `День ${day}   Здоровье: ${Math.ceil(health)}   Еда: ${Math.ceil(hunger)}   Вода: ${Math.ceil(thirst)}\n` +
-      `Убито: ${kills}   ` + (riding ? vehicleHud() : heldSlot >= 0 ? heldHud() : weapon === 'pistol' ? `Пистолет: ${reloading ? 'перезарядка...' : ammo} / ${reserve}` : weapon === 'shotgun' ? `Дробовик: ${sgReloading ? 'заряжаю... ' : ''}${sgAmmo} / ${sgReserve}` : weapon === 'ak' ? `АК-47: ${akReloading ? 'перезарядка... ' : ''}${akAmmo} / ${akReserve}` : 'Топор: ЛКМ - рубить и бить');
+      `Убито: ${kills}   ` + (riding ? vehicleHud() : heldSlot >= 0 ? heldHud() : weapon === 'pistol' ? `Пистолет: ${reloading ? 'перезарядка...' : ammo} / ${reserve}` : weapon === 'shotgun' ? `Дробовик: ${sgReloading ? 'заряжаю... ' : ''}${sgAmmo} / ${sgReserve}` : weapon === 'ak' ? `АК-47: ${akReloading ? 'перезарядка... ' : ''}${akAmmo} / ${akReserve}` : weapon === 'rifle' ? `Винтовка: ${rfReloading ? 'перезарядка... ' : rfCycleT >= 0 ? 'затвор... ' : ''}${rfAmmo} / ${rfReserve}   [ПКМ] Оптика` : weapon === 'machete' ? 'Мачете: ЛКМ - быстрый широкий удар' : 'Топор: ЛКМ - рубить и бить');
   }
   const hh = String(Math.floor(gameHour)).padStart(2, '0');
   const mm = String(Math.floor((gameHour % 1) * 60)).padStart(2, '0');
   const slotsRow = `<div style="display:flex;gap:6px;justify-content:center">${[0, 1, 2, 3, 4].map(i => slotHtml(i, i === heldSlot, false)).join('')}</div>`;
   const info = buildMode
-    ? 'СТРОЙКА: ' + pieceKeys.map((k, i) => `${selPiece === k ? '▶' : ''}[${i + 1}] ${pieces[k].name} (${pieces[k].cost} дер.)`).join('  ') + `   Дерево: ${countOf('wood')}<br>[Q] поворот   [клик] поставить   [V] убрать   [B] выйти`
-    : `[F] Фонарик ${flashOn ? 'вкл' : 'выкл'}   [R] Перезарядка${hasShotgun || hasAxe ? '   [Q] Оружие' : ''}   [1-5] В руку   [E] Взять   [B] Строить   [Tab] Меню   ${hh}:${mm}<br>Дерево: ${countOf('wood')}   Лом: ${countOf('scrap')}`;
+    ? '<div class="dzh">' + pieceKeys.map((k, i) => `<span class="dzh-c${selPiece === k ? ' on' : ''}"><b>${i + 1}</b><img src="${ICONS[k]}">${pieces[k].name}<i style="font-style:normal;color:${adm('freeBuild') || countOf('wood') >= pieces[k].cost ? '#9fd36a' : '#e07a6a'}">${pieces[k].cost}</i></span>`).join('') + `</div>Дерево: ${countOf('wood')}<br>[Q] поворот   [клик] поставить   [V] убрать   [B] выйти`
+    : `[F] Фонарик ${flashOn ? 'вкл' : 'выкл'}   [R] Перезарядка${hasShotgun || hasAxe || hasAK || hasRifle || hasMachete ? '   [Q] Оружие' : ''}   [1-5] В руку   [E] Взять   [B] Строить   [Tab] Меню   ${hh}:${mm}<br>Дерево: ${countOf('wood')}   Лом: ${countOf('scrap')}`;
   const hotHtml = slotsRow + `<div style="margin-top:6px;font-size:16px">${info}</div>`;
   if (hotHtml !== lastHot) { hotbar.innerHTML = hotHtml; lastHot = hotHtml; }
 
@@ -6039,9 +6417,9 @@ function loop() {
     dbgEl.textContent = `X ${camera.position.x.toFixed(1)}  Y ${camera.position.y.toFixed(1)}  Z ${camera.position.z.toFixed(1)}   FPS ${Math.round(fpsSmooth)}   зомби ${zombies.length}  кучи ${piles.length}  объектов ${scene.children.length}`;
   } else dbgEl.style.display = 'none';
   const uiShow = gameStarted ? '' : 'none'; // в главном меню игровой интерфейс скрыт, камера облетает базу
-  hud.style.display = uiShow; hotbar.style.display = uiShow; avatar.style.display = uiShow; cross.style.display = uiShow;
+  hud.style.display = uiShow; hotbar.style.display = uiShow; avatar.style.display = uiShow; cross.style.display = uiShow; radar.style.display = uiShow; radarInfo.style.display = uiShow;
   if (!gameStarted) {
-    gun.visible = false; sgun.visible = false; axeRig.visible = false; akRig.visible = false;
+    gun.visible = false; sgun.visible = false; axeRig.visible = false; akRig.visible = false; rifleRig.visible = false; macheteRig.visible = false;
     promptEl.style.display = 'none'; notice.textContent = '';
     const tt = performance.now() / 1000 * 0.07;
     camera.position.set(Math.cos(tt) * 34, 13, Math.sin(tt) * 34); camera.rotation.set(0, 0, 0); camera.lookAt(0, 3, 0);
