@@ -1353,7 +1353,7 @@ function useSlot(i) {
   const u = ITEMS[s.type].use;
   if (u === 'eat' && hunger < 100) hunger = Math.min(100, hunger + 30);
   else if (u === 'drink' && thirst < 100) thirst = Math.min(100, thirst + 30);
-  else if (u === 'heal' && health < 100) health = Math.min(100, health + 40);
+  else if (u === 'heal' && health < 100) health = Math.min(100, health + 40 + 8 * rank('medic'));
   else if (u === 'fuel') { if (!refuelNearest(40)) return false; }
   else return false;
   s.n--;
@@ -4437,6 +4437,7 @@ function toggleDoor(b) {
   if (b.open) { if (i >= 0) colliders.splice(i, 1); } else if (i < 0) colliders.push(b.doorCol);
 }
 function sleepInBed(b) {
+  if (BM.active) { notify('Орда рядом, спать нельзя'); return; }
   if (sleeping) return;
   if (net.active) return notify('В мультиплеере спать нельзя');
   const night = gameHour >= 19.5 || gameHour < 5.5;
@@ -4671,7 +4672,7 @@ const bar = (label, v, color) =>
 
 function renderMenu() {
   if (menuTab === 'bed') { renderBedMenu(); return; }
-  const tabs = [['inv', '🎒 Инвентарь'], ['craft', '🛠 Крафт'], ['build', '🏗 Стройка'], ['settings', '⚙ Настройки']];
+  const tabs = [['inv', '🎒 Инвентарь'], ['craft', '🛠 Крафт'], ['build', '🏗 Стройка'], ['skills', '⭐ Навыки'], ['settings', '⚙ Настройки']];
   if (admin.on) tabs.push(['admin', '🛠 Админ']);
   if (!gameStarted) { tabs.length = 0; tabs.push(['settings', '⚙ Настройки']); } // из главного меню доступны только настройки
   let body = '';
@@ -4708,6 +4709,16 @@ function renderMenu() {
     }
     body += `<div style="margin-top:12px;opacity:.75;font-size:14px">Лом: железные кучи и дома. Резина: кучи старых покрышек (E). Дерево: рубка деревьев (E). Бензин: канистры, заправка - слот 1-5 рядом с мотоциклом.</div>`;
   }
+  if (menuTab === 'skills') { // уровень, навыки, достижения
+    const need = xpNeed(RPG.level), pct = RPG.level >= 20 ? 100 : Math.floor(RPG.xp / need * 100), got = ACH.filter(a => RPG.ach[a.id]).length;
+    body += `<div class="dzm-sec">Персонаж</div><div class="dzm-bar"><span>Уровень ${RPG.level}</span><div><i style="width:${pct}%;background:#c8e07a"></i></div><b style="width:80px">${RPG.xp}/${need}</b></div>`;
+    body += `<div style="margin:6px 0;opacity:.85">Очков навыков: <b style="color:#c8e07a">${RPG.points}</b> &middot; убито: ${kills} &middot; орд отбито: ${RPG.stats.hordes} &middot; Кровавая луна каждую 3-ю ночь (дни 3, 6, 9...)</div>`;
+    body += `<div class="dzm-sec">Навыки</div>` + PERKS.map(p => {
+      const r = rank(p.id), pips = '●'.repeat(r) + '○'.repeat(5 - r);
+      return `<div class="dzm-card"><div class="dzm-ico" style="display:flex;align-items:center;justify-content:center;font-size:30px">${p.ico}</div><div class="dzm-ct"><b>${p.name}</b><small>${p.desc}</small><div style="color:#c8e07a;letter-spacing:3px">${pips}</div></div>${r >= 5 ? '<span class="dzm-done">макс</span>' : btn('+', 'perk:' + p.id, RPG.points > 0)}</div>`;
+    }).join('');
+    body += `<div class="dzm-sec">Достижения (${got}/${ACH.length})</div>` + ACH.map(a => row(`${RPG.ach[a.id] ? '🏆' : '🔒'} <b>${a.name}</b> <small style="opacity:.65">${a.desc}</small>`, RPG.ach[a.id] ? '<span class="dzm-done">получено</span>' : `+${a.xp} XP`)).join('');
+  }
   if (menuTab === 'settings') {
     const sl = (k, label, min, max, step) => `<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;padding:7px 0;border-bottom:1px solid #3a4530"><span>${label}: <b id="v-${k}">${SET_FMT[k](SETTINGS[k])}</b></span><input type="range" data-set="${k}" min="${min}" max="${max}" step="${step}" value="${SETTINGS[k]}" style="width:240px;max-width:50%"></div>`;
     body += row('Тени', btn(SETTINGS.shadows ? 'Включены' : 'Выключены', 'tog:shadows'));
@@ -4739,6 +4750,7 @@ function renderMenu() {
     body += sec('Мир') + wrap(btn('Открыть все ящики', 'admworld:cases') + btn('Ящик рядом', 'admworld:case') + btn('Рассыпать ресурсы', 'admworld:resources') + btn('Верстак рядом', 'admworld:bench') + btn('Костёр рядом', 'admworld:fire'));
     body += sec('Время') + wrap(btn('Утро 06:00', 'admtime:6') + btn('День 12:00', 'admtime:12') + btn('Вечер 19:00', 'admtime:19') + btn('Ночь 00:00', 'admtime:0'));
     body += sec('Погода') + wrap(btn('Ясно', 'admwx:clear') + btn('Пасмурно', 'admwx:cloud') + btn('Дождь', 'admwx:rain') + btn('Гроза', 'admwx:storm'));
+    body += sec('Опыт и орда') + wrap(btn('+500 XP', 'admxp:500') + btn('Орда сейчас', 'admhorde:1'));
     body += sec('Телепорт') + wrap(btn('На старт', 'admtp:home') + btn('Склад 1', 'admtp:w1') + btn('Склад 2', 'admtp:w2') + btn('Подвал 1', 'admtp:b1') + btn('Подвал 2', 'admtp:b2') + btn('Ближайший ящик', 'admtp:case') + btn('К мотоциклу', 'admtp:bike') + btn('Заправка', 'admtp:gs') + btn('Гараж', 'admtp:gar') + btn('Водокачка', 'admtp:wt') + btn('К джипу', 'admtp:car') + btn('Блокпост', 'admtp:op') + btn('Арсенал', 'admtp:ar'));
   }
   if (menuTab === 'build') { // карточки деталей с иконками, ценой и подсказками
@@ -4815,6 +4827,7 @@ menu.addEventListener('click', e => {
     if (arg === 'all') slots[pick] = null; else { slots[pick].n--; if (slots[pick].n <= 0) slots[pick] = null; }
     if (!slots[pick]) pick = null;
   }
+  if (act === 'perk') buyPerk(arg);
   if (act === 'craft') craft(arg);
   if (act === 'bench') benchCraft(arg);
   if (act === 'tog') { SETTINGS[arg] = !SETTINGS[arg]; applySettings(); saveSettings(); }
@@ -4863,6 +4876,7 @@ function makeSave() { // всё, что нужно, чтобы вернуть и
     wh: warehouses.map(w => [w.state, w.hp]),
     pumps: stations.map(st => st.pumps.map(p => p.fuel)),
     evac: cutscenes.serialize(),
+    rpg: rpgSave(),
   };
 }
 function saveGame(slot, quiet) {
@@ -4885,7 +4899,7 @@ function setCaseOpen(c, empty) { // ящик сразу открыт (после
 function applySave(sv) { // накладываем сохранение на только что созданный мир с тем же зерном
   const P = sv.player;
   camera.position.set(P.x, P.y, P.z); yaw = P.yaw; pitch = 0;
-  health = P.health; hunger = P.hunger; thirst = P.thirst; kills = P.kills; day = sv.day; gameHour = sv.hour;
+  health = P.health; hunger = P.hunger; thirst = P.thirst; kills = P.kills; day = sv.day; gameHour = sv.hour; if (sv.rpg) rpgLoad(sv.rpg);
   slots.fill(null); sv.inv.forEach((sl, i) => { slots[i] = sl ? { type: sl[0], n: sl[1] } : null; });
   const W = sv.w;
   weapon = W.weapon; hasShotgun = W.hasShotgun; hasAxe = W.hasAxe; hasAK = W.hasAK;
@@ -5358,6 +5372,7 @@ function pickTarget(z) { // ближайший игрок (у хозяина - �
   return best;
 }
 function damageZombie(z, dmg) { // у клиента урон идёт хозяину комнаты
+  dmg *= 1 + 0.07 * rank('fighter'); // навык «Боец»
   z.hitT = 0.28; // вздрагивание при попадании
   if (net.role === 'client') { netSendTo(net.hostConn, { t: 'zh', id: z.id, d: dmg }); z.lastHit = performance.now(); return; }
   z.hp -= dmg;
@@ -5383,7 +5398,7 @@ function applyZombieSnapshot(list) {
   }
   for (let i = zombies.length - 1; i >= 0; i--) {
     if (seen.has(zombies[i].id)) continue;
-    if (performance.now() - (zombies[i].lastHit || -1e9) < 2500) kills++; // зомби, которого добил ты
+    if (performance.now() - (zombies[i].lastHit || -1e9) < 2500) { kills++; onZombieKilled(zombies[i]); } // зомби, которого добил ты
     startCorpse(zombies[i]); zombies.splice(i, 1);
   }
 }
@@ -5589,6 +5604,8 @@ function adminAction(act, arg, arg2) {
   if (act === 'admheal') { health = 100; hunger = 100; thirst = 100; notify('Здоровье, еда и вода восстановлены'); return; }
   if (act === 'admclear') { slots.fill(null); notify('Инвентарь очищен'); return; }
   if (act === 'admtime') { gameHour = parseFloat(arg); return; }
+  if (act === 'admxp') { addXP(+arg || 0); return; }
+  if (act === 'admhorde') { if (!BM.active) startHorde(); return; }
   if (act === 'admwx') { SETTINGS.weather = true; setWeather(arg); WX.t = 600; return; }
   if (act === 'admzombie') {
     if (arg === 'kill') { zombies.forEach(z => { z.hp = 0; }); return notify('Зомби убиты'); }
@@ -5985,12 +6002,118 @@ function updateRadar(dt) { // компас и радар: север (N) вве�
   for (const b of built) if (b.type === 'fire') dot(to(b.px, b.pz), '#ff9a3a', 3);
   if (bike && bike.rig && bike.rig.root) dot(to(bike.rig.root.position.x, bike.rig.root.position.z), '#4aa3e8', 4);
   const pulse = 2.5 + Math.sin(performance.now() / 180) * 0.8;
-  for (const z of zombies) { if (z.dead || !z.mesh) continue; if (Math.hypot(z.mesh.position.x - px, z.mesh.position.z - pz) > 30) continue; dot(to(z.mesh.position.x, z.mesh.position.z), '#ff3a2a', pulse); }
+  for (const z of zombies) { if (z.dead || !z.mesh) continue; if (Math.hypot(z.mesh.position.x - px, z.mesh.position.z - pz) > (z.horde ? 45 : 30)) continue; dot(to(z.mesh.position.x, z.mesh.position.z), '#ff3a2a', pulse); }
   x.fillStyle = '#eef2e6'; x.beginPath(); x.moveTo(C, C - 7); x.lineTo(C + 5, C + 5); x.lineTo(C, C + 2); x.lineTo(C - 5, C + 5); x.closePath(); x.fill();
   const hh = String(Math.floor(gameHour)).padStart(2, '0'), mm = String(Math.floor((gameHour % 1) * 60)).padStart(2, '0');
-  radarInfo.textContent = `${hh}:${mm}  ·  ${WX_KINDS[WX.kind].name}`;
+  radarInfo.innerHTML = `${hh}:${mm} &middot; ${WX_KINDS[WX.kind].name}<br><span style="font-size:12px">Ур. ${RPG.level}${RPG.points ? ' &middot; <b style=\"color:#c8e07a\">очко навыка!</b>' : ''}</span><div style="height:5px;margin:3px 16px 0;background:#0008;border-radius:3px;overflow:hidden"><i style="display:block;height:100%;width:${RPG.level >= 20 ? 100 : Math.floor(RPG.xp / xpNeed(RPG.level) * 100)}%;background:#c8e07a"></i></div>`;
 }
 const rawRadarDt = dt => dt > 0 ? dt : 0.016; // на паузе радар всё равно перерисовывается
+// --- Версия 2.0: опыт, навыки, достижения и «Кровавая луна» (ночная орда) ---
+const XP_BY = { normal: 10, runner: 15, soldier: 30, bloater: 25, brute: 45 };
+const RPG = { xp: 0, level: 1, points: 0, perks: {}, stats: { hordes: 0, normal: 0, runner: 0, soldier: 0, bloater: 0, brute: 0 }, ach: {} };
+const rank = id => RPG.perks[id] || 0;
+const xpNeed = l => 80 + l * 60;
+const PERKS = [
+  { id: 'fighter', name: 'Боец', ico: '🗡', desc: '+7% урона любым оружием за ранг' },
+  { id: 'tough', name: 'Закалка', ico: '🛡', desc: 'Голод и жажда копятся на 12% медленнее за ранг' },
+  { id: 'swift', name: 'Лёгкие ноги', ico: '👟', desc: '+4% к скорости бега и ходьбы за ранг' },
+  { id: 'medic', name: 'Медик', ico: '💊', desc: 'Аптечка лечит на 8 больше за ранг' },
+  { id: 'adren', name: 'Адреналин', ico: '⚡', desc: '+2 здоровья за каждого убитого зомби за ранг' },
+];
+const ACH = [
+  { id: 'k10', name: 'Первая кровь', desc: 'Убей 10 зомби', ok: () => kills >= 10, xp: 50 },
+  { id: 'k100', name: 'Истребитель', desc: 'Убей 100 зомби', ok: () => kills >= 100, xp: 200 },
+  { id: 'k500', name: 'Чума мертвецам', desc: 'Убей 500 зомби', ok: () => kills >= 500, xp: 600 },
+  { id: 'brute', name: 'Охотник на великанов', desc: 'Убей громилу', ok: () => RPG.stats.brute >= 1, xp: 100 },
+  { id: 'bloater', name: 'Сапёр', desc: 'Убей 5 вздутых', ok: () => RPG.stats.bloater >= 5, xp: 120 },
+  { id: 'soldier', name: 'Дембель', desc: 'Убей 5 солдат', ok: () => RPG.stats.soldier >= 5, xp: 120 },
+  { id: 'runner', name: 'Быстрее ветра', desc: 'Убей 20 бегунов', ok: () => RPG.stats.runner >= 20, xp: 150 },
+  { id: 'd4', name: 'Три дня', desc: 'Доживи до 4-го дня', ok: () => day >= 4, xp: 80 },
+  { id: 'd11', name: 'Старожил', desc: 'Доживи до 11-го дня', ok: () => day >= 11, xp: 300 },
+  { id: 'h1', name: 'Кровавая луна', desc: 'Отбей орду', ok: () => RPG.stats.hordes >= 1, xp: 250 },
+  { id: 'h3', name: 'Хозяин ночи', desc: 'Отбей 3 орды', ok: () => RPG.stats.hordes >= 3, xp: 500 },
+  { id: 'l5', name: 'Бывалый', desc: 'Достигни 5 уровня', ok: () => RPG.level >= 5, xp: 100 },
+  { id: 'l10', name: 'Ветеран', desc: 'Достигни 10 уровня', ok: () => RPG.level >= 10, xp: 300 },
+];
+const toastEl = document.createElement('div');
+toastEl.style.cssText = 'position:fixed;top:90px;left:50%;transform:translateX(-50%);padding:10px 22px;border-radius:12px;background:linear-gradient(#33411f,#1b2412);border:1px solid #c8e07a;color:#eef2e6;font:600 18px "Segoe UI",system-ui,sans-serif;box-shadow:0 8px 30px #000a;display:none;z-index:6;text-align:center;pointer-events:none';
+document.body.appendChild(toastEl);
+let toastT = 0; const toastQ = [];
+const toast = t => toastQ.push(t);
+const bmOverlay = document.createElement('div');
+bmOverlay.style.cssText = 'position:fixed;inset:0;pointer-events:none;box-shadow:inset 0 0 240px 40px rgba(190,10,10,.75);opacity:0;z-index:4';
+document.body.appendChild(bmOverlay);
+const bmBanner = document.createElement('div');
+bmBanner.style.cssText = 'position:fixed;top:12px;left:50%;transform:translateX(-50%);padding:6px 18px;border-radius:10px;background:#2a0a0acc;border:1px solid #c0392b;color:#ff9a8a;font:700 16px "Segoe UI",system-ui,sans-serif;letter-spacing:.06em;display:none;z-index:6;pointer-events:none';
+document.body.appendChild(bmBanner);
+function addXP(n) {
+  RPG.xp += Math.round(n);
+  while (RPG.level < 20 && RPG.xp >= xpNeed(RPG.level)) {
+    RPG.xp -= xpNeed(RPG.level); RPG.level++; RPG.points++; health = Math.min(100, health + 20);
+    toast(`⭐ Уровень ${RPG.level}! Очко навыка: Tab → Навыки`);
+  }
+  if (RPG.level >= 20) RPG.xp = Math.min(RPG.xp, xpNeed(20) - 1);
+}
+function checkAch() {
+  for (let guard = 0; guard < 4; guard++) {
+    let got = false;
+    for (const a of ACH) if (!RPG.ach[a.id] && a.ok()) { RPG.ach[a.id] = 1; got = true; toast(`🏆 ${a.name}: +${a.xp} XP`); addXP(a.xp); }
+    if (!got) break;
+  }
+}
+function onZombieKilled(z) { // вызывается при каждом убитом зомби (хозяин комнаты и одиночная игра)
+  RPG.stats[z.type] = (RPG.stats[z.type] || 0) + 1;
+  addXP((XP_BY[z.type] || 10) * (z.horde ? 1.5 : 1));
+  const ad = rank('adren'); if (ad && health > 0) health = Math.min(100, health + 2 * ad);
+  checkAch();
+}
+function buyPerk(id) { if (RPG.points > 0 && PERKS.some(p => p.id === id) && rank(id) < 5) { RPG.perks[id] = rank(id) + 1; RPG.points--; } }
+function rpgSave() { return { xp: RPG.xp, level: RPG.level, points: RPG.points, perks: RPG.perks, stats: RPG.stats, ach: RPG.ach, bm: BM.doneDay }; }
+function rpgLoad(r) { RPG.xp = r.xp || 0; RPG.level = r.level || 1; RPG.points = r.points || 0; RPG.perks = r.perks || {}; Object.assign(RPG.stats, r.stats || {}); RPG.ach = r.ach || {}; BM.doneDay = r.bm ?? -1; }
+
+const BM = { active: false, k: 0, doneDay: -1, left: 0, total: 0, t: 0 };
+function horn() { // рог орды: низкий пилообразный тон
+  const a = wxAudio(); if (!a) return; try { if (a.state === 'suspended') a.resume(); } catch (err) { /* нужен клик */ }
+  if (a.state !== 'running') return;
+  const t = a.currentTime, o = a.createOscillator(), g = a.createGain(), lp = a.createBiquadFilter();
+  o.type = 'sawtooth'; o.frequency.setValueAtTime(110, t); o.frequency.exponentialRampToValueAtTime(55, t + 2.8);
+  lp.type = 'lowpass'; lp.frequency.value = 420;
+  g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.25 * SETTINGS.volume + 0.001, t + 0.4); g.gain.exponentialRampToValueAtTime(0.0001, t + 3);
+  o.connect(lp); lp.connect(g); g.connect(a.destination); o.start(t); o.stop(t + 3.1);
+}
+function startHorde() {
+  BM.active = true; BM.doneDay = day; const n = Math.min(40, 10 + day * 2); BM.total = n;
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2, r = 38 + Math.random() * 18;
+    const z = spawnZombie(camera.position.x + Math.cos(a) * r, camera.position.z + Math.sin(a) * r, pickZombieType(true));
+    z.horde = true; z.hp *= 1.25;
+  }
+  horn(); toast(`🌑 КРОВАВАЯ ЛУНА! Орда: ${n} зомби`);
+}
+function endHorde(win) {
+  BM.active = false;
+  if (win) { RPG.stats.hordes++; addXP(150 + day * 15); health = Math.min(100, health + 30); reserve += 20; toast('🌅 Орда отбита! +опыт, +20 патронов'); checkAch(); }
+  else { for (const z of zombies) z.horde = false; toast('🌅 Рассвет. Орда рассеялась'); }
+}
+function updateBloodMoon(dt) {
+  toastT -= dt;
+  if (toastT <= 0) { if (toastQ.length) { toastEl.textContent = toastQ.shift(); toastEl.style.display = 'block'; toastT = 3.2; } else toastEl.style.display = 'none'; }
+  if (!gameStarted) { bmOverlay.style.opacity = 0; bmBanner.style.display = 'none'; return; }
+  BM.t += dt;
+  if (net.role !== 'client' && dt > 0) {
+    if (!BM.active && day % 3 === 0 && gameHour >= 21 && gameHour < 23 && BM.doneDay !== day && !adm('noZombies')) startHorde();
+    if (BM.active) { BM.left = zombies.filter(z => z.horde).length; if (BM.left === 0) endHorde(true); else if (gameHour >= 5 && gameHour < 12) endHorde(false); }
+    if (Math.floor(BM.t) !== Math.floor(BM.t - dt)) checkAch();
+  }
+  BM.k += ((BM.active ? 1 : 0) - BM.k) * (1 - Math.exp(-Math.max(dt, 0.016) * 0.6));
+  bmOverlay.style.opacity = menuOpen ? 0 : BM.k * (0.55 + 0.25 * Math.sin(BM.t * 2));
+  bmBanner.style.display = BM.active && !menuOpen ? 'block' : 'none';
+  if (BM.active) bmBanner.textContent = `🌑 КРОВАВАЯ ЛУНА · осталось ${BM.left} из ${BM.total}`;
+  if (BM.k > 0.01 && !inBasement) { // небо, горизонт и туман наливаются красным
+    const r1 = new THREE.Color(0.3, 0.02, 0.02), r2 = new THREE.Color(0.55, 0.07, 0.04), w = Math.min(0.8, BM.k * 0.8);
+    skyMat.uniforms.top.value.lerp(r1, w); skyMat.uniforms.bottom.value.lerp(r2, w); scene.background.lerp(r2, w); scene.fog.color.lerp(r2, w * 0.9);
+  }
+}
 function loop() {
   const rawDt = clock.getDelta();
   const dt = ((menuOpen && !net.active) || sleeping || !gameStarted || cutscenes.cut.active) ? 0 : Math.min(rawDt, 0.1); // в меню и во сне игра на паузе
@@ -6031,12 +6154,13 @@ function loop() {
   updateClouds(dt);
   updateWeather(dt);
   updateRadar(dt);
+  updateBloodMoon(dt);
 
   if (health > 0 && !cutscenes.cut.active) {
     if (!riding) {
       const flying = adm('fly');
       const wet = !flying && terrainY(camera.position.x, camera.position.z) < WATER_Y - 0.3; // глубже колена: плывём медленнее и не бежим
-      const speed = flying ? (keys.ShiftLeft ? 18 : 9) * dt * admin.flySpeed : (keys.ShiftLeft && !wet ? 8 : 4.5) * dt * (wet ? 0.55 : 1) * (adm('speedMul') ? admin.speedMul : 1);
+      const speed = flying ? (keys.ShiftLeft ? 18 : 9) * dt * admin.flySpeed : (keys.ShiftLeft && !wet ? 8 : 4.5) * dt * (1 + 0.04 * rank('swift')) * (wet ? 0.55 : 1) * (adm('speedMul') ? admin.speedMul : 1);
       if (wet && pitch < -0.8 && thirst < 100) { thirst = Math.min(100, thirst + 14 * dt); if (!window.__drinkT || performance.now() - window.__drinkT > 4000) { window.__drinkT = performance.now(); notify('Ты пьёшь воду из озера'); } } // посмотри вниз, стоя в воде: пьёшь
       const fwd = flying
         ? new THREE.Vector3(-Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), -Math.cos(yaw) * Math.cos(pitch))
@@ -6061,8 +6185,8 @@ function loop() {
     }
 
     // Голод и жажда
-    hunger = Math.max(0, hunger - 0.4 * dt);
-    thirst = Math.max(0, thirst - 0.6 * (1 - 0.4 * WX.wet) * dt); // в дождь жажда копится медленнее
+    hunger = Math.max(0, hunger - 0.4 * dt * (1 - 0.12 * rank('tough')));
+    thirst = Math.max(0, thirst - 0.6 * (1 - 0.4 * WX.wet) * (1 - 0.12 * rank('tough')) * dt); // в дождь жажда копится медленнее
     if (hunger <= 0 || thirst <= 0) health -= 2 * dt;          // урон от голода/жажды
     else if (hunger > 70 && thirst > 70) health = Math.min(100, health + 0.5 * dt); // медленное лечение
   }
@@ -6359,15 +6483,15 @@ function loop() {
     if (net.role === 'client') { clientZombie(z, dt); continue; } // у клиента зомби двигает хозяин комнаты
     if (z.hp <= 0) {
       if (z.cfg.explode) explodeBloater(z);
-      startCorpse(z); zombies.splice(i, 1); kills++;
-      if (!adm('noZombies')) spawnZombie(undefined, undefined, pickZombieType(daylight < 0.4));
+      startCorpse(z); zombies.splice(i, 1); kills++; onZombieKilled(z);
+      if (!adm('noZombies') && !z.horde) spawnZombie(undefined, undefined, pickZombieType(daylight < 0.4));
       continue;
     }
     const tgt = pickTarget(z);
     const to = new THREE.Vector3(tgt.x - z.mesh.position.x, 0, tgt.z - z.mesh.position.z);
     const dist = to.length();
     const sc = z.cfg.sx;
-    const chase = dist < 35 && dist > 1.2 * sc;
+    const chase = dist < (z.horde ? 140 : 35) && dist > 1.2 * sc; // орда чует игрока издалека
     z.mv = chase ? 1 : 0;
     if (chase) {
       to.normalize();

@@ -1,7 +1,7 @@
 {
   "name": "my-game",
   "productName": "DeadZone",
-  "version": "1.16.0",
+  "version": "2.1.0",
   "description": "DeadZone: постапокалиптическое 3D-выживание с мультиплеером",
   "main": "electron-main.js",
   "scripts": {

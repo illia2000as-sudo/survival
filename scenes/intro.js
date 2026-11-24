@@ -1,3 +1,4 @@
+import { createHelicopter } from './heli.js';
 // Вступительная сцена «Начало конца»: квартира, сирена, радио, окно, титры DEADZONE.
 // Комната собирается из деталей прямо в мире (висит над перекрёстком на высоте 9 м), поэтому за окном настоящий город игры.
 // После сцены всё лишнее (комната, машины, дым, силуэты) удаляется, а игра начинается как обычно.
@@ -106,6 +107,9 @@ export function createIntro(G, ui, audio, cut, people) {
       for (let i = 0; i < 26; i++) { const mat = new THREE.SpriteMaterial({ map: mkPuff, color: 0x3a3632, transparent: true, depthWrite: false, opacity: 0 }), sp = new THREE.Sprite(mat); scene.add(sp); P.extra.push(sp); P.smoke.push({ sp, mat, sx, sz, age: (i / 26) * 10 + k * 0.7 }); }
       const fire = new THREE.Sprite(new THREE.SpriteMaterial({ map: mkPuff, color: 0xff7a20, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, opacity: 0.8 })); fire.scale.set(9, 5, 1); fire.position.set(sx, 3, sz); scene.add(fire); P.extra.push(fire); P.flash.push({ h: fire, ph: k % 2, fire: true });
     });
+    // патрульный вертолёт: пролетает над улицей за окном, прожектор шарит по заражённым
+    P.heli = createHelicopter(G, { seed: 5, spool: 1 }); P.heli.setSearch(true); P.heli.group.visible = false; scene.add(P.heli.group); P.extra.push(P.heli.group);
+    P.heliGlow = new THREE.Sprite(new THREE.SpriteMaterial({ map: mkPuff, color: 0xdfe8ff, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, opacity: 0, fog: false })); P.heliGlow.scale.set(16, 8, 1); scene.add(P.heliGlow); P.extra.push(P.heliGlow);
     P.ghouls = [];
     for (let i = 0; i < 9; i++) {
       const pe = people.build('ghoul', 300 + i), a = (i % 2 ? 1 : -1) * (1 + (i % 4) * 1.4), z = 38 + i * 7;
@@ -158,7 +162,7 @@ export function createIntro(G, ui, audio, cut, people) {
     ui.sub(''); S.phase = 'free2'; ui.objective('Подойди к окну');
   }
   function startWindow() {
-    S.phase = 'window'; S.wt = 0; S.from = { x: S.px, z: S.pz, yaw: G.yaw, pitch: G.pitch }; ui.objective(''); ui.hint(''); audio.wind(true, 0.2); audio.city(true);
+    S.phase = 'window'; S.wt = 0; S.from = { x: S.px, z: S.pz, yaw: G.yaw, pitch: G.pitch }; ui.objective(''); ui.hint(''); audio.wind(true, 0.2); audio.city(true); audio.heli(true, 0.12);
   }
 
   function update(dt) {
@@ -203,6 +207,15 @@ export function createIntro(G, ui, audio, cut, people) {
     const P = S && S.props; if (!P) return;
     P.smoke.forEach(q => { q.age += dt; if (q.age > 10) q.age -= 10; const a = q.age, k = a / 10; q.sp.position.set(q.sx + a * 0.9 + Math.sin(a + q.sz) * 1.5, a * 3.4 + 1, q.sz); const sc = 7 + a * 2.8; q.sp.scale.set(sc, sc, 1); q.mat.opacity = 0.5 * (1 - k) * Math.min(1, a / 1.2); });
     const blink = Math.floor(S.t * 2.6) % 2; P.flash.forEach(f => { const on = f.fire ? 1 : (blink === f.ph ? 1 : 0); f.h.visible = !!on; if (f.fire) f.h.material.opacity = 0.6 + 0.2 * Math.sin(S.t * 7 + f.ph); if (f.b) f.b.visible = !!on; });
+    if (P.heli) { // пролёт вертолёта: справа налево за окном, пока идёт фаза «окно»
+      const H = P.heli, w = S.phase === 'window' ? S.wt : -1;
+      H.update(dt); H.group.visible = w >= 0 && w < 12;
+      if (H.group.visible) {
+        const x = 14 * (6 - w), sw = Math.sin(w * 1.3);
+        H.group.position.set(x, 16 + Math.sin(w * 0.7) * 0.8, 44); H.group.rotation.set(-0.06, PI / 2, 0.04 * sw, 'YXZ'); H.beam.rotation.z = sw * 0.35;
+        P.heliGlow.position.set(x - 6, 0.6, 44 + sw * 9); P.heliGlow.material.opacity = 0.35 + 0.1 * Math.sin(S.t * 11);
+      } else P.heliGlow.material.opacity = 0;
+    }
     P.ghouls.forEach((g, i) => { g.z -= g.sp * dt; g.pe.group.position.set(g.x + Math.sin(S.t * 0.6 + i) * 0.15, g.pe.update(S.t + i, g.sp > 0), g.z); });
   }
 

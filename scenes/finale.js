@@ -1,12 +1,13 @@
+import { createHelicopter, createDust } from './heli.js';
 // Финальная сцена «Эвакуация»: утро 15-го дня, сигнал по радио, отметка на карте, точка сбора с военными,
-// посадка в грузовик, отъезд камеры, надпись «ВЫ ВЫЖИЛИ» и меню.
+// посадка в вертолёт, взлёт и уход вдаль, надпись «ВЫ ВЫЖИЛИ» и меню.
 // Запускается один раз, только после 14 полных игровых дней (день >= 15, утро), только в одиночной игре.
 export const FINALE_LINES = [
   'Внимание всем выжившим!',
   'Эвакуация начинается.',
   'Повторяем: эвакуация начинается.',
   'Направляйтесь к обозначенной точке сбора.',
-  'Спасательные подразделения уже в пути.',
+  'Вертолёты эвакуации уже в пути.',
 ];
 export function createFinale(G, ui, audio, cut, people) {
   const { THREE, scene, camera, renderer } = G;
@@ -64,11 +65,21 @@ export function createFinale(G, ui, audio, cut, people) {
     const [s1x, s1z] = lw(S, -13, 13), [s2x, s2z] = lw(S, 13, 13); G.sandWallK(K, s1x, s1z, ...lw(S, -8, 13), 1.0); G.sandWallK(K, ...lw(S, 8, 13), s2x, s2z, 1.0);
     S.extra.push(...K.finish());
     const [sx, sz] = lw(S, 0, 17.3); G.textPlane('ЭВАКУАЦИОННЫЙ ПУНКТ', 9.0, 0.9, '#1f2a1a', '#f0ead8', sx, 5.2, sz, S.ry);
-    // рабочий грузовик: отдельный объект, он уедет
-    const c0 = G.colliders.length, KT = G.bKit(0, 0, 52); G.milTruckK(KT, 0, 0, 0); G.colliders.length = c0;
-    const grp = new THREE.Group(); KT.finish().forEach(mm => grp.add(mm)); const [tx, tz] = lw(S, -2.2, -8); grp.position.set(tx, 0, tz); grp.rotation.y = S.ry; scene.add(grp); S.truck = grp; S.extra.push(grp);
-    colLocal(S, -2.2, -8, 1.3, 3.4); S.truckCol = G.colliders[G.colliders.length - 1];
-    S.board = lw(S, -2.2, -3.3); S.inside = lw(S, -2.2, -6.4);
+    // вертолёт эвакуации: стоит на площадке с буквой H, винты раскручиваются, когда игрок подходит
+    const KP = G.bKit(S.x, S.z, 53);
+    KP.xf(G.m4(S.x, 0, S.z, 0, S.ry, 0), () => {
+      const dd = KP.d, cx = -2.2, cz = -8;
+      dd.box(11.6, 0.03, 11.6, 0x4a4640, cx, 0.05, cz);
+      for (let i = 0; i < 24; i++) { const an = i / 24 * Math.PI * 2; dd.box(1.4, 0.015, 0.35, 0xd8b030, cx + Math.cos(an) * 5.3, 0.07, cz + Math.sin(an) * 5.3, 0, an - Math.PI / 2, 0); }
+      [-1.1, 1.1].forEach(x => dd.box(0.55, 0.015, 4.2, 0xd8d0b0, cx + x, 0.08, cz)); dd.box(2.2, 0.015, 0.55, 0xd8d0b0, cx, 0.08, cz);
+    });
+    S.extra.push(...KP.finish());
+    const heli = createHelicopter(G, { seed: 91 }), [hx0, hz0] = lw(S, -2.2, -8);
+    heli.group.position.set(hx0, 0, hz0); heli.group.rotation.y = S.ry; scene.add(heli.group);
+    S.heli = heli; S.truck = heli.group; S.extra.push(heli.group);
+    S.dust = createDust(G, 22); S.dust.sprites.forEach(sp => { scene.add(sp); S.extra.push(sp); });
+    colLocal(S, -2.2, -8, 1.3, 4.6); S.truckCol = G.colliders[G.colliders.length - 1];
+    S.board = lw(S, -0.55, -7.1); S.inside = lw(S, -2.0, -7.1);   // у сдвижной двери справа по борту и внутри кабины
     // люди: солдаты и выжившие
     const face = (lx, lz, tx2, tz2) => S.ry + Math.atan2(tx2 - lx, tz2 - lz);
     [[-6, 14, 'soldier', 0, 40, 'rifle'], [6, 14, 'soldier', 0, 40, 'rifle'], [-5, 3, 'soldier', 0, 30, 'rifle'], [4.5, 2, 'soldier', 0, 30, 'rifle'], [-4.6, -3.2, 'soldier', 0, 30, 'wave'], [-0.2, -3.4, 'officer', 0, 20, 'stand'], [8, -6, 'soldier', 0, 10, 'rifle'], [-9, -9, 'soldier', 0, 10, 'rifle'],
@@ -156,9 +167,10 @@ export function createFinale(G, ui, audio, cut, people) {
       if (bigOn) { sizeBig(); bigEl.style.display = 'block'; drawMap(bigEl, 0, 0, MAP_HALF * 2, true); } else bigEl.style.display = 'none';
       // подход: окрик солдата, подсказка посадки
       const bd = Math.hypot(camera.position.x - S.board[0], camera.position.z - S.board[1]);
-      if (bd < 45 && !st.spoke) { st.spoke = true; ui.sub('Сюда! Быстрее к грузовику!'); audio.heli(true, 0.07); setTimeout(() => ui.sub(''), 3200); }
+      if (bd < 45 && !st.spoke) { st.spoke = true; ui.sub('Сюда! Быстрее к вертолёту!'); audio.heli(true, 0.07); setTimeout(() => ui.sub(''), 3200); }
       st.near = bd < 3.2 && G.health > 0;
-      ui.hint(st.near ? (G.riding() ? 'Сначала выйди из транспорта' : 'E - сесть в транспорт') : '');
+      if (S.heli) S.heli.spoolTarget = bd < 70 ? 1 : 0; // подходишь - винты раскручиваются
+      ui.hint(st.near ? (G.riding() ? 'Сначала выйди из транспорта' : 'E - сесть в вертолёт') : '');
       animateSite(dt);
     } else if (st.state === 4 && S) animateSite(dt);
     if (st.state !== 1) { if (wpEl.style.display !== 'none') wpEl.style.display = 'none'; if (st.state >= 2 || st.state === 4) { miniEl.style.display = 'none'; bigEl.style.display = 'none'; } }
@@ -169,6 +181,11 @@ export function createFinale(G, ui, audio, cut, people) {
     S.people.forEach(p => { p.pe.group.rotation.y = p.ry + Math.sin(t * 0.4 + p.ph) * 0.12; p.pe.group.position.y = Math.sin(t * 1.5 + p.ph) * 0.01; });
     S.smoke.forEach(q => { q.age += dt; if (q.age > 12) q.age -= 12; const a = q.age; q.sp.position.set(S.flare.x + a * 0.5 + Math.sin(a * 0.8) * 1.2, 1 + a * 3.6, S.flare.z); const sc = 3 + a * 1.4; q.sp.scale.set(sc, sc, 1); q.mat.opacity = 0.6 * (1 - a / 12) * Math.min(1, a / 0.8); });
     if (S.beam) S.beam.material.opacity = 0.14 + 0.05 * Math.sin(t * 2);
+    heliStep(dt);
+  }
+  function heliStep(dt) { // винты, огни и пыль
+    const S = st.site; if (!S || !S.heli) return; S.heli.update(dt);
+    const k = S.heli.spool; const pp = lw(S, -2.2, -8); S.dust.update(dt, pp[0], pp[1], 0, k * k * (st.cin && st.cin.alt > 3 ? Math.max(0, 1 - st.cin.alt / 40) : 1));
   }
   function onKey(e) {
     if (st.state !== 1 || cut.active || !G.gameStarted) return;
@@ -185,11 +202,12 @@ export function createFinale(G, ui, audio, cut, people) {
     hero.group.position.set(hp[0], 0, hp[1]); hero.group.rotation.y = yaw + PI; scene.add(hero.group);
     st.cin = { t: 0, hero, hp, p0: camera.position.clone(), yaw0: yaw, pitch0: G.pitch, dir: new THREE.Vector3(S.board[0] - hp[0], 0, S.board[1] - hp[1]), done: false, menuShown: false, tpos: new THREE.Vector3(S.truck.position.x, 0, S.truck.position.z), v: 0, look: new THREE.Vector3() };
     st.cin.dist = st.cin.dir.length(); st.cin.dir.normalize(); if (st.cin.dist < 0.3) st.cin.dir.set(-Math.sin(S.ry), 0, -Math.cos(S.ry));
-    audio.unlock(); audio.heli(true, 0.05); audio.wind(true, 0.08);
+    S.heli.spoolTarget = 1; S.heli.setSearch(false); st.cin.alt = 0;
+    audio.unlock(); audio.heli(true, 0.09); audio.wind(true, 0.08);
   }
   function setCam(px, py, pz, lx, ly, lz) { camera.position.set(px, py, pz); camera.lookAt(lx, ly, lz); }
   function update(dt) {
-    const c = st.cin; if (st.state < 2 || !c) return; const S = st.site; c.t += dt; const t = c.t; audio.tick(dt);
+    const c = st.cin; if (st.state < 2 || !c) return; const S = st.site; c.t += dt; const t = c.t; audio.tick(dt); heliStep(dt);
     const dir = c.dir, perp = new THREE.Vector3(-dir.z, 0, dir.x);
     ui.letterbox(smooth(clamp(t / 1.2, 0, 1)));
     if (t < 6.6) {
@@ -211,15 +229,17 @@ export function createFinale(G, ui, audio, cut, people) {
       }
       audio.heli(true, 0.05);
     } else {
-      // грузовик трогается, камера отдаляется и поднимается
-      const tt = t - 6.6; if (tt > 1.6) audio.engine(true, clamp(c.v / 13, 0, 1)); else audio.engine(true, 0.05);
-      const move = tt > 1.6 ? clamp((tt - 1.6) * 2.1, 0, 13) : 0; c.v = move;
-      const fwd = new THREE.Vector3(Math.sin(S.ry) * -1, 0, Math.cos(S.ry) * -1); // перед кузова - локальный -Z
-      c.tpos.addScaledVector(fwd, move * dt); S.truck.position.set(c.tpos.x, G.terrainY(c.tpos.x, c.tpos.z), c.tpos.z);
-      const u = smooth(clamp(tt / 12, 0, 1)), R = S.ry, cr = Math.cos(R), sr = Math.sin(R);
-      const off = [lerp(6.5, 0, u), lerp(2.2, 22, u), lerp(-2.5, 46, u)];             // в осях грузовика; +Z - позади
-      const wx = c.tpos.x + off[0] * cr + off[2] * sr, wz = c.tpos.z - off[0] * sr + off[2] * cr, wy = Math.max(S.truck.position.y + off[1], G.terrainY(wx, wz) + 2.5);
-      setCam(wx, wy, wz, c.tpos.x, S.truck.position.y + 1.6, c.tpos.z);
+      // вертолёт закрывает дверь, отрывается от земли, наклоняется и уходит вдаль; камера смотрит с земли
+      const tt = t - 6.6, H = S.heli, g = H.group;
+      if (!c.camFrom) { c.camFrom = camera.position.clone(); c.hx = g.position.x; c.hz = g.position.z; }
+      H.setDoor(smooth(clamp(tt / 1.2, 0, 1)));
+      const vz = tt < 1.6 ? 0 : clamp((tt - 1.6) * 2.2, 0, 9), spd = tt < 3.4 ? 0 : clamp((tt - 3.4) * 4.5, 0, 30);
+      c.alt += vz * dt; c.v = spd;
+      const fwd = new THREE.Vector3(-Math.sin(S.ry), 0, -Math.cos(S.ry)); c.hx += fwd.x * spd * dt; c.hz += fwd.z * spd * dt;
+      g.position.set(c.hx, c.alt, c.hz); g.rotation.set(-clamp(spd / 30, 0, 1) * 0.2, S.ry, Math.sin(tt * 1.3) * 0.02, 'YXZ');
+      audio.heli(true, 0.09);
+      const cp = lw(S, 9, -3), u = smooth(clamp(tt / 2.5, 0, 1)), ty = 1.8 + tt * 0.7;
+      setCam(lerp(c.camFrom.x, cp[0], u), lerp(c.camFrom.y, ty, u), lerp(c.camFrom.z, cp[1], u), g.position.x, g.position.y + 1.5, g.position.z);
       if (tt > 11.5) ui.setFade(smooth(clamp((tt - 11.5) / 2.2, 0, 1)));
       if (tt > 14 && !c.done) { c.done = true; st.state = 3; ui.setFade(1); ui.letterbox(0); audio.engine(false); audio.heli(false); audio.wind(false); audio.pad(true); c.tt = 0; }
     }
@@ -233,6 +253,7 @@ export function createFinale(G, ui, audio, cut, people) {
     const S = st.site, c = st.cin; audio.stopAll(); ui.reset(); G.menuClose && G.menuClose();
     if (c && c.hero) { scene.remove(c.hero.group); }
     if (S && S.truck) { scene.remove(S.truck); const i = G.colliders.indexOf(S.truckCol); if (i >= 0) G.colliders.splice(i, 1); }
+    if (S && S.heli) { S.heli = null; if (S.dust) S.dust.sprites.forEach(sp => { sp.visible = false; }); }
     const sx = S ? S.board[0] : 0, sz = S ? S.board[1] : 0; camera.position.set(sx + Math.sin(S.ry) * 0, G.terrainY(sx, sz) + 1.7, sz + 2.5 * Math.cos(S.ry)); G.yaw = S.ry; G.pitch = 0; camera.rotation.set(0, S.ry, 0, 'YXZ');
     st.state = 4; st.cin = null; cut.active = null; renderer.domElement.style.filter = ''; G.requestLock(); G.notify('Ты в безопасности. Пока.');
   }
