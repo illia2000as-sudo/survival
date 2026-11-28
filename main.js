@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { initCutscenes } from './scenes/index.js'; // вступление и финал (папка scenes)
 import { createWeaponModels } from './models/weapons.js'; // охотничья винтовка и мачете
 import { createItemModels } from './models/items.js'; // модели предметов: консервы, вода, аптечки, канистра, ящик патронов
+import { createJetModels } from './models/jet.js'; // истребитель, РПГ и ракета (админ)
 import { buildCity } from './world/city.js';       // город многоквартирных домов и стартовая квартира
 
 // --- Сохранения: мир строится от числа (зерна), поэтому его можно воссоздать точно таким же ---
@@ -705,6 +706,26 @@ function buildHouse(x, z, st) {
   col(x + 1.2, x + 2.7, z - 3.6, z - 3.0);
   dc(3.0, 0.02, 2.0, [0x6a2f2a, 0x2f4a5a, 0x4a4a2a][(hs(15) * 3 | 0) % 3], 0.2, 0.04, 0.3); dc(2.8, 0.025, 1.8, 0xc9b38a, 0.2, 0.045, 0.3); // ковёр
   dc(0.04, 0.6, 0.8, 0x4a3a2a, 3.56, 1.7, 0.6); dc(0.045, 0.5, 0.7, 0x7a8a6a, 3.57, 1.7, 0.6); // картина на стене
+
+  // 2.2.0: гостиная в центре: диван перед телевизором, журнальный столик, комод под окном, растения. Внутренние грани стен: x, z = ±3.6
+  const fab = [0x6a4a3a, 0x4a5a3a, 0x5a3a3a, 0x3a4a5a][(hs(16) * 4 | 0) % 4], fabD = mulCol(fab, 0.8), fabL = mulCol(fab, 1.2), wood1 = [0x7a5a38, 0x6a4a2a, 0x8a6a42][(hs(17) * 3 | 0) % 3], wood2 = mulCol(wood1, 0.72);
+  dc(1.9, 0.42, 0.85, fab, -0.2, 0.21, 0.2); dc(1.9, 0.5, 0.18, fabD, -0.2, 0.62, 0.55);
+  [-1.14, 0.74].forEach(ax => dc(0.18, 0.3, 0.85, fabD, ax, 0.5, 0.2)); [-0.65, 0.25].forEach(ax => dc(0.8, 0.1, 0.55, fabL, ax, 0.47, 0.1));
+  col(x - 1.15, x + 0.75, z - 0.25, z + 0.65);
+  dc(1.0, 0.04, 0.5, wood1, -0.2, 0.42, -1.3); [[-1, -1], [1, -1], [-1, 1], [1, 1]].forEach(([a, b]) => dc(0.04, 0.4, 0.04, wood2, -0.2 + a * 0.45, 0.2, -1.3 + b * 0.2));
+  dc(0.3, 0.015, 0.22, 0x8a3a2a, -0.35, 0.445, -1.3, 0, 0.3, 0); dc(0.09, 0.1, 0.09, 0xe0dccc, 0.1, 0.49, -1.25);
+  col(x - 0.7, x + 0.3, z - 1.55, z - 1.05);
+  dc(1.5, 0.5, 0.45, 0x2a2a2c, 0, 0.25, -3.35); dc(1.05, 0.62, 0.06, 0x101214, 0, 0.83, -3.5); dc(0.95, 0.54, 0.02, 0x1a2430, 0, 0.83, -3.465); dc(0.2, 0.03, 0.02, 0x3a5a7a, -0.3, 0.97, -3.455);
+  col(x - 0.75, x + 0.75, z - 3.6, z - 3.1);
+  dc(0.9, 0.5, 0.04, [0x6a7a8a, 0x8a6a4a, 0x5a7a5a][(hs(18) * 3 | 0) % 3], 0, 1.75, -3.58); dc(0.8, 0.4, 0.045, 0xb8a888, 0, 1.75, -3.56); // картина над телевизором
+  dc(0.45, 0.8, 1.3, wood1, -3.375, 0.4, 0.0); dc(0.49, 0.04, 1.34, wood2, -3.375, 0.82, 0.0);                       // комод под западным окном
+  [-0.4, 0.4].forEach(o => dc(0.02, 0.5, 0.5, wood2, -3.15, 0.4, o)); dc(0.2, 0.2, 0.28, 0x4a6a8a, -3.4, 0.94, -0.3); dc(0.2, 0.26, 0.2, 0xc9a227, -3.4, 0.97, 0.35);
+  col(x - 3.6, x - 3.15, z - 0.65, z + 0.65);
+  [[3.3, -1.5], [1.45, 3.3]].forEach(([px, pz], i) => { // два горшка с растениями
+    dc(0.34, 0.3, 0.34, 0x8a4a2a, px, 0.15, pz); dc(0.3, 0.03, 0.3, 0x3a2a1a, px, 0.31, pz);
+    [0, 0.8, 1.6].forEach((r, q) => dc(0.42 - q * 0.05, 0.9 + i * 0.2, 0.12, [0x3f6a2f, 0x4a7a35, 0x355a28][q], px, 0.75 + i * 0.1, pz, 0.15 * (q - 1), r, 0.12));
+    col(x + px - 0.17, x + px + 0.17, z + pz - 0.17, z + pz + 0.17);
+  });
 
   finish();
 }
@@ -3627,6 +3648,7 @@ function refuelNearest(amount) { // канистра: заправляет бл�
   best.fuel = Math.min(100, best.fuel + amount); notify('Транспорт заправлен'); return true;
 }
 function vehicleHud() {
+  if (drive === 'jet' && curJet) return jetHud();
   const v = drive === 'car' ? curCar : bike, name = drive === 'car' ? 'Джип' : 'Мотоцикл';
   return `${name}: ${Math.round(Math.abs(v.v) * 3.6)} км/ч   Бензин: ${Math.ceil(v.fuel)}%   [E] Выйти  [F] Фара  [C] Вид`;
 }
@@ -3817,7 +3839,7 @@ function updatePrompt() {
     }
   }
   if (riding) {
-    promptEl.textContent = drive === 'car' ? '[E] Выйти из джипа' : '[E] Слезть с мотоцикла';
+    promptEl.textContent = drive === 'car' ? '[E] Выйти из джипа' : drive === 'jet' ? '[E] Выйти из истребителя (на земле)' : '[E] Слезть с мотоцикла';
     promptEl.style.display = 'block';
   } else if (lookedBuilt) {
     promptEl.textContent = lookedBuilt.type === 'bed' ? '[E] Кровать: сохранить игру или лечь спать' : lookedBuilt.type === 'gate' ? (lookedBuilt.open ? '[E] Закрыть ворота' : '[E] Открыть ворота') : (lookedBuilt.open ? '[E] Закрыть дверь' : '[E] Открыть дверь');
@@ -3861,7 +3883,8 @@ function treeHint() { // E у дерева: подсказка, рубить н�
 }
 function interact() {
   if (sleeping) return; // клавиша E: слезть/сесть, верстак, ящик, куча, иначе подсказка про дерево
-  if (riding) return drive === 'car' ? dismountCar() : dismountBike();
+  if (riding) return drive === 'car' ? dismountCar() : drive === 'jet' ? dismountJet() : dismountBike();
+  if (jet && !lookedItem && !lookedAmmo && Math.hypot(jet.pos.x - camera.position.x, jet.pos.z - camera.position.z) < 7) return mountJet();
   if (lookedItem) return pickItem(lookedItem);
   if (lookedAmmo) return pickAmmo(lookedAmmo);
   if (lookedCar) return mountCar(lookedCar);
@@ -4751,6 +4774,7 @@ function renderMenu() {
     body += sec('Время') + wrap(btn('Утро 06:00', 'admtime:6') + btn('День 12:00', 'admtime:12') + btn('Вечер 19:00', 'admtime:19') + btn('Ночь 00:00', 'admtime:0'));
     body += sec('Погода') + wrap(btn('Ясно', 'admwx:clear') + btn('Пасмурно', 'admwx:cloud') + btn('Дождь', 'admwx:rain') + btn('Гроза', 'admwx:storm'));
     body += sec('Опыт и орда') + wrap(btn('+500 XP', 'admxp:500') + btn('Орда сейчас', 'admhorde:1'));
+    body += sec('Транспорт и оружие (админ)') + wrap(btn('Истребитель', 'admjet:spawn') + btn('Притянуть', 'admjet:come') + btn('Убрать', 'admjet:remove') + btn('РПГ', 'admweapon:rpg') + btn('+5 ракет', 'admammo:rpg'));
     body += sec('Телепорт') + wrap(btn('На старт', 'admtp:home') + btn('Склад 1', 'admtp:w1') + btn('Склад 2', 'admtp:w2') + btn('Подвал 1', 'admtp:b1') + btn('Подвал 2', 'admtp:b2') + btn('Ближайший ящик', 'admtp:case') + btn('К мотоциклу', 'admtp:bike') + btn('Заправка', 'admtp:gs') + btn('Гараж', 'admtp:gar') + btn('Водокачка', 'admtp:wt') + btn('К джипу', 'admtp:car') + btn('Блокпост', 'admtp:op') + btn('Арсенал', 'admtp:ar'));
   }
   if (menuTab === 'build') { // карточки деталей с иконками, ценой и подсказками
@@ -5356,7 +5380,7 @@ function removePlayer(id) {
   addChat('', `${p.name} вышел из игры`);
 }
 function ownState() {
-  const v = riding ? (drive === 'car' ? curCar : bike) : null;
+  const v = riding ? (drive === 'car' ? curCar : drive === 'jet' ? null : bike) : null;
   return {
     x: +camera.position.x.toFixed(2), y: +camera.position.y.toFixed(2), z: +camera.position.z.toFixed(2), yaw: +yaw.toFixed(2),
     w: riding ? drive : weapon, hp: Math.ceil(health),
@@ -5367,6 +5391,7 @@ function ownState() {
 // Зомби: хозяин считает, клиенты показывают
 function pickTarget(z) { // ближайший игрок (у хозяина - и удалённые тоже)
   let best = { x: camera.position.x, z: camera.position.z, y: camera.position.y, remote: null };
+  if (riding && drive === 'jet' && curJet && curJet.alt > 4) best = { x: 1e5, z: 1e5, y: 0, remote: null }; // лётчика в воздухе зомби не достают
   let bd = Math.hypot(best.x - z.mesh.position.x, best.z - z.mesh.position.z);
   if (net.role === 'host') net.players.forEach(p => { const d = Math.hypot(p.x - z.mesh.position.x, p.z - z.mesh.position.z); if (d < bd) { bd = d; best = { x: p.x, z: p.z, y: p.y, remote: p }; } });
   return best;
@@ -5593,10 +5618,12 @@ function adminAction(act, arg, arg2) {
     if (arg === 'ak' || arg === 'all') { hasAK = true; akReserve += 90; if (arg === 'ak') { weapon = 'ak'; drawT = 0; } }
     if (arg === 'rifle' || arg === 'all') { hasRifle = true; rfReserve += 20; if (arg === 'rifle') { weapon = 'rifle'; drawT = 0; } }
     if (arg === 'machete' || arg === 'all') { hasMachete = true; if (arg === 'machete') { weapon = 'machete'; drawT = 0; } }
+    if (arg === 'rpg' || arg === 'all') { hasRPG = true; rpgReserve += 5; rpgLoaded = 1; rpgReloadT = -1; if (arg === 'rpg') { weapon = 'rpg'; drawT = 0; } }
     notify('Оружие выдано');
     return;
   }
   if (act === 'admammo') {
+    if (arg === 'rpg') { hasRPG = true; rpgReserve += 5; notify('+5 ракет'); return; }
     if (arg === 'pistol') reserve += 50; else if (arg === 'ak') { hasAK = true; akReserve += 90; } else if (arg === 'rifle') { hasRifle = true; rfReserve += 20; } else { hasShotgun = true; sgReserve += 50; }
     notify('+50 патронов');
     return;
@@ -5636,6 +5663,12 @@ function adminAction(act, arg, arg2) {
       if (bike.collider) removeFrom(colliders, bike.collider);
       scene.remove(bike.rig.root); bike = null; notify('Мотоцикл убран');
     }
+    return;
+  }
+  if (act === 'admjet') { // админ-истребитель: spawn - появляется перед тобой, come - притянуть, remove - убрать
+    if (arg === 'spawn') { if (riding) return notify('Сначала выйди из транспорта'); const p = front(16); resolveCollisions(p, 6); spawnJet(p.x, p.z, yaw); notify('Истребитель рядом: подойди и жми E'); }
+    else if (arg === 'come') { if (!jet) return notify('Истребителя нет'); if (riding && drive === 'jet') return notify('Ты уже в нём'); unparkJetCollider(jet); const p = front(16); resolveCollisions(p, 6); jet.pos.set(p.x, terrainY(p.x, p.z), p.z); jet.q.setFromEuler(new THREE.Euler(0, yaw, 0, 'YXZ')); jet.speed = 0; parkJetCollider(jet); notify('Истребитель притянут'); }
+    else if (arg === 'remove') { if (!jet) return notify('Истребителя нет'); removeJet(); notify('Истребитель убран'); }
     return;
   }
   if (act === 'admcar') {
@@ -5712,7 +5745,7 @@ addEventListener('keydown', e => {
   }
   if (e.code === 'KeyE') interact();
   if (e.code === 'KeyF') {
-    if (riding) { if (drive === 'car' && curCar) curCar.light = !curCar.light; else if (bike) bike.light = !bike.light; } // фары
+    if (riding) { if (drive === 'car' && curCar) curCar.light = !curCar.light; else if (drive === 'bike' && bike) bike.light = !bike.light; } // фары
     else { flashOn = !flashOn; flash.intensity = flashOn ? 25 : 0; }
   }
 });
@@ -5732,6 +5765,7 @@ renderer.domElement.addEventListener('contextmenu', e => e.preventDefault());
 addEventListener('mouseup', e => { if (e.button === 0) mouseDown = false; if (e.button === 2) aiming = false; });
 addEventListener('mousemove', e => {
   if (document.pointerLockElement !== renderer.domElement) return;
+  if (riding && drive === 'jet') { jetIn.x += e.movementX; jetIn.y += e.movementY; return; } // в истребителе мышь - тангаж и поворот
   const zs = 1 / (1 + 2.2 * rfAim); // в оптике мышь медленнее
   yaw -= e.movementX * 0.002 * SETTINGS.sens * zs;
   pitch = Math.max(-1.5, Math.min(1.5, pitch - e.movementY * 0.002 * SETTINGS.sens * zs));
@@ -5747,6 +5781,7 @@ function switchWeapon() { // клавиша Q
   if (hasAK) owned.push('ak');
   if (hasRifle) owned.push('rifle');
   if (hasMachete) owned.push('machete');
+  if (hasRPG) owned.push('rpg');
   if (owned.length < 2 || reloading || sgReloading || akReloading || rfReloading || rfCycleT >= 0 || sgRacking || swingT >= 0 || cool > 0.3) return;
   weapon = owned[(owned.indexOf(weapon) + 1) % owned.length];
   drawT = 0; aiming = false;
@@ -5754,6 +5789,7 @@ function switchWeapon() { // клавиша Q
 
 function startReload() { // клавиша R
   if (health <= 0 || menuOpen || riding || weapon === 'axe' || weapon === 'machete' || heldSlot >= 0) return;
+  if (weapon === 'rpg') return rpgReload();
   if (weapon === 'rifle') { // винтовка: открыть затвор и дослать патроны в магазин
     if (rfReloading || rfCycleT >= 0 || rfAmmo >= RF_MAG) return;
     if (rfReserve <= 0) return notify('Нет патронов для винтовки');
@@ -5863,6 +5899,7 @@ function attackAK() { // автомат: очередь при зажатой к
 
 function attack() {
   if (health <= 0 || riding || sleeping || cool > 0 || drawT < 0.7 || heldSlot >= 0) return;
+  if (weapon === 'rpg') return attackRPG();
   if (weapon === 'shotgun') return attackShotgun();
   if (weapon === 'axe') return startSwing();
   if (weapon === 'ak') return attackAK();
@@ -6114,6 +6151,195 @@ function updateBloodMoon(dt) {
     skyMat.uniforms.top.value.lerp(r1, w); skyMat.uniforms.bottom.value.lerp(r2, w); scene.background.lerp(r2, w); scene.fog.color.lerp(r2, w * 0.9);
   }
 }
+// --- 2.3.0: админ-транспорт «Истребитель» и админ-оружие «РПГ»; общие ракеты и взрывы ---
+const JM = createJetModels({ THREE, zBoxes, mulberry }); // models/jet.js
+let hasRPG = false, rpgLoaded = 1, rpgReserve = 0, rpgReloadT = -1, rpgRecoil = 0;
+const rpg = JM.createRPG(); rpg.root.position.set(0.2, -0.26, -0.55); rpg.root.rotation.y = 0.04; rpg.root.visible = false; camera.add(rpg.root);
+const rockets = [], scorches = [], fireMat = new THREE.MeshBasicMaterial({ color: 0xff8a2a, transparent: true, opacity: 0.85, depthWrite: false, blending: THREE.AdditiveBlending });
+const scorchMat = new THREE.MeshBasicMaterial({ color: 0x14110e, transparent: true, opacity: 0.6, depthWrite: false });
+const boomLight = new THREE.PointLight(0xffa040, 0, 55, 2); scene.add(boomLight); let boomT = 0;
+const _ra = new THREE.Vector3(), _rb = new THREE.Vector3(), _rd = new THREE.Vector3(), _rf = new THREE.Vector3(), _rq = new THREE.Quaternion();
+function noiseBurst(vol, dur, f0, f1, hp) { // короткий шум: выстрел, взрыв, пуск ракеты
+  const a = wxAudio(); if (!a || !wxNoise) return;
+  try { if (a.state === 'suspended') a.resume(); } catch (err) { /* нужен клик */ }
+  if (a.state !== 'running') return;
+  const t = a.currentTime, src = a.createBufferSource(); src.buffer = wxNoise;
+  const lp = a.createBiquadFilter(); lp.type = hp ? 'highpass' : 'lowpass'; lp.frequency.setValueAtTime(f0, t); lp.frequency.exponentialRampToValueAtTime(f1, t + dur);
+  const g = a.createGain(); g.gain.setValueAtTime(vol * SETTINGS.volume + 0.001, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  src.connect(lp); lp.connect(g); g.connect(a.destination); src.start(t); src.stop(t + dur + 0.05);
+}
+function boom(x, y, z, R, dmg) { // взрыв: огненный шар, дым, пыль, свет, воронка, урон зомби и игроку, тряска камеры
+  const rv = () => Math.random() - 0.5;
+  for (let i = 0; i < 12; i++) { _p.set(x + rv() * R * 0.3, y + Math.random() * R * 0.15, z + rv() * R * 0.3); addPuff(_p, new THREE.Vector3(rv() * R * 1.2, 1.5 + Math.random() * R * 0.5, rv() * R * 1.2), fireMat, 0.5, R * 0.9); }
+  for (let i = 0; i < 12; i++) { _p.set(x + rv() * R * 0.4, y + 0.5 + Math.random() * R * 0.3, z + rv() * R * 0.4); addPuff(_p, new THREE.Vector3(rv() * R * 0.5, 2 + Math.random() * R * 0.4, rv() * R * 0.5), smokeMat, 2.4, R * 1.3); }
+  for (let i = 0; i < 8; i++) { _p.set(x + rv() * R * 0.5, terrainY(x, z) + 0.2, z + rv() * R * 0.5); addPuff(_p, new THREE.Vector3(rv() * R * 1.6, 0.8 + Math.random() * 2, rv() * R * 1.6), dustMat, 1.6, R * 0.8); }
+  boomLight.position.set(x, y + 1.5, z); boomT = 0.5;
+  const gy = terrainY(x, z);
+  if (y - gy < 3) { // воронка: тёмное пятно на земле
+    const m = new THREE.Mesh(new THREE.CircleGeometry(R * 0.45, 18), scorchMat); m.rotation.x = -Math.PI / 2; m.position.set(x, gy + 0.05, z); scene.add(m); scorches.push({ m, t: 30 });
+    if (scorches.length > 10) { const o = scorches.shift(); scene.remove(o.m); o.m.geometry.dispose(); }
+  }
+  for (const zb of zombies) { // урон падает к краю взрыва
+    const dx = zb.mesh.position.x - x, dy = zb.mesh.position.y + 1 - y, dz = zb.mesh.position.z - z, d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (d < R) damageZombie(zb, dmg * Math.pow(1 - d / R, 0.7) + 3);
+  }
+  const dp = Math.hypot(camera.position.x - x, camera.position.y - y, camera.position.z - z);
+  if (dp < R * 0.7 && health > 0 && !(riding && drive === 'jet')) { health -= Math.round(28 * (1 - dp / (R * 0.7))); notify('Взрывной волной задело!'); }
+  kick += Math.max(0, 0.14 * (1 - dp / 50)); noiseBurst(Math.max(0.1, 1 - dp / 140) * 0.9, 1.8, 1800, 90, false);
+}
+function launchRocket(pos, dir, spd, dmg, R) {
+  const r = JM.createRocket(); r.root.position.copy(pos); _rf.copy(pos).add(dir); r.root.lookAt(_rf); scene.add(r.root);
+  rockets.push({ r, v: dir.clone().multiplyScalar(spd), dir: dir.clone(), life: 7, dmg, R, tr: 0 });
+  noiseBurst(0.35, 0.6, 600, 3000, true);
+}
+function updateRockets(dt) {
+  if (boomT > 0) { boomT -= dt; boomLight.intensity = Math.max(0, boomT / 0.5) * 260; } else boomLight.intensity = 0;
+  for (let i = scorches.length - 1; i >= 0; i--) { const s = scorches[i]; s.t -= dt; if (s.t <= 0) { scene.remove(s.m); s.m.geometry.dispose(); scorches.splice(i, 1); } }
+  if (dt <= 0) return;
+  for (let i = rockets.length - 1; i >= 0; i--) {
+    const k = rockets[i], p = k.r.root.position; k.life -= dt; _ra.copy(p);
+    k.v.addScaledVector(k.dir, 40 * dt); k.v.y -= 1.2 * dt; p.addScaledVector(k.v, dt);
+    _rf.copy(p).add(k.v); k.r.root.lookAt(_rf); k.r.flame.scale.set(0.5, 0.5, 1.1 + Math.random() * 0.8);
+    k.tr -= dt; if (k.tr <= 0) { k.tr = 0.035; _p.copy(p).addScaledVector(k.dir, -0.6); addPuff(_p, new THREE.Vector3((Math.random() - 0.5) * 0.4, 0.2, (Math.random() - 0.5) * 0.4), smokeMat, 1.1, 1.1); }
+    let hit = null; const gy = terrainY(p.x, p.z);
+    if (p.y <= gy + 0.15) hit = new THREE.Vector3(p.x, gy, p.z);
+    if (!hit) { _rd.copy(p).sub(_ra); const len = _rd.length(); if (len > 0.001) { raycaster.set(_ra, _rd.normalize()); raycaster.far = len + 0.2; const h = raycaster.intersectObjects(blockers, false); raycaster.far = Infinity; if (h.length) hit = h[0].point.clone(); } }
+    if (!hit) for (const z of zombies) { const dx = z.mesh.position.x - p.x, dz = z.mesh.position.z - p.z; if (dx * dx + dz * dz < 1.3 && p.y > z.mesh.position.y - 0.2 && p.y < z.mesh.position.y + 2.4 * z.cfg.sy) { hit = p.clone(); break; } }
+    if (hit || k.life <= 0) { scene.remove(k.r.root); rockets.splice(i, 1); const h = hit || p.clone(); boom(h.x, h.y, h.z, k.R, k.dmg); }
+  }
+}
+// --- РПГ: ЛКМ выстрел, R перезарядка (2 с), урон по площади ---
+function rpgHud() { return `РПГ-7: ${rpgReloadT >= 0 ? 'заряжаю...' : rpgLoaded ? 'заряжен' : 'пуст'}   Ракет в запасе: ${rpgReserve}`; }
+function rpgReload() { if (rpgReloadT >= 0 || rpgLoaded >= 1) return; if (rpgReserve <= 0) return notify('Ракет нет'); rpgReloadT = 0; }
+function attackRPG() {
+  if (rpgReloadT >= 0) return;
+  if (rpgLoaded <= 0) { if (noticeT <= 0) notify(rpgReserve > 0 ? 'Не заряжено, нажми R' : 'Ракет нет'); return; }
+  rpgLoaded--; shotCount++; cool = 1.3; rpgRecoil = 1; kick += 0.09;
+  camera.getWorldDirection(_rd); _rb.set(0.22, -0.18, -1.1).applyQuaternion(camera.quaternion).add(camera.position);
+  launchRocket(_rb, _rd.clone(), 38, 75, 8.5);
+  for (let i = 0; i < 6; i++) { _p.copy(camera.position).addScaledVector(_rd, -0.8).add(new THREE.Vector3((Math.random() - 0.5) * 0.4, -0.2 + Math.random() * 0.2, (Math.random() - 0.5) * 0.4)); addPuff(_p, _rd.clone().multiplyScalar(-3 - Math.random() * 3), i % 2 ? dustMat : smokeMat, 0.9, 2); } // обратная струя
+  if (rpgReserve > 0) rpgReloadT = -0.5;
+}
+function updateRPG(dt) {
+  rpg.root.visible = !buildMode && !riding && heldSlot < 0 && weapon === 'rpg' && health > 0 && !sleeping && gameStarted;
+  if (rpgReloadT < 0 && rpgReloadT > -1 && rpgLoaded <= 0) { rpgReloadT += dt; if (rpgReloadT >= 0) rpgReloadT = 0; } // пауза после выстрела, затем авто-перезарядка
+  else if (rpgReloadT >= 0) { rpgReloadT += dt; if (rpgReloadT >= 2) { rpgReloadT = -1; rpgLoaded = 1; rpgReserve--; } }
+  if (!rpg.root.visible) return;
+  rpgRecoil *= Math.exp(-dt * 6);
+  const draw = clamp(drawT, 0, 1), rl = rpgReloadT >= 0 ? Math.sin(Math.min(1, rpgReloadT / 2) * Math.PI) : 0;
+  rpg.warhead.visible = rpgLoaded > 0 && !(rpgReloadT >= 0 && rpgReloadT < 1.2);
+  rpg.root.position.set(0.2, -0.26 - (1 - draw) * 0.45 - rl * 0.16, -0.55 + rpgRecoil * 0.2);
+  rpg.root.rotation.set(rpgRecoil * 0.18 + (1 - draw) * 0.5 + rl * 0.55, 0.04, rl * 0.25);
+}
+// --- Истребитель: E - сесть/выйти, W/S тяга, мышь - тангаж и поворот, A/D - крен, Shift - форсаж, Space - тормоз, ЛКМ - пушка, F - ракеты, C - вид ---
+let jet = null, curJet = null;
+const jetIn = { x: 0, y: 0 }, jetCam = new THREE.Vector3(), jetBulGeo = new THREE.BoxGeometry(0.07, 0.07, 1.8), jetBulMat = new THREE.MeshBasicMaterial({ color: 0xffd25a });
+const _jf = new THREE.Vector3(), _jr = new THREE.Vector3(), _ju = new THREE.Vector3(), _jq = new THREE.Quaternion();
+function parkJetCollider(j) { if (j.collider) return; const x = j.pos.x, z = j.pos.z; j.collider = { minX: x - 2.6, maxX: x + 2.6, minZ: z - 2.6, maxZ: z + 2.6 }; colliders.push(j.collider); }
+function unparkJetCollider(j) { if (j.collider) { removeFrom(colliders, j.collider); j.collider = null; } }
+function removeJet() {
+  if (!jet) return;
+  if (riding && drive === 'jet') { riding = false; drive = null; curJet = null; camera.up.set(0, 1, 0); camera.position.y = terrainY(camera.position.x, camera.position.z) + 1.7; pitch = 0; }
+  unparkJetCollider(jet); jet.bul.forEach(b => scene.remove(b.m)); scene.remove(jet.rig.root); jet = null;
+}
+function spawnJet(x, z, heading) {
+  removeJet();
+  const rig = JM.createJet(); rig.root.position.set(x, terrainY(x, z), z); scene.add(rig.root);
+  jet = { rig, pos: rig.root.position, q: new THREE.Quaternion().setFromEuler(new THREE.Euler(0, heading, 0, 'YXZ')), speed: 0, thr: 0, alt: 0, on: false, gas: 0, rpm: 0, gunT: 0, missT: 0, side: 0, bul: [], crashed: 0, pitchIn: 0, rollIn: 0, v: 0, fuel: 100, ab: 0, gp: 0 };
+  rig.root.quaternion.copy(jet.q); parkJetCollider(jet); return jet;
+}
+function mountJet() {
+  if (!jet || riding || health <= 0) return;
+  riding = true; drive = 'jet'; curJet = jet; unparkJetCollider(jet); jet.on = true; camView = 'chase'; jetCam.copy(jet.pos).add(new THREE.Vector3(0, 6, 18));
+  try { bActx = bActx || new (window.AudioContext || window.webkitAudioContext)(); if (bActx.state === 'suspended') bActx.resume(); } catch (err) { bActx = null; }
+  notify('W/S - тяга, мышь - тангаж/поворот, A/D - крен, Shift - форсаж, Space - тормоз, ЛКМ - пушка, F - ракеты, C - вид, E - выйти (на земле)');
+}
+function dismountJet() {
+  if (!riding || drive !== 'jet' || !curJet) return;
+  const j = curJet; if (j.alt > 1.5 || j.speed > 9) return notify('Выйти можно только на земле на малой скорости');
+  riding = false; drive = null; j.on = false; j.speed = 0; j.thr = 0; j.gas = 0; curJet = null; camera.up.set(0, 1, 0);
+  _jr.set(1, 0, 0).applyQuaternion(j.q); const hx = j.pos.x - _jr.x * 3.4, hz = j.pos.z - _jr.z * 3.4;
+  camera.position.set(hx, terrainY(hx, hz) + 1.7, hz); resolveCollisions(camera.position, 0.4); _jf.set(0, 0, -1).applyQuaternion(j.q); yaw = Math.atan2(-_jf.x, -_jf.z); pitch = 0; camera.rotation.z = 0;
+  parkJetCollider(j);
+}
+function jetCrash(j, why) { // жёсткая посадка: взрыв на месте, самолёт цел (админ-транспорт), скорость обнуляется
+  boom(j.pos.x, j.pos.y + 1, j.pos.z, 11, 110); j.speed = 0; j.thr = 0; j.crashed = 1.2; _jf.set(0, 0, -1).applyQuaternion(j.q); j.q.setFromEuler(new THREE.Euler(0, Math.atan2(-_jf.x, -_jf.z), 0, 'YXZ')); j.pos.y = terrainY(j.pos.x, j.pos.z); notify(why || 'Жёсткая посадка!');
+}
+function updateJet(dt) {
+  const J = curJet, q = J.q, pos = J.pos, mx = jetIn.x, my = jetIn.y; jetIn.x = 0; jetIn.y = 0;
+  if (dt <= 0) return;
+  const k = SETTINGS.sens * 0.0022, ty = terrainY(pos.x, pos.z), ab = (keys.ShiftLeft || keys.ShiftRight) ? 1 : 0, brake = keys.Space ? 1 : 0, rollIn = (keys.KeyD ? 1 : 0) - (keys.KeyA ? 1 : 0);
+  J.thr = clamp(J.thr + ((keys.KeyW ? 1 : 0) - (keys.KeyS ? 1 : 0)) * 0.55 * dt, 0, 1); J.ab = ab; J.gas = J.thr; J.rpm = 2200 + J.thr * 5200 + ab * 1500;
+  const target = J.thr * 75 + ab * 55 * (J.thr > 0.3 ? 1 : 0);
+  J.speed += (target - J.speed) * Math.min(1, (target > J.speed ? 0.55 : 0.3) * dt); J.speed = Math.max(0, J.speed - brake * 28 * dt);
+  J.crashed = Math.max(0, J.crashed - dt);
+  _jf.set(0, 0, -1).applyQuaternion(q);
+  const onGround = pos.y <= ty + 0.03;
+  if (onGround && !(_jf.y > 0.06 && J.speed > 34)) { // на земле: руление, разбег, подъём носа после 34 м/с
+    let hd = Math.atan2(-_jf.x, -_jf.z); const steer = Math.min(1, J.speed / 6);
+    hd += (-mx * k * 0.8 - rollIn * 0.7 * dt) * steer; J.gp = J.speed > 34 ? clamp(J.gp - my * k * 0.5, 0, 0.5) : J.gp * Math.exp(-dt * 4);
+    q.setFromEuler(new THREE.Euler(J.gp, hd, 0, 'YXZ')); _jf.set(0, 0, -1).applyQuaternion(q);
+    pos.x += _jf.x * J.speed * dt; pos.z += _jf.z * J.speed * dt;
+    if (J.gp > 0.08 && J.speed > 34) pos.y = ty + 0.2; else pos.y = terrainY(pos.x, pos.z);
+  } else { // полёт: вращение вокруг локальных осей, самовыравнивание крена, сваливание на малой скорости
+    const stall = clamp((30 - J.speed) / 30, 0, 1);
+    const dPitch = clamp(-my * k, -0.07, 0.07) + stall * -0.5 * dt, dYaw = clamp(-mx * k * 0.55, -0.05, 0.05), dRoll = clamp(-mx * k * 0.9, -0.08, 0.08) - rollIn * 2.3 * dt;
+    _jr.set(1, 0, 0).applyQuaternion(q); const lvl = rollIn === 0 && Math.abs(_jf.y) < 0.9 ? -_jr.y * 0.9 * dt : 0;
+    _jq.setFromEuler(new THREE.Euler(dPitch, dYaw, dRoll + lvl, 'ZYX')); q.multiply(_jq).normalize();
+    _jf.set(0, 0, -1).applyQuaternion(q);
+    pos.x += _jf.x * J.speed * dt; pos.y += (_jf.y * J.speed - stall * 24) * dt; pos.z += _jf.z * J.speed * dt;
+    const g2 = terrainY(pos.x, pos.z); _ju.set(0, 1, 0).applyQuaternion(q);
+    if (pos.y < g2 + 0.0) { if (_jf.y * J.speed < -20 || _ju.y < 0.55 || J.speed < 12) jetCrash(J, 'Жёсткая посадка! Взрыв'); else { J.speed *= 0.97; _jf.y = 0; _jf.normalize(); q.setFromEuler(new THREE.Euler(0, Math.atan2(-_jf.x, -_jf.z), 0, 'YXZ')); pos.y = g2; } }
+  }
+  if (pos.y - terrainY(pos.x, pos.z) < 4) { // у земли: стены, деревья, постройки
+    const pp = { x: pos.x, z: pos.z }; resolveCollisions(pp, 2.6);
+    if (Math.hypot(pp.x - pos.x, pp.z - pos.z) > 0.02) { if (J.speed > 22 && pos.y - terrainY(pos.x, pos.z) > 0.6) jetCrash(J, 'Врезался! Взрыв'); else J.speed *= 0.5; pos.x = pp.x; pos.z = pp.z; }
+  }
+  if (Math.abs(pos.x) > 195 || Math.abs(pos.z) > 195) { pos.x = clamp(pos.x, -195, 195); pos.z = clamp(pos.z, -195, 195); J.speed *= 0.7; if (noticeT <= 0) notify('Граница мира: разворачивайся'); }
+  J.alt = pos.y - terrainY(pos.x, pos.z); J.pitchIn = clamp(-my * k * 12, -1, 1); J.rollIn = rollIn;
+  // оружие: пушка (ЛКМ) очередями по две трассы, ракеты (F) с подвески, поочерёдно
+  J.gunT -= dt; J.missT -= dt;
+  if (mouseDown && J.gunT <= 0 && !menuOpen) {
+    J.gunT = 0.055; J.rig.root.updateMatrixWorld(true);
+    J.rig.muzzles.forEach(o => { o.getWorldPosition(_rb); const m = new THREE.Mesh(jetBulGeo, jetBulMat); m.position.copy(_rb); _rf.copy(_jf).add(new THREE.Vector3((Math.random() - 0.5) * 0.012, (Math.random() - 0.5) * 0.012, (Math.random() - 0.5) * 0.012)).normalize(); m.lookAt(_rb.clone().add(_rf)); scene.add(m); J.bul.push({ m, v: _rf.clone().multiplyScalar(300 + J.speed), life: 1.4 }); });
+    if ((J.side = (J.side + 1) % 3) === 0) noiseBurst(0.18, 0.08, 1200, 300, true);
+  }
+  if (keys.KeyF && J.missT <= 0) { // ракета с очередного узла подвески
+    J.missT = 0.7; J.rig.root.updateMatrixWorld(true); J.podN = ((J.podN || 0) + 1) % 4; J.rig.pods[J.podN].getWorldPosition(_rb); launchRocket(_rb, _jf.clone(), J.speed + 30, 95, 11);
+  }
+  for (let i = J.bul.length - 1; i >= 0; i--) { // трассы: полёт, попадания в зомби и землю
+    const b = J.bul[i]; b.life -= dt; b.m.position.addScaledVector(b.v, dt); let dead = b.life <= 0;
+    const bp = b.m.position, gy = terrainY(bp.x, bp.z);
+    if (!dead && bp.y <= gy) { _p.set(bp.x, gy + 0.1, bp.z); addPuff(_p, new THREE.Vector3((Math.random() - 0.5) * 2, 2, (Math.random() - 0.5) * 2), dustMat, 0.7, 1.4); dead = true; }
+    if (!dead) for (const z of zombies) { const dx = z.mesh.position.x - bp.x, dz = z.mesh.position.z - bp.z; if (dx * dx + dz * dz < 1.6 && bp.y > z.mesh.position.y - 0.3 && bp.y < z.mesh.position.y + 2.5 * z.cfg.sy) { damageZombie(z, 6); dead = true; break; } }
+    if (dead) { scene.remove(b.m); J.bul.splice(i, 1); }
+  }
+}
+function updateJetVisuals(dt) {
+  if (!jet) return;
+  const J = jet, rig = J.rig, driving = riding && drive === 'jet' && curJet === J;
+  rig.root.quaternion.copy(J.q);
+  rig.front.visible = !(driving && camView === 'fp');
+  rig.gear.visible = J.alt < 9 || !driving;
+  const burn = driving ? 0.2 + J.thr * 1.4 + J.ab * 2.4 : 0;
+  rig.flame.visible = rig.flameCore.visible = driving && J.thr > 0.04;
+  rig.flame.scale.set(0.7 + J.ab * 0.3, 0.7 + J.ab * 0.3, (burn * 1.6) * (0.9 + Math.random() * 0.2)); rig.flameCore.scale.set(0.4, 0.4, burn * 1.0 * (0.9 + Math.random() * 0.2));
+  const tgtA = driving ? J.rollIn * 0.5 : 0; rig.aileronL.rotation.x += (-tgtA - rig.aileronL.rotation.x) * Math.min(1, 8 * dt); rig.aileronR.rotation.x += (tgtA - rig.aileronR.rotation.x) * Math.min(1, 8 * dt);
+  const tgtE = driving ? -J.pitchIn * 0.4 : 0; rig.elevL.rotation.x += (tgtE - J.rollIn * 0.15 - rig.elevL.rotation.x) * Math.min(1, 8 * dt); rig.elevR.rotation.x += (tgtE + J.rollIn * 0.15 - rig.elevR.rotation.x) * Math.min(1, 8 * dt);
+  if (driving && J.speed > 40 && dt > 0 && J.alt < 3) { _p.set(J.pos.x, terrainY(J.pos.x, J.pos.z) + 0.2, J.pos.z); if (Math.random() < 0.4) addPuff(_p, new THREE.Vector3((Math.random() - 0.5) * 3, 1, (Math.random() - 0.5) * 3), dustMat, 1, 1.6); }
+}
+function updateJetCamera(dt) {
+  if (!(riding && drive === 'jet' && curJet)) return;
+  const J = curJet; _jf.set(0, 0, -1).applyQuaternion(J.q);
+  if (camView === 'fp') { J.rig.root.updateMatrixWorld(true); J.rig.eye.getWorldPosition(_rb); camera.position.copy(_rb); camera.up.set(0, 1, 0); camera.quaternion.copy(J.q); }
+  else {
+    _rb.copy(J.pos).addScaledVector(_jf, -17).add(new THREE.Vector3(0, 4.5, 0)); jetCam.lerp(_rb, 1 - Math.exp(-Math.max(dt, 0.016) * 7)); camera.position.copy(jetCam);
+    const gy = terrainY(camera.position.x, camera.position.z) + 1.5; if (camera.position.y < gy) camera.position.y = gy;
+    camera.up.set(0, 1, 0); camera.lookAt(_rb.copy(J.pos).addScaledVector(_jf, 22));
+  }
+}
+function jetHud() { const J = curJet; return `Истребитель: ${Math.round(J.speed * 3.6)} км/ч   Высота: ${Math.round(J.alt)} м   Тяга: ${Math.round(J.thr * 100)}%${J.ab ? ' ФОРСАЖ' : ''}   [ЛКМ] пушка  [F] ракеты  [Shift] форсаж  [Space] тормоз  [C] вид  [E] выйти`; }
+function jetPrompt() { if (!riding && jet && gameStarted && Math.hypot(jet.pos.x - camera.position.x, jet.pos.z - camera.position.z) < 7 && promptEl.style.display === 'none') { promptEl.textContent = '[E] Сесть в истребитель'; promptEl.style.display = 'block'; } }
 function loop() {
   const rawDt = clock.getDelta();
   const dt = ((menuOpen && !net.active) || sleeping || !gameStarted || cutscenes.cut.active) ? 0 : Math.min(rawDt, 0.1); // в меню и во сне игра на паузе
@@ -6195,12 +6421,15 @@ function loop() {
   camera.rotation.set(pitch + kick, yaw, 0);
   if (bike) updateBikeVisuals(dt);
   updateCarVisuals(dt);
-  { const dv = riding ? (drive === 'car' ? curCar : bike) : null; bikeSound(!!dv && dv.on && health > 0, dv ? dv.rpm : 0, dv ? dv.gas : 0); }
+  if (curJet && riding && drive === 'jet' && health > 0) updateJet(dt); else { jetIn.x = 0; jetIn.y = 0; }
+  updateJetVisuals(dt); updateRockets(dt); updateRPG(dt);
+  { const dv = riding ? (drive === 'car' ? curCar : drive === 'jet' ? curJet : bike) : null; bikeSound(!!dv && dv.on && health > 0, dv ? dv.rpm : 0, dv ? dv.gas : 0); }
   updatePuffs(dt);
   updateBikeCamera();
   updateCarCamera();
+  updateJetCamera(dt);
   updateBuild(dt);
-  updatePrompt();
+  updatePrompt(); jetPrompt();
 
   // Анимация пистолета: покачивание, отдача, затвор, перезарядка
   gunT += dt; cool = Math.max(0, cool - dt); mzT = Math.max(0, mzT - dt);
@@ -6525,7 +6754,7 @@ function loop() {
     if (deathShown) { deathShown = false; deathScreen.style.display = 'none'; }
     hud.textContent =
       `День ${day}   Здоровье: ${Math.ceil(health)}   Еда: ${Math.ceil(hunger)}   Вода: ${Math.ceil(thirst)}\n` +
-      `Убито: ${kills}   ` + (riding ? vehicleHud() : heldSlot >= 0 ? heldHud() : weapon === 'pistol' ? `Пистолет: ${reloading ? 'перезарядка...' : ammo} / ${reserve}` : weapon === 'shotgun' ? `Дробовик: ${sgReloading ? 'заряжаю... ' : ''}${sgAmmo} / ${sgReserve}` : weapon === 'ak' ? `АК-47: ${akReloading ? 'перезарядка... ' : ''}${akAmmo} / ${akReserve}` : weapon === 'rifle' ? `Винтовка: ${rfReloading ? 'перезарядка... ' : rfCycleT >= 0 ? 'затвор... ' : ''}${rfAmmo} / ${rfReserve}   [ПКМ] Оптика` : weapon === 'machete' ? 'Мачете: ЛКМ - быстрый широкий удар' : 'Топор: ЛКМ - рубить и бить');
+      `Убито: ${kills}   ` + (riding ? vehicleHud() : heldSlot >= 0 ? heldHud() : weapon === 'rpg' ? rpgHud() : weapon === 'pistol' ? `Пистолет: ${reloading ? 'перезарядка...' : ammo} / ${reserve}` : weapon === 'shotgun' ? `Дробовик: ${sgReloading ? 'заряжаю... ' : ''}${sgAmmo} / ${sgReserve}` : weapon === 'ak' ? `АК-47: ${akReloading ? 'перезарядка... ' : ''}${akAmmo} / ${akReserve}` : weapon === 'rifle' ? `Винтовка: ${rfReloading ? 'перезарядка... ' : rfCycleT >= 0 ? 'затвор... ' : ''}${rfAmmo} / ${rfReserve}   [ПКМ] Оптика` : weapon === 'machete' ? 'Мачете: ЛКМ - быстрый широкий удар' : 'Топор: ЛКМ - рубить и бить');
   }
   const hh = String(Math.floor(gameHour)).padStart(2, '0');
   const mm = String(Math.floor((gameHour % 1) * 60)).padStart(2, '0');
@@ -6543,7 +6772,7 @@ function loop() {
   const uiShow = gameStarted ? '' : 'none'; // в главном меню игровой интерфейс скрыт, камера облетает базу
   hud.style.display = uiShow; hotbar.style.display = uiShow; avatar.style.display = uiShow; cross.style.display = uiShow; radar.style.display = uiShow; radarInfo.style.display = uiShow;
   if (!gameStarted) {
-    gun.visible = false; sgun.visible = false; axeRig.visible = false; akRig.visible = false; rifleRig.visible = false; macheteRig.visible = false;
+    gun.visible = false; sgun.visible = false; axeRig.visible = false; akRig.visible = false; rifleRig.visible = false; macheteRig.visible = false; rpg.root.visible = false;
     promptEl.style.display = 'none'; notice.textContent = '';
     const tt = performance.now() / 1000 * 0.07;
     camera.position.set(Math.cos(tt) * 34, 13, Math.sin(tt) * 34); camera.rotation.set(0, 0, 0); camera.lookAt(0, 3, 0);
